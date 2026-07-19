@@ -1,5 +1,6 @@
 import Ajv2020 from "ajv/dist/2020.js";
 import {
+  TARGET_CONTRACT_LIMITS,
   isApiErrorResponse,
   isApprovalResponse,
   isBootstrapResponse,
@@ -15,7 +16,12 @@ import {
   isProjectsResponse,
   isProposalResponse,
   isScopedPreviewUrl,
+  isTargetResolverResultV1,
   isTargetResponse,
+  isTargetV1,
+  type TargetResolverCandidateV1,
+  type TargetResolverResultV1,
+  type TargetV1,
 } from "@synapsegit-lp/contracts";
 import apiSchema from "../../../../packages/contracts/schemas/api-v1.schema.json";
 import {
@@ -51,6 +57,8 @@ const previewSetMode = {
   channelId: "channel-001",
   action: "set_mode",
   mode: "select",
+  targetKind: "element",
+  previewScale: 1,
   projectId: "project-001",
   snapshotId: "proposal-001",
   revisionId: "revision-accepted-001",
@@ -77,6 +85,216 @@ const previewDiagnostic = {
   code: "csp_blocked",
   sourceUnavailable: true,
 };
+
+const targetViewportV1 = {
+  cssWidth: 1440,
+  cssHeight: 900,
+  scrollX: 0,
+  scrollY: 120,
+  devicePixelRatio: 2,
+  visualViewportScale: 1,
+  previewScale: 0.8,
+};
+
+const targetDocumentV1 = {
+  cssWidth: 1440,
+  cssHeight: 4200,
+  layoutEpoch: 7,
+};
+
+const targetGeometryV1 = {
+  documentCssPixelRect: { x: 120, y: 320, width: 600, height: 120 },
+  viewportCssPixelRect: { x: 120, y: 200, width: 600, height: 120 },
+  viewportNormalizedRect: {
+    x: 120 / 1440,
+    y: 200 / 900,
+    width: 600 / 1440,
+    height: 120 / 900,
+  },
+};
+
+const elementAnchorV1 = {
+  tagName: "H1",
+  uniqueElementId: "hero-title",
+  role: "heading",
+  accessibleName: "Build a focused landing page",
+  domPath: "main:nth-child(1)>section:nth-child(1)>h1:nth-child(1)",
+  classTokens: ["hero-title", "display-xl"],
+  ancestorFingerprint: "main/section.hero",
+  siblingIndex: 0,
+};
+
+const targetV1Fixtures = [
+  {
+    schemaVersion: 1,
+    targetId: "target-page-001",
+    captureRevisionId: "revision-accepted-001",
+    captureSource: "accepted",
+    pagePath: "index.html",
+    kind: "page",
+    label: "Landing page",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+  },
+  {
+    schemaVersion: 1,
+    targetId: "target-block-001",
+    captureRevisionId: "revision-accepted-001",
+    captureSource: "accepted",
+    pagePath: "index.html",
+    kind: "block",
+    label: "Hero section",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+    geometry: targetGeometryV1,
+    elementAnchor: { ...elementAnchorV1, tagName: "SECTION" },
+    block: { source: "semantic", level: 1 },
+  },
+  {
+    schemaVersion: 1,
+    targetId: "target-element-001",
+    captureRevisionId: "revision-accepted-001",
+    captureSource: "accepted",
+    pagePath: "index.html",
+    kind: "element",
+    label: "Hero heading",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+    geometry: targetGeometryV1,
+    elementAnchor: elementAnchorV1,
+  },
+  {
+    schemaVersion: 1,
+    targetId: "target-text-001",
+    captureRevisionId: "revision-proposal-001",
+    captureSource: "proposal",
+    captureProposalId: "proposal-001",
+    pagePath: "index.html",
+    kind: "text",
+    label: "Hero heading text",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+    geometry: targetGeometryV1,
+    elementAnchor: elementAnchorV1,
+    textAnchor: {
+      exact: "focused landing page",
+      prefix: "Build a ",
+      suffix: " today",
+      startOffset: 8,
+      endOffset: 28,
+    },
+  },
+  {
+    schemaVersion: 1,
+    targetId: "target-point-001",
+    captureRevisionId: "revision-accepted-001",
+    captureSource: "accepted",
+    pagePath: "index.html",
+    kind: "point",
+    label: "Space below hero heading",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+    point: {
+      documentCssPixel: { x: 720, y: 520 },
+      viewportNormalized: { x: 0.5, y: 400 / 900 },
+    },
+    regionAnchor: {
+      containingBlock: { ...elementAnchorV1, tagName: "SECTION" },
+      previousVisibleSibling: elementAnchorV1,
+      layoutMode: "flex",
+    },
+  },
+  {
+    schemaVersion: 1,
+    targetId: "target-region-001",
+    captureRevisionId: "revision-accepted-001",
+    captureSource: "accepted",
+    pagePath: "index.html",
+    kind: "region",
+    label: "Hero content gap",
+    viewport: targetViewportV1,
+    document: targetDocumentV1,
+    geometry: targetGeometryV1,
+    regionAnchor: {
+      containingBlock: { ...elementAnchorV1, tagName: "SECTION" },
+      previousVisibleSibling: elementAnchorV1,
+      nextVisibleSibling: { ...elementAnchorV1, tagName: "P" },
+      layoutMode: "grid",
+    },
+  },
+] satisfies TargetV1[];
+
+const [
+  pageTargetV1,
+  blockTargetV1,
+  elementTargetV1,
+  textTargetV1,
+  pointTargetV1,
+  regionTargetV1,
+] = targetV1Fixtures as [
+  Extract<TargetV1, { kind: "page" }>,
+  Extract<TargetV1, { kind: "block" }>,
+  Extract<TargetV1, { kind: "element" }>,
+  Extract<TargetV1, { kind: "text" }>,
+  Extract<TargetV1, { kind: "point" }>,
+  Extract<TargetV1, { kind: "region" }>,
+];
+
+const resolverCandidateV1: TargetResolverCandidateV1 = {
+  candidateId: "candidate-hero-heading",
+  score: 0.94,
+  reasons: ["unique_id", "semantic_fingerprint", "geometry"],
+  summary: "H1 — Build a focused landing page",
+  elementAnchor: elementAnchorV1,
+  geometry: targetGeometryV1,
+};
+
+const targetResolverResultsV1 = [
+  {
+    schemaVersion: 1,
+    resolverVersion: 1,
+    targetId: "target-element-001",
+    captureRevisionId: "revision-accepted-001",
+    resolvedRevisionId: "revision-accepted-002",
+    status: "resolved",
+    selectedCandidateId: resolverCandidateV1.candidateId,
+    candidates: [resolverCandidateV1],
+  },
+  {
+    schemaVersion: 1,
+    resolverVersion: 1,
+    targetId: "target-element-001",
+    captureRevisionId: "revision-accepted-001",
+    resolvedRevisionId: "revision-accepted-002",
+    status: "ambiguous",
+    candidates: [
+      resolverCandidateV1,
+      {
+        ...resolverCandidateV1,
+        candidateId: "candidate-secondary-heading",
+        score: 0.82,
+        reasons: ["semantic_fingerprint", "dom_path"],
+        summary: "Secondary H1 candidate",
+      },
+    ],
+  },
+  {
+    schemaVersion: 1,
+    resolverVersion: 1,
+    targetId: "target-element-001",
+    captureRevisionId: "revision-accepted-001",
+    resolvedRevisionId: "revision-accepted-002",
+    status: "detached",
+    candidates: [],
+  },
+] satisfies TargetResolverResultV1[];
+
+const [resolvedTargetV1, ambiguousTargetV1, detachedTargetV1] =
+  targetResolverResultsV1 as [
+    TargetResolverResultV1 & { status: "resolved" },
+    TargetResolverResultV1 & { status: "ambiguous" },
+    TargetResolverResultV1 & { status: "detached" },
+  ];
 
 const bootstrap = bootstrapFixture();
 const project = projectResponseFixture();
@@ -188,6 +406,112 @@ const extraFieldCases: ReadonlyArray<
     {
       ...targetResponseFixture,
       target: { ...targetResponseFixture.target, extra: true },
+    },
+  ],
+  ["target v1 root", isTargetV1, { ...elementTargetV1, extra: true }],
+  [
+    "target v1 viewport",
+    isTargetV1,
+    {
+      ...elementTargetV1,
+      viewport: { ...elementTargetV1.viewport, extra: true },
+    },
+  ],
+  [
+    "target v1 document",
+    isTargetV1,
+    {
+      ...elementTargetV1,
+      document: { ...elementTargetV1.document, extra: true },
+    },
+  ],
+  [
+    "target v1 geometry",
+    isTargetV1,
+    {
+      ...elementTargetV1,
+      geometry: { ...elementTargetV1.geometry, extra: true },
+    },
+  ],
+  [
+    "target v1 geometry rect",
+    isTargetV1,
+    {
+      ...elementTargetV1,
+      geometry: {
+        ...elementTargetV1.geometry,
+        documentCssPixelRect: {
+          ...elementTargetV1.geometry?.documentCssPixelRect,
+          extra: true,
+        },
+      },
+    },
+  ],
+  [
+    "target v1 element anchor",
+    isTargetV1,
+    {
+      ...elementTargetV1,
+      elementAnchor: { ...elementTargetV1.elementAnchor, extra: true },
+    },
+  ],
+  [
+    "target v1 block metadata",
+    isTargetV1,
+    {
+      ...blockTargetV1,
+      block: { ...blockTargetV1.block, extra: true },
+    },
+  ],
+  [
+    "target v1 text anchor",
+    isTargetV1,
+    {
+      ...textTargetV1,
+      textAnchor: { ...textTargetV1.textAnchor, extra: true },
+    },
+  ],
+  [
+    "target v1 region anchor",
+    isTargetV1,
+    {
+      ...regionTargetV1,
+      regionAnchor: { ...regionTargetV1.regionAnchor, extra: true },
+    },
+  ],
+  [
+    "target v1 point",
+    isTargetV1,
+    {
+      ...pointTargetV1,
+      point: { ...pointTargetV1.point, extra: true },
+    },
+  ],
+  [
+    "target v1 point coordinates",
+    isTargetV1,
+    {
+      ...pointTargetV1,
+      point: {
+        ...pointTargetV1.point,
+        documentCssPixel: {
+          ...pointTargetV1.point.documentCssPixel,
+          extra: true,
+        },
+      },
+    },
+  ],
+  [
+    "target resolver root",
+    isTargetResolverResultV1,
+    { ...resolvedTargetV1, extra: true },
+  ],
+  [
+    "target resolver candidate",
+    isTargetResolverResultV1,
+    {
+      ...resolvedTargetV1,
+      candidates: [{ ...resolverCandidateV1, extra: true }],
     },
   ],
   [
@@ -344,6 +668,15 @@ describe("canonical API v1 schema", () => {
     ["projects", projects],
     ["import preview", importPreview],
     ["target", targetResponseFixture],
+    ["target v1 page", pageTargetV1],
+    ["target v1 block", blockTargetV1],
+    ["target v1 element", elementTargetV1],
+    ["target v1 text", textTargetV1],
+    ["target v1 point", pointTargetV1],
+    ["target v1 region", regionTargetV1],
+    ["target resolver resolved", resolvedTargetV1],
+    ["target resolver ambiguous", ambiguousTargetV1],
+    ["target resolver detached", detachedTargetV1],
     ["context", contextResponseFixture],
     ["proposal", proposal],
     ["approval", approvalResponseFixture],
@@ -360,6 +693,175 @@ describe("canonical API v1 schema", () => {
 
   it("rejects an unversioned public DTO", () => {
     expect(validate({ ...project, schemaVersion: "2" })).toBe(false);
+  });
+
+  it("binds proposal-captured targets to exactly one source proposal", () => {
+    const {
+      captureProposalId: _captureProposalId,
+      ...proposalTargetWithoutProposal
+    } = textTargetV1;
+    const acceptedTargetWithProposal = {
+      ...pageTargetV1,
+      captureProposalId: "proposal-foreign",
+    };
+
+    for (const invalidTarget of [
+      proposalTargetWithoutProposal,
+      acceptedTargetWithProposal,
+    ]) {
+      expect(validate(invalidTarget)).toBe(false);
+      expect(isTargetV1(invalidTarget)).toBe(false);
+    }
+  });
+
+  it("enforces the required and exclusive fields for all target kinds", () => {
+    const { elementAnchor: _elementAnchor, ...elementWithoutAnchor } =
+      elementTargetV1;
+    const { block: _block, ...blockWithoutMetadata } = blockTargetV1;
+    const { textAnchor: _textAnchor, ...textWithoutQuote } = textTargetV1;
+    const {
+      containingBlock: _containingBlock,
+      ...pointContextWithoutContainingBlock
+    } = pointTargetV1.regionAnchor;
+
+    const invalidTargets = [
+      { ...pageTargetV1, geometry: targetGeometryV1 },
+      elementWithoutAnchor,
+      blockWithoutMetadata,
+      textWithoutQuote,
+      {
+        ...pointTargetV1,
+        regionAnchor: pointContextWithoutContainingBlock,
+      },
+      {
+        ...regionTargetV1,
+        geometry: {
+          ...regionTargetV1.geometry,
+          documentCssPixelRect: {
+            ...regionTargetV1.geometry.documentCssPixelRect,
+            width: 0,
+          },
+        },
+      },
+    ];
+
+    for (const invalidTarget of invalidTargets) {
+      expect(validate(invalidTarget)).toBe(false);
+      expect(isTargetV1(invalidTarget)).toBe(false);
+    }
+  });
+
+  it("bounds persisted target evidence and coordinate metadata", () => {
+    const invalidTargets = [
+      {
+        ...pageTargetV1,
+        label: "x".repeat(TARGET_CONTRACT_LIMITS.labelLength + 1),
+      },
+      {
+        ...elementTargetV1,
+        viewport: { ...elementTargetV1.viewport, cssWidth: 0 },
+      },
+      {
+        ...elementTargetV1,
+        elementAnchor: {
+          ...elementTargetV1.elementAnchor,
+          accessibleName: "x".repeat(
+            TARGET_CONTRACT_LIMITS.accessibleNameLength + 1,
+          ),
+        },
+      },
+      {
+        ...elementTargetV1,
+        elementAnchor: {
+          ...elementTargetV1.elementAnchor,
+          classTokens: Array.from(
+            { length: TARGET_CONTRACT_LIMITS.classTokens + 1 },
+            (_value, index) => `class-${index}`,
+          ),
+        },
+      },
+      {
+        ...textTargetV1,
+        textAnchor: {
+          ...textTargetV1.textAnchor,
+          exact: "x".repeat(TARGET_CONTRACT_LIMITS.textQuoteLength + 1),
+        },
+      },
+      {
+        ...regionTargetV1,
+        geometry: {
+          ...regionTargetV1.geometry,
+          viewportNormalizedRect: {
+            ...regionTargetV1.geometry.viewportNormalizedRect,
+            x: 1.01,
+          },
+        },
+      },
+    ];
+
+    for (const invalidTarget of invalidTargets) {
+      expect(validate(invalidTarget)).toBe(false);
+      expect(isTargetV1(invalidTarget)).toBe(false);
+    }
+  });
+
+  it("never admits a render-local runtime node handle to the wire contract", () => {
+    const withRuntimeNodeHandle = {
+      ...elementTargetV1,
+      elementAnchor: {
+        ...elementTargetV1.elementAnchor,
+        runtimeNodeHandle: "preview-render-only-node-42",
+      },
+    };
+    expect(validate(withRuntimeNodeHandle)).toBe(false);
+    expect(isTargetV1(withRuntimeNodeHandle)).toBe(false);
+  });
+
+  it("enforces fail-closed resolver status envelopes", () => {
+    const {
+      selectedCandidateId: _selectedCandidateId,
+      ...resolvedWithoutSelection
+    } = resolvedTargetV1;
+    const invalidResults = [
+      resolvedWithoutSelection,
+      {
+        ...ambiguousTargetV1,
+        selectedCandidateId: resolverCandidateV1.candidateId,
+      },
+      { ...ambiguousTargetV1, candidates: [] },
+      {
+        ...detachedTargetV1,
+        selectedCandidateId: resolverCandidateV1.candidateId,
+      },
+      {
+        ...resolvedTargetV1,
+        candidates: Array.from(
+          { length: TARGET_CONTRACT_LIMITS.resolverCandidates + 1 },
+          (_value, index) => ({
+            ...resolverCandidateV1,
+            candidateId: `candidate-${index}`,
+          }),
+        ),
+      },
+      {
+        ...resolvedTargetV1,
+        candidates: [{ ...resolverCandidateV1, score: 1.01 }],
+      },
+      {
+        ...resolvedTargetV1,
+        candidates: [
+          {
+            ...resolverCandidateV1,
+            reasons: ["geometry", "geometry"],
+          },
+        ],
+      },
+    ];
+
+    for (const invalidResult of invalidResults) {
+      expect(validate(invalidResult)).toBe(false);
+      expect(isTargetResolverResultV1(invalidResult)).toBe(false);
+    }
   });
 
   it.each(extraFieldCases)(
@@ -453,6 +955,12 @@ describe("runtime response and bridge guards", () => {
     expect(isProjectsResponse(projects)).toBe(true);
     expect(isImportPreviewResponse(importPreview)).toBe(true);
     expect(isTargetResponse(targetResponseFixture)).toBe(true);
+    for (const target of targetV1Fixtures) {
+      expect(isTargetV1(target)).toBe(true);
+    }
+    for (const result of targetResolverResultsV1) {
+      expect(isTargetResolverResultV1(result)).toBe(true);
+    }
     expect(isContextResponse(contextResponseFixture)).toBe(true);
     expect(isProposalResponse(proposal)).toBe(true);
     expect(isApprovalResponse(approvalResponseFixture)).toBe(true);
@@ -487,6 +995,131 @@ describe("runtime response and bridge guards", () => {
       isProposalResponse({
         ...proposal,
         proposal: { ...proposal.proposal, changes: sparseChanges },
+      }),
+    ).toBe(false);
+
+    const decoratedClassTokens = [...elementAnchorV1.classTokens];
+    Object.assign(decoratedClassTokens, { extra: true });
+    expect(
+      isTargetV1({
+        ...elementTargetV1,
+        elementAnchor: {
+          ...elementTargetV1.elementAnchor,
+          classTokens: decoratedClassTokens,
+        },
+      }),
+    ).toBe(false);
+
+    const sparseReasons = new Array(resolverCandidateV1.reasons.length);
+    expect(
+      isTargetResolverResultV1({
+        ...resolvedTargetV1,
+        candidates: [{ ...resolverCandidateV1, reasons: sparseReasons }],
+      }),
+    ).toBe(false);
+
+    const decoratedCandidates = [...resolvedTargetV1.candidates];
+    Object.assign(decoratedCandidates, { extra: true });
+    expect(
+      isTargetResolverResultV1({
+        ...resolvedTargetV1,
+        candidates: decoratedCandidates,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects malformed text offsets and normalized geometry", () => {
+    expect(
+      isTargetV1({
+        ...textTargetV1,
+        textAnchor: {
+          ...textTargetV1.textAnchor,
+          startOffset: 30,
+          endOffset: 20,
+        },
+      }),
+    ).toBe(false);
+
+    const { endOffset: _endOffset, ...halfBoundTextAnchor } =
+      textTargetV1.textAnchor;
+    expect(
+      isTargetV1({ ...textTargetV1, textAnchor: halfBoundTextAnchor }),
+    ).toBe(false);
+
+    expect(
+      isTargetV1({
+        ...textTargetV1,
+        textAnchor: {
+          ...textTargetV1.textAnchor,
+          endOffset: textTargetV1.textAnchor.endOffset! + 1,
+        },
+      }),
+    ).toBe(false);
+
+    expect(
+      isTargetV1({
+        ...elementTargetV1,
+        geometry: {
+          ...elementTargetV1.geometry!,
+          viewportNormalizedRect: {
+            x: 0.8,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isTargetV1({
+        ...pageTargetV1,
+        viewport: { ...pageTargetV1.viewport, previewScale: Number.NaN },
+      }),
+    ).toBe(false);
+  });
+
+  it("treats text offsets as UTF-16 code units", () => {
+    const emojiExact = "A😀B";
+    expect(
+      isTargetV1({
+        ...textTargetV1,
+        textAnchor: {
+          exact: emojiExact,
+          startOffset: 10,
+          endOffset: 10 + emojiExact.length,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isTargetV1({
+        ...textTargetV1,
+        textAnchor: {
+          exact: emojiExact,
+          startOffset: 10,
+          endOffset: 13,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("binds resolved candidates by unique candidate id", () => {
+    expect(
+      isTargetResolverResultV1({
+        ...resolvedTargetV1,
+        selectedCandidateId: "candidate-not-present",
+      }),
+    ).toBe(false);
+    expect(
+      isTargetResolverResultV1({
+        ...ambiguousTargetV1,
+        candidates: [
+          resolverCandidateV1,
+          {
+            ...resolverCandidateV1,
+            score: 0.7,
+            summary: "Same id, different candidate evidence",
+          },
+        ],
       }),
     ).toBe(false);
   });

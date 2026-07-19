@@ -32,6 +32,7 @@ describe("C2 browser vertical slice", () => {
 
   it("creates, targets, reviews exact context, adopts, and refreshes Accepted state", async () => {
     const requestLog: string[] = [];
+    const requestBodies: unknown[] = [];
     const fetchMock = vi.fn(
       async (
         input: RequestInfo | URL,
@@ -40,6 +41,9 @@ describe("C2 browser vertical slice", () => {
         const path = String(input);
         const method = init?.method ?? "GET";
         requestLog.push(`${method} ${path}`);
+        if (init?.body !== undefined) {
+          requestBodies.push(JSON.parse(String(init.body)) as unknown);
+        }
 
         if (path === "/api/v1/bootstrap") {
           return jsonResponse(bootstrapFixture(window.location.origin));
@@ -124,7 +128,53 @@ describe("C2 browser vertical slice", () => {
       `${ACCEPTED_PREVIEW_ORIGIN}/preview/project-001/revision-accepted-001/`,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "ヒーロー見出し" }));
+    const acceptedFrameForTarget = screen.getByTitle(
+      "LPプレビュー",
+    ) as HTMLIFrameElement;
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: ACCEPTED_PREVIEW_ORIGIN,
+        source: acceptedFrameForTarget.contentWindow,
+        data: {
+          type: "synapsegit-lp.structure",
+          schemaVersion: "1",
+          channelId: "11111111-2222-4333-8444-555555555555",
+          projectId: "project-001",
+          snapshotId: "revision-accepted-001",
+          revisionId: "revision-accepted-001",
+          nodes: [
+            {
+              runtimeNodeHandle: "node-hero-heading",
+              kind: "element",
+              label: "ヒーロー見出し",
+              tagName: "h1",
+              depth: 1,
+            },
+          ],
+        },
+      }),
+    );
+    const dynamicHeading = await screen.findByRole("button", {
+      name: /ヒーロー見出し/,
+    });
+    fireEvent.click(dynamicHeading);
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: ACCEPTED_PREVIEW_ORIGIN,
+        source: acceptedFrameForTarget.contentWindow,
+        data: {
+          type: "synapsegit-lp.target-draft",
+          schemaVersion: "1",
+          channelId: "11111111-2222-4333-8444-555555555555",
+          projectId: "project-001",
+          snapshotId: "revision-accepted-001",
+          revisionId: "revision-accepted-001",
+          target: targetResponseFixture.target,
+        },
+      }),
+    );
     expect(await screen.findByText("#hero-heading")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "送信内容を確認" }));
@@ -222,6 +272,17 @@ describe("C2 browser vertical slice", () => {
     expect(approvalIndex).toBeGreaterThan(-1);
     expect(decisionIndex).toBeGreaterThan(approvalIndex);
     expect(refreshIndex).toBeGreaterThan(decisionIndex);
+    expect(requestBodies).toContainEqual({
+      schemaVersion: "1",
+      target: targetResponseFixture.target,
+    });
+    expect(requestBodies).toContainEqual({
+      schemaVersion: "1",
+      revisionId: "revision-accepted-001",
+      targetId: "target-001",
+      resolutionId: "resolution-001",
+      instruction: "見出しを、未来への期待が伝わる表現にしてください",
+    });
 
     for (const [input, init] of fetchMock.mock.calls.slice(1)) {
       expect(String(input)).toMatch(/^\/api\/v1\//);

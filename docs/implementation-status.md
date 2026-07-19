@@ -6,7 +6,7 @@ Branch: `agent/lp-studio-m1`
 
 Draft PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
 
-Completed progress: 46%
+Completed progress: 56%
 
 ## Checkpoints
 
@@ -17,7 +17,7 @@ Completed progress: 46%
 | C2 Real-boundary M0 vertical slice | 10% | complete | real pinned `synapse-artifact` Proposal/Decision; strict API/bridge schema; separate random loopback origins; deterministic blank/fake-AI/adopt/export E2E; Rust, TypeScript, CSP, quota, and ZIP tests |
 | C3 Project/revision/import | 8% | complete | private retained state root; canonical immutable revision/CAS and Accepted pointer; reviewed copy import; restart, drift, malicious-path, root-overlap, source-preservation, and browser E2E evidence |
 | C4 Separate-origin preview | 8% | complete | session/project/snapshot-scoped opaque Preview origins; exact Host/route binding and revocation; CSP/sandbox/storage/navigation isolation; privacy-safe diagnostics; Rust, Web, and Chromium evidence |
-| C5 Target v1 and resolution | 10% | planned | — |
+| C5 Target v1 and resolution | 10% | complete | strict six-kind TargetV1/schema; immutable target persistence/restart; scoped bridge capture and dynamic tree; fail-closed resolution receipt; Web/Rust/Chromium evidence; [SynapseGit #29](https://github.com/howlrs/synapsegit/issues/29) |
 | C6 AI context and ChangeSet | 9% | planned | — |
 | C7 Review, Decision, recovery | 8% | planned | — |
 | C8 Export, publication, integrated E2E | 7% | planned | [#17 follow-up](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363) |
@@ -51,7 +51,7 @@ Completed progress: 46%
   as a SynapseGit checkout.
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
-- C0 through C4 are implemented and locally verified. C4 evidence is bound to
+- C0 through C5 are implemented and locally verified. C5 evidence is bound to
   this checkpoint commit and its GitHub checks. No tag, merge,
   release, product publication, or distribution permission exists yet.
 - The development repository is Public by explicit Creator direction. Public
@@ -165,9 +165,47 @@ Completed progress: 46%
   canonicalization removes its explicit port. Normal random high ports are
   covered.
 
+## C5 evidence and limits
+
+- `TargetV1` is a strict six-kind discriminated union shared by TypeScript,
+  Draft 2020-12 JSON Schema, the Preview bridge, and the Rust API. Kind-specific
+  guards reject missing or extra evidence, malformed normalized geometry,
+  partial or non-UTF-16 text offsets, runtime handles, stale capture binding,
+  and decorated/sparse arrays.
+- The response-first bridge captures page, semantic/heuristic block, arbitrary
+  visible element, text, clamped point, and normalized region Targets. It emits
+  a bounded dynamic tree with render-local handles, draws a response-only
+  overlay, and never annotates source/export files with persistent Studio IDs.
+- Target records are validated server-side, stored as immutable canonical JSON,
+  sorted and bounded on load, and rehydrated across restart. A Proposed Target
+  resolves only while that exact Proposal remains pending on the current
+  Accepted base.
+- Resolver v1 returns resolved, ambiguous, or detached candidates and a
+  deterministic receipt. Context creation recomputes source/revision evidence
+  and rejects stale receipts, ambiguity, detachment, or a terminal Proposal.
+  Geometry, class, or text alone does not acquire authority.
+- Browser UI exposes all six kinds, the dynamic tree, pointer point/region
+  capture, keyboard node alternatives, capture source/revision, status, and
+  candidate reasons. Preview source changes clear the Target; superseded API
+  responses cannot replace a later selection.
+- Local gates pass with 164 Web tests, 30 Rust library tests, 10 launcher
+  tests, strict schema/guard parity, Clippy warnings denied, production build,
+  and 3 Chromium E2E flows. The primary flow creates all six kinds through the
+  tree and also exercises pointer point/region capture before a real
+  fake-AI/SynapseGit Proposal and Human adoption.
+- SynapseGit correctly rejects fractional JSON tokens at its canonical
+  boundary, but exposes no public normalized fixed-point helper for generic
+  application contexts. The local versioned decimal-string projection is
+  covered by tests; the integration ergonomics request is tracked in
+  [Issue #29](https://github.com/howlrs/synapsegit/issues/29).
+- Reference Targets, user-defined labels, breadcrumb polish, restored Target
+  history UI, candidate overlays, a general weighted HTML resolver corpus, and
+  cross-browser visual accuracy remain deferred to later M1 acceptance and
+  hardening. The current resolver fails closed instead of guessing.
+
 ## Next checkpoint
 
-C5 defines canonical Target v1 capture and fail-closed resolution for page,
-block, element, text, point, and region targets. It adds coordinate metadata,
-block-tree navigation, keyboard alternatives, and Accepted/Proposed revision
-binding before the next checkpoint is committed/pushed.
+C6 turns the reviewed Target context into a provider-neutral AI request and
+strict ChangeSet protocol. It keeps the deterministic fake provider as the
+offline reference, validates operation order and file preconditions, and binds
+every Proposal to the exact current Accepted revision.

@@ -482,6 +482,7 @@ button:disabled {
   background: var(--surface);
 }
 .page-tree {
+  overflow-x: hidden;
   padding: 1.1rem;
   border-right: 1px solid var(--line);
 }
@@ -495,12 +496,23 @@ button:disabled {
 }
 .tree-root {
   display: flex;
+  width: 100%;
   gap: 0.55rem;
   align-items: center;
   margin-top: 1.4rem;
   padding: 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
   font-size: 0.82rem;
   font-weight: 700;
+}
+.tree-root:hover:not(:disabled),
+.tree-root[aria-current="true"] {
+  border-color: rgba(183, 243, 74, 0.45);
+  background: var(--lime-soft);
 }
 .tree-file {
   color: var(--lime);
@@ -511,8 +523,28 @@ button:disabled {
   font-size: 0.7rem;
   text-transform: uppercase;
 }
+.target-kind-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+.target-kind-grid button {
+  min-height: 34px;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 0.7rem;
+}
+.target-kind-grid button[aria-pressed="true"] {
+  border-color: rgba(98, 223, 221, 0.6);
+  color: var(--cyan);
+  background: rgba(98, 223, 221, 0.08);
+}
 .element-list {
   display: grid;
+  overflow: hidden;
   gap: 0.2rem;
   margin: 0;
   padding: 0;
@@ -522,6 +554,9 @@ button:disabled {
   display: flex;
   gap: 0.5rem;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   min-height: 42px;
   align-items: center;
   padding: 0.5rem 0.65rem;
@@ -532,6 +567,19 @@ button:disabled {
   text-align: left;
   font-size: 0.79rem;
 }
+.element-list button > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.element-list button small {
+  margin-left: auto;
+  color: var(--quiet);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.58rem;
+  text-transform: lowercase;
+}
 .element-list button:hover:not(:disabled) {
   background: var(--surface-2);
 }
@@ -539,6 +587,12 @@ button:disabled {
   border-color: rgba(183, 243, 74, 0.5);
   color: var(--lime);
   background: var(--lime-soft);
+}
+.tree-empty {
+  margin: 0.75rem 0;
+  color: var(--quiet);
+  font-size: 0.7rem;
+  line-height: 1.5;
 }
 .keyboard-hint {
   margin-top: 2rem;
@@ -698,6 +752,50 @@ kbd {
 }
 .resolved {
   color: var(--lime);
+}
+.resolution-resolved {
+  color: var(--lime);
+}
+.resolution-ambiguous {
+  color: var(--amber);
+}
+.resolution-detached {
+  color: #ff8c96;
+}
+.target-resolution-note,
+.resolution-warning {
+  margin: 0.75rem 0;
+  padding: 0.65rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
+.target-resolution-note {
+  border: 1px solid rgba(98, 223, 221, 0.25);
+  color: var(--muted);
+  background: rgba(98, 223, 221, 0.06);
+}
+.resolution-warning {
+  border: 1px solid rgba(255, 184, 78, 0.35);
+  color: var(--amber);
+  background: rgba(255, 184, 78, 0.08);
+}
+.resolution-warning p {
+  margin: 0;
+}
+.resolution-warning ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.resolution-warning li {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(255, 184, 78, 0.2);
 }
 .prompt-composer {
   margin-top: 1.2rem;

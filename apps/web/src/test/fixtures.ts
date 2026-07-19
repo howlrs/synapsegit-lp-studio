@@ -5,12 +5,14 @@ import type {
   ContextResponse,
   DecisionResponse,
   ExportResponse,
+  ElementTargetV1,
   ImportPreviewResponse,
   Project,
   ProjectResponse,
   ProjectsResponse,
   ProposalResponse,
   TargetResponse,
+  TargetResolverResultV1,
 } from "@synapsegit-lp/contracts";
 
 export const HASH_A = "a".repeat(64);
@@ -34,7 +36,7 @@ export const bootstrapFixture = (
   editorOrigin,
   previewOrigin: PREVIEW_SCOPE_BASE,
   capabilities: {
-    targetKinds: ["element"],
+    targetKinds: ["page", "block", "element", "text", "point", "region"],
     dispositions: ["adopted_unchanged", "rejected", "deferred"],
     singleProposalPerProject: true,
     importAvailable: true,
@@ -99,15 +101,68 @@ export const importPreviewResponseFixture: ImportPreviewResponse = {
   },
 };
 
+export const elementTargetFixture: ElementTargetV1 = {
+  schemaVersion: 1,
+  targetId: "target-001",
+  captureRevisionId: "revision-accepted-001",
+  captureSource: "accepted",
+  pagePath: "index.html",
+  kind: "element",
+  label: "ヒーロー見出し",
+  viewport: {
+    cssWidth: 1440,
+    cssHeight: 900,
+    scrollX: 0,
+    scrollY: 0,
+    devicePixelRatio: 1,
+    visualViewportScale: 1,
+    previewScale: 1,
+  },
+  document: { cssWidth: 1440, cssHeight: 1800, layoutEpoch: 1 },
+  elementAnchor: {
+    tagName: "H1",
+    uniqueElementId: "hero-heading",
+    role: "heading",
+    accessibleName: "まだ、白紙です。",
+    domPath: "main:nth-child(1)>section:nth-child(1)>h1:nth-child(1)",
+    siblingIndex: 0,
+  },
+};
+
+export const targetResolutionFixture: Extract<
+  TargetResolverResultV1,
+  { status: "resolved" }
+> = {
+  schemaVersion: 1,
+  resolverVersion: 1,
+  targetId: "target-001",
+  captureRevisionId: "revision-accepted-001",
+  resolvedRevisionId: "revision-accepted-001",
+  status: "resolved",
+  selectedCandidateId: "candidate-hero-heading",
+  candidates: [
+    {
+      candidateId: "candidate-hero-heading",
+      score: 0.98,
+      reasons: ["unique_id", "semantic_fingerprint"],
+      summary: "Unique #hero-heading on index.html",
+      elementAnchor: {
+        tagName: "H1",
+        uniqueElementId: "hero-heading",
+        role: "heading",
+        accessibleName: "まだ、白紙です。",
+        domPath: "main:nth-child(1)>section:nth-child(1)>h1:nth-child(1)",
+        siblingIndex: 0,
+      },
+    },
+  ],
+};
+
 export const targetResponseFixture: TargetResponse = {
   schemaVersion: "1",
-  target: {
-    id: "target-001",
-    revisionId: "revision-accepted-001",
-    kind: "element",
-    elementId: "hero-heading",
-    label: "ヒーロー見出し",
-  },
+  target: elementTargetFixture,
+  resolution: targetResolutionFixture,
+  resolutionId: "resolution-001",
 };
 
 export const contextResponseFixture: ContextResponse = {
@@ -116,6 +171,7 @@ export const contextResponseFixture: ContextResponse = {
     id: "context-001",
     revisionId: "revision-accepted-001",
     targetId: "target-001",
+    targetResolutionId: "resolution-001",
     instruction: "見出しを力強くしてください",
     canonicalJson:
       '{"instruction":"見出しを力強くしてください","target":{"elementId":"hero-heading"}}',

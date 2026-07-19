@@ -17,6 +17,8 @@ pub(super) const MAX_DEPTH: usize = 16;
 
 const STORAGE_SCHEMA: &str = "1";
 const STORAGE_DIRECTORY: &str = "managed-v1";
+const MAX_PERSISTED_TARGETS: usize = 32;
+const MAX_TARGET_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(super) enum StorageError {
@@ -45,6 +47,7 @@ pub(super) struct PersistedProject {
     pub revision_id: String,
     pub artifact_manifest_sha256: String,
     pub files: BTreeMap<String, Vec<u8>>,
+    pub targets: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +237,7 @@ impl ManagedStorage {
             )?;
             fs::create_dir(staging.join("revisions"))?;
             fs::create_dir(staging.join("proposals"))?;
+            fs::create_dir(staging.join("targets"))?;
             let metadata = ProjectMetadata {
                 schema_version: STORAGE_SCHEMA.into(),
                 id: id.into(),
@@ -372,6 +376,31 @@ impl ManagedStorage {
         Ok(parent.join("repository"))
     }
 
+    pub fn persist_target(
+        &self,
+        project_id: &str,
+        target_id: &str,
+        canonical_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        validate_identifier(project_id, "prj_")?;
+        validate_identifier(target_id, "tgt_")?;
+        if canonical_bytes.is_empty() || canonical_bytes.len() > MAX_TARGET_METADATA_BYTES {
+            return Err(StorageError::Corrupt);
+        }
+        let targets_root = self.project_root(project_id).join("targets");
+        validate_real_directory(&targets_root)?;
+        let existing = fs::read_dir(&targets_root)?
+            .collect::<Result<Vec<_>, _>>()?
+            .len();
+        if existing >= MAX_PERSISTED_TARGETS {
+            return Err(StorageError::Corrupt);
+        }
+        write_immutable(
+            &targets_root.join(format!("{target_id}.json")),
+            canonical_bytes,
+        )
+    }
+
     fn load_projects(&self) -> Result<Vec<PersistedProject>, StorageError> {
         let mut project_dirs =
             fs::read_dir(self.root.join("projects"))?.collect::<Result<Vec<_>, _>>()?;
@@ -409,6 +438,10 @@ impl ManagedStorage {
             }
             validate_real_directory(&project_root.join("revisions"))?;
             validate_real_directory(&project_root.join("proposals"))?;
+            // C5 adds application-owned immutable Target metadata. Creating
+            // the empty directory is the only migration from managed-v1
+            // projects written by C3/C4; any non-directory still fails closed.
+            ensure_real_directory(&project_root.join("targets"))?;
             self.recover_project(&project_root)?;
             remove_internal_file_if_present(&project_root.join("creating.json"))?;
             validate_real_directory(&project_root.join("site"))?;
@@ -423,15 +456,45 @@ impl ManagedStorage {
             validate_pointer(&pointer)?;
             let manifest = self.read_manifest(&metadata.id, &pointer)?;
             let files = self.load_manifest_files(&manifest)?;
+            let targets = self.load_target_bytes(&metadata.id)?;
             result.push(PersistedProject {
                 id: metadata.id,
                 display_name: metadata.display_name,
                 revision_id: pointer.revision_id,
                 artifact_manifest_sha256: pointer.artifact_manifest_sha256,
                 files,
+                targets,
             });
         }
         Ok(result)
+    }
+
+    fn load_target_bytes(&self, project_id: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let targets_root = self.project_root(project_id).join("targets");
+        validate_real_directory(&targets_root)?;
+        let mut entries = fs::read_dir(&targets_root)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        if entries.len() > MAX_PERSISTED_TARGETS {
+            return Err(StorageError::Corrupt);
+        }
+        entries
+            .into_iter()
+            .map(|entry| {
+                let metadata = entry.file_type()?;
+                if metadata.is_symlink() || !metadata.is_file() {
+                    return Err(StorageError::Corrupt);
+                }
+                let name = utf8_name(&entry.file_name())?;
+                let target_id = name.strip_suffix(".json").ok_or(StorageError::Corrupt)?;
+                validate_identifier(target_id, "tgt_")?;
+                let bytes = read_regular_file_bounded(
+                    &entry.path(),
+                    MAX_TARGET_METADATA_BYTES,
+                    StorageError::Corrupt,
+                )?;
+                Ok((target_id.to_owned(), bytes))
+            })
+            .collect()
     }
 
     fn recover_project(&self, project_root: &Path) -> Result<(), StorageError> {
@@ -1507,6 +1570,62 @@ mod tests {
         assert_eq!(fs::read(&final_path).unwrap(), complete);
         assert_eq!(fs::read(&stale).unwrap(), b"truncated");
         storage.write_object(&digest, complete).unwrap();
+    }
+
+    #[test]
+    fn target_metadata_is_immutable_bounded_and_round_trips_in_sorted_order() {
+        let root = tempfile::tempdir().unwrap();
+        let (storage, _) = ManagedStorage::open(root.path()).unwrap();
+        let files = BTreeMap::from([("index.html".into(), b"<h1>safe</h1>".to_vec())]);
+        storage
+            .create_project(
+                PROJECT_ID,
+                "Target persistence",
+                REVISION_ID,
+                ARTIFACT_SHA,
+                &files,
+            )
+            .unwrap();
+        let later_target = "tgt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let first_target = "tgt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let first = br#"{"schemaVersion":1,"targetId":"tgt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+        let later = br#"{"schemaVersion":1,"targetId":"tgt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
+
+        storage
+            .persist_target(PROJECT_ID, later_target, later)
+            .unwrap();
+        storage
+            .persist_target(PROJECT_ID, first_target, first)
+            .unwrap();
+        storage
+            .persist_target(PROJECT_ID, first_target, first)
+            .unwrap();
+        assert!(matches!(
+            storage.persist_target(PROJECT_ID, first_target, b"different"),
+            Err(StorageError::Corrupt)
+        ));
+        assert!(matches!(
+            storage.persist_target(PROJECT_ID, "tgt_cccccccccccccccccccccccccccccccc", b""),
+            Err(StorageError::Corrupt)
+        ));
+        assert!(matches!(
+            storage.persist_target(
+                PROJECT_ID,
+                "tgt_dddddddddddddddddddddddddddddddd",
+                &vec![b'x'; MAX_TARGET_METADATA_BYTES + 1],
+            ),
+            Err(StorageError::Corrupt)
+        ));
+
+        let (_, projects) = ManagedStorage::open(root.path()).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].targets,
+            vec![
+                (first_target.to_owned(), first.to_vec()),
+                (later_target.to_owned(), later.to_vec())
+            ]
+        );
     }
 
     #[test]

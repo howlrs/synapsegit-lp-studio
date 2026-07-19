@@ -24,12 +24,43 @@ const implementedRequirements = new Set([
   "FR-PREV-011",
   "FR-PREV-012",
   "FR-PREV-013",
+  "FR-TGT-001",
+  "FR-TGT-002",
+  "DM-TGT-001",
+  "DM-TGT-002",
+  "DM-TGT-003",
+  "DM-TGT-004",
+  "DM-TGT-005",
+  "DM-TGT-006",
+  "DM-TGT-007",
+  "FR-COORD-001",
+  "FR-COORD-002",
+  "FR-COORD-003",
+  "FR-COORD-004",
+  "FR-COORD-005",
+  "FR-COORD-006",
+  "FR-COORD-007",
+  "UX-COORD-001",
+  "FR-BLOCK-001",
+  "FR-BLOCK-002",
+  "FR-BLOCK-003",
+  "FR-BLOCK-004",
+  "FR-RESOLVE-001",
+  "FR-RESOLVE-003",
+  "FR-RESOLVE-006",
 ]);
 
 function statusFor(id) {
-  return implementedRequirements.has(id)
-    ? "implemented — [C4 evidence](implementation-status.md#c4-evidence-and-limits)"
-    : "planned";
+  if (!implementedRequirements.has(id)) return "planned";
+  const checkpoint = checkpointFor(id);
+  const evidenceAnchor = checkpoint === "C5" ? "c5" : "c4";
+  return (
+    "implemented — [" +
+    checkpoint +
+    " evidence](implementation-status.md#" +
+    evidenceAnchor +
+    "-evidence-and-limits)"
+  );
 }
 
 function checkpointFor(id) {

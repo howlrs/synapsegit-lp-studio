@@ -12,6 +12,8 @@
   crash-safe Decision and Accepted-pointer journal
 - [ADR-0006](0006-license-brand-evaluation-boundary.md):
   source-available license and brand evaluation boundary
+- [ADR-0007](0007-target-v1-capture-and-resolution.md):
+  Target v1 capture, coordinate evidence, and fail-closed resolution
 
 Accepted ADRs are implementation decisions for the current M1 branch, not
 evidence that the 80% local verification or final product review has passed.

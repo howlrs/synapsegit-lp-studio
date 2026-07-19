@@ -1,5 +1,25 @@
 export const SCHEMA_VERSION = "1" as const;
 export const API_VERSION = "v1" as const;
+export const TARGET_SCHEMA_VERSION = 1 as const;
+export const TARGET_RESOLVER_VERSION = 1 as const;
+
+export const TARGET_CONTRACT_LIMITS = {
+  idLength: 128,
+  pagePathLength: 1024,
+  labelLength: 256,
+  textQuoteLength: 1024,
+  textContextLength: 256,
+  accessibleNameLength: 512,
+  anchorStringLength: 2048,
+  classTokens: 32,
+  classTokenLength: 128,
+  anchorsPerRegion: 3,
+  resolverCandidates: 8,
+  resolverReasons: 8,
+  cssPixels: 1_000_000,
+  textOffset: 1_000_000,
+  blockLevel: 64,
+} as const;
 
 export type SchemaVersion = typeof SCHEMA_VERSION;
 export type PreviewMode = "select" | "interact";
@@ -17,7 +37,7 @@ export interface BootstrapResponse {
   editorOrigin: string;
   previewOrigin: string;
   capabilities: {
-    targetKinds: ["element"];
+    targetKinds: ["page", "block", "element", "text", "point", "region"];
     dispositions: ArtifactDisposition[];
     singleProposalPerProject: true;
     importAvailable: boolean;
@@ -101,28 +121,203 @@ export interface CreateProjectRequest {
 
 export interface CreateTargetRequest {
   schemaVersion: SchemaVersion;
-  revisionId: string;
-  kind: "element";
-  elementId: string;
+  target: TargetV1;
 }
 
-export interface Target {
-  id: string;
-  revisionId: string;
-  kind: "element";
-  elementId: string;
-  label: string;
-}
+export type Target = TargetV1;
 
 export interface TargetResponse {
   schemaVersion: SchemaVersion;
-  target: Target;
+  target: TargetV1;
+  resolution: TargetResolverResultV1;
+  resolutionId: string;
 }
+
+export type TargetSelection = Omit<TargetResponse, "schemaVersion">;
+
+export type TargetKind =
+  "page" | "block" | "element" | "text" | "point" | "region";
+
+export interface TargetRectV1 {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface TargetPointCoordinatesV1 {
+  x: number;
+  y: number;
+}
+
+export interface TargetViewportV1 {
+  cssWidth: number;
+  cssHeight: number;
+  scrollX: number;
+  scrollY: number;
+  devicePixelRatio: number;
+  visualViewportScale: number;
+  previewScale: number;
+}
+
+export interface TargetDocumentV1 {
+  cssWidth: number;
+  cssHeight: number;
+  layoutEpoch: number;
+}
+
+export interface TargetGeometryV1 {
+  documentCssPixelRect: TargetRectV1;
+  viewportCssPixelRect: TargetRectV1;
+  viewportNormalizedRect: TargetRectV1;
+}
+
+export interface TargetPointV1 {
+  documentCssPixel: TargetPointCoordinatesV1;
+  viewportNormalized: TargetPointCoordinatesV1;
+}
+
+/** Persistable element evidence. A render-local runtime node handle is omitted. */
+export interface ElementAnchorV1 {
+  tagName: string;
+  uniqueElementId?: string;
+  role?: string;
+  accessibleName?: string;
+  domPath?: string;
+  classTokens?: string[];
+  ancestorFingerprint?: string;
+  siblingIndex?: number;
+}
+
+type TargetTextOffsetsV1 =
+  | { startOffset?: never; endOffset?: never }
+  | { startOffset: number; endOffset: number };
+
+export type TargetTextAnchorV1 = {
+  exact: string;
+  prefix?: string;
+  suffix?: string;
+} & TargetTextOffsetsV1;
+
+export interface TargetRegionAnchorV1 {
+  containingBlock?: ElementAnchorV1;
+  previousVisibleSibling?: ElementAnchorV1;
+  nextVisibleSibling?: ElementAnchorV1;
+  layoutMode: "flow" | "flex" | "grid" | "positioned" | "unknown";
+}
+
+export interface TargetBlockV1 {
+  source: "semantic" | "landmark" | "heuristic" | "user";
+  level: number;
+}
+
+type TargetCaptureBindingV1 =
+  | { captureSource: "accepted"; captureProposalId?: never }
+  | { captureSource: "proposal"; captureProposalId: string };
+
+interface TargetCommonV1 {
+  schemaVersion: typeof TARGET_SCHEMA_VERSION;
+  targetId: string;
+  captureRevisionId: string;
+  pagePath: string;
+  label: string;
+  viewport: TargetViewportV1;
+  document: TargetDocumentV1;
+}
+
+export type PageTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "page";
+  };
+
+export type BlockTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "block";
+    elementAnchor: ElementAnchorV1;
+    block: TargetBlockV1;
+    geometry?: TargetGeometryV1;
+  };
+
+export type ElementTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "element";
+    elementAnchor: ElementAnchorV1;
+    geometry?: TargetGeometryV1;
+  };
+
+export type TextTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "text";
+    elementAnchor: ElementAnchorV1;
+    textAnchor: TargetTextAnchorV1;
+    geometry?: TargetGeometryV1;
+  };
+
+export type PointTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "point";
+    point: TargetPointV1;
+    regionAnchor: TargetRegionAnchorV1 & {
+      containingBlock: ElementAnchorV1;
+    };
+  };
+
+export type RegionTargetV1 = TargetCommonV1 &
+  TargetCaptureBindingV1 & {
+    kind: "region";
+    geometry: TargetGeometryV1;
+    regionAnchor: TargetRegionAnchorV1;
+  };
+
+export type TargetV1 =
+  | PageTargetV1
+  | BlockTargetV1
+  | ElementTargetV1
+  | TextTargetV1
+  | PointTargetV1
+  | RegionTargetV1;
+
+export type TargetResolverSignalV1 =
+  | "unique_id"
+  | "semantic_fingerprint"
+  | "text_quote"
+  | "ancestor"
+  | "sibling"
+  | "dom_path"
+  | "geometry";
+
+export interface TargetResolverCandidateV1 {
+  candidateId: string;
+  score: number;
+  reasons: TargetResolverSignalV1[];
+  summary: string;
+  elementAnchor?: ElementAnchorV1;
+  geometry?: TargetGeometryV1;
+}
+
+interface TargetResolverResultCommonV1 {
+  schemaVersion: typeof TARGET_SCHEMA_VERSION;
+  resolverVersion: typeof TARGET_RESOLVER_VERSION;
+  targetId: string;
+  captureRevisionId: string;
+  resolvedRevisionId: string;
+  candidates: TargetResolverCandidateV1[];
+}
+
+export type TargetResolverResultV1 = TargetResolverResultCommonV1 &
+  (
+    | { status: "resolved"; selectedCandidateId: string }
+    | {
+        status: "ambiguous" | "detached";
+        selectedCandidateId?: never;
+      }
+  );
 
 export interface CreateContextRequest {
   schemaVersion: SchemaVersion;
   revisionId: string;
   targetId: string;
+  resolutionId: string;
   instruction: string;
 }
 
@@ -130,6 +325,7 @@ export interface ContextReview {
   id: string;
   revisionId: string;
   targetId: string;
+  targetResolutionId: string;
   instruction: string;
   canonicalJson: string;
   sha256: string;
@@ -285,6 +481,36 @@ export interface PreviewDiagnosticMessage {
   sourceUnavailable: true;
 }
 
+/** Untrusted DOM observation. The server revalidates it before persistence. */
+export interface PreviewTargetMessage {
+  type: "synapsegit-lp.target-draft";
+  schemaVersion: SchemaVersion;
+  channelId: string;
+  projectId: string;
+  snapshotId: string;
+  revisionId: string;
+  target: TargetV1;
+}
+
+export interface PreviewStructureNode {
+  runtimeNodeHandle: string;
+  parentRuntimeNodeHandle?: string;
+  kind: "block" | "element";
+  label: string;
+  tagName: string;
+  depth: number;
+}
+
+export interface PreviewStructureMessage {
+  type: "synapsegit-lp.structure";
+  schemaVersion: SchemaVersion;
+  channelId: string;
+  projectId: string;
+  snapshotId: string;
+  revisionId: string;
+  nodes: PreviewStructureNode[];
+}
+
 interface PreviewActionEnvelope {
   type: "synapsegit-lp.action";
   schemaVersion: SchemaVersion;
@@ -296,8 +522,20 @@ interface PreviewActionEnvelope {
 
 export type PreviewActionMessage = PreviewActionEnvelope &
   (
-    | { action: "set_mode"; mode: PreviewMode }
+    | {
+        action: "set_mode";
+        mode: PreviewMode;
+        targetKind: TargetKind;
+        previewScale: number;
+      }
     | { action: "clear_selection"; mode?: never }
+    | { action: "request_structure" }
+    | { action: "capture_page" }
+    | {
+        action: "capture_node";
+        runtimeNodeHandle: string;
+        targetKind: TargetKind;
+      }
   );
 
 type UnknownRecord = Record<string, unknown>;
@@ -465,6 +703,526 @@ const hasExactKeys = (
   );
 };
 
+const isBoundedString = (
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): value is string => {
+  if (!isString(value) || value.includes("\0")) return false;
+  let length = 0;
+  for (const _character of value) {
+    length += 1;
+    if (length > maximumLength) return false;
+  }
+  return length >= minimumLength;
+};
+
+const isBoundedId = (value: unknown): value is string =>
+  isBoundedString(value, 1, TARGET_CONTRACT_LIMITS.idLength);
+
+const isFiniteRange = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number =>
+  isFiniteNumber(value) && value >= minimum && value <= maximum;
+
+const isSafeIntegerRange = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number =>
+  isFiniteNumber(value) &&
+  Number.isSafeInteger(value) &&
+  value >= minimum &&
+  value <= maximum;
+
+const isBoundedExactArray = <T>(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+  guard: (item: unknown) => item is T,
+): value is T[] =>
+  Array.isArray(value) &&
+  value.length >= minimumLength &&
+  value.length <= maximumLength &&
+  isExactArrayOf(value, guard);
+
+const isTargetPagePath = (value: unknown): value is string => {
+  if (
+    !isBoundedString(value, 1, TARGET_CONTRACT_LIMITS.pagePathLength) ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.includes("\\")
+  ) {
+    return false;
+  }
+  if (value === "/") return true;
+  if (value.startsWith("/") || value.endsWith("/") || value.includes("//")) {
+    return false;
+  }
+  return value
+    .split("/")
+    .every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    );
+};
+
+const isTargetRectV1 = (
+  value: unknown,
+  normalized: boolean,
+  nonZero: boolean,
+): value is TargetRectV1 => {
+  if (!isRecord(value) || !hasExactKeys(value, ["x", "y", "width", "height"])) {
+    return false;
+  }
+  if (normalized) {
+    if (
+      !isFiniteRange(value.x, 0, 1) ||
+      !isFiniteRange(value.y, 0, 1) ||
+      !isFiniteRange(value.width, nonZero ? Number.MIN_VALUE : 0, 1) ||
+      !isFiniteRange(value.height, nonZero ? Number.MIN_VALUE : 0, 1)
+    ) {
+      return false;
+    }
+    const roundingTolerance = Number.EPSILON * 8;
+    return (
+      value.x + value.width <= 1 + roundingTolerance &&
+      value.y + value.height <= 1 + roundingTolerance
+    );
+  }
+  return (
+    isFiniteRange(
+      value.x,
+      -TARGET_CONTRACT_LIMITS.cssPixels,
+      TARGET_CONTRACT_LIMITS.cssPixels,
+    ) &&
+    isFiniteRange(
+      value.y,
+      -TARGET_CONTRACT_LIMITS.cssPixels,
+      TARGET_CONTRACT_LIMITS.cssPixels,
+    ) &&
+    isFiniteRange(
+      value.width,
+      nonZero ? Number.MIN_VALUE : 0,
+      TARGET_CONTRACT_LIMITS.cssPixels,
+    ) &&
+    isFiniteRange(
+      value.height,
+      nonZero ? Number.MIN_VALUE : 0,
+      TARGET_CONTRACT_LIMITS.cssPixels,
+    )
+  );
+};
+
+const isTargetViewportV1 = (value: unknown): value is TargetViewportV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "cssWidth",
+    "cssHeight",
+    "scrollX",
+    "scrollY",
+    "devicePixelRatio",
+    "visualViewportScale",
+    "previewScale",
+  ]) &&
+  isFiniteRange(
+    value.cssWidth,
+    Number.MIN_VALUE,
+    TARGET_CONTRACT_LIMITS.cssPixels,
+  ) &&
+  isFiniteRange(
+    value.cssHeight,
+    Number.MIN_VALUE,
+    TARGET_CONTRACT_LIMITS.cssPixels,
+  ) &&
+  isFiniteRange(value.scrollX, 0, TARGET_CONTRACT_LIMITS.cssPixels) &&
+  isFiniteRange(value.scrollY, 0, TARGET_CONTRACT_LIMITS.cssPixels) &&
+  isFiniteRange(value.devicePixelRatio, Number.MIN_VALUE, 16) &&
+  isFiniteRange(value.visualViewportScale, Number.MIN_VALUE, 16) &&
+  isFiniteRange(value.previewScale, Number.MIN_VALUE, 8);
+
+const isTargetDocumentV1 = (value: unknown): value is TargetDocumentV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["cssWidth", "cssHeight", "layoutEpoch"]) &&
+  isFiniteRange(value.cssWidth, 0, TARGET_CONTRACT_LIMITS.cssPixels) &&
+  isFiniteRange(value.cssHeight, 0, TARGET_CONTRACT_LIMITS.cssPixels) &&
+  isSafeIntegerRange(value.layoutEpoch, 0, Number.MAX_SAFE_INTEGER);
+
+const isTargetGeometryV1 = (
+  value: unknown,
+  nonZero: boolean,
+): value is TargetGeometryV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "documentCssPixelRect",
+    "viewportCssPixelRect",
+    "viewportNormalizedRect",
+  ]) &&
+  isTargetRectV1(value.documentCssPixelRect, false, nonZero) &&
+  isTargetRectV1(value.viewportCssPixelRect, false, nonZero) &&
+  isTargetRectV1(value.viewportNormalizedRect, true, nonZero);
+
+const isTargetPointCoordinatesV1 = (
+  value: unknown,
+  normalized: boolean,
+): value is TargetPointCoordinatesV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["x", "y"]) &&
+  (normalized
+    ? isFiniteRange(value.x, 0, 1) && isFiniteRange(value.y, 0, 1)
+    : isFiniteRange(value.x, 0, TARGET_CONTRACT_LIMITS.cssPixels) &&
+      isFiniteRange(value.y, 0, TARGET_CONTRACT_LIMITS.cssPixels));
+
+const isTargetPointV1 = (value: unknown): value is TargetPointV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["documentCssPixel", "viewportNormalized"]) &&
+  isTargetPointCoordinatesV1(value.documentCssPixel, false) &&
+  isTargetPointCoordinatesV1(value.viewportNormalized, true);
+
+export const isElementAnchorV1 = (value: unknown): value is ElementAnchorV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(
+      value,
+      ["tagName"],
+      [
+        "uniqueElementId",
+        "role",
+        "accessibleName",
+        "domPath",
+        "classTokens",
+        "ancestorFingerprint",
+        "siblingIndex",
+      ],
+    ) ||
+    !isBoundedString(
+      value.tagName,
+      1,
+      TARGET_CONTRACT_LIMITS.classTokenLength,
+    ) ||
+    !/^[A-Za-z][A-Za-z0-9-]*$/.test(value.tagName)
+  ) {
+    return false;
+  }
+  if (
+    (Object.hasOwn(value, "uniqueElementId") &&
+      !isBoundedString(
+        value.uniqueElementId,
+        1,
+        TARGET_CONTRACT_LIMITS.anchorStringLength,
+      )) ||
+    (Object.hasOwn(value, "role") &&
+      !isBoundedString(
+        value.role,
+        1,
+        TARGET_CONTRACT_LIMITS.classTokenLength,
+      )) ||
+    (Object.hasOwn(value, "accessibleName") &&
+      !isBoundedString(
+        value.accessibleName,
+        1,
+        TARGET_CONTRACT_LIMITS.accessibleNameLength,
+      )) ||
+    (Object.hasOwn(value, "domPath") &&
+      !isBoundedString(
+        value.domPath,
+        1,
+        TARGET_CONTRACT_LIMITS.anchorStringLength,
+      )) ||
+    (Object.hasOwn(value, "ancestorFingerprint") &&
+      !isBoundedString(
+        value.ancestorFingerprint,
+        1,
+        TARGET_CONTRACT_LIMITS.anchorStringLength,
+      )) ||
+    (Object.hasOwn(value, "siblingIndex") &&
+      !isSafeIntegerRange(
+        value.siblingIndex,
+        0,
+        TARGET_CONTRACT_LIMITS.textOffset,
+      ))
+  ) {
+    return false;
+  }
+  if (Object.hasOwn(value, "classTokens")) {
+    if (
+      !isBoundedExactArray(
+        value.classTokens,
+        1,
+        TARGET_CONTRACT_LIMITS.classTokens,
+        (token): token is string =>
+          isBoundedString(token, 1, TARGET_CONTRACT_LIMITS.classTokenLength) &&
+          !/\s/u.test(token),
+      ) ||
+      new Set(value.classTokens).size !== value.classTokens.length
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const isTargetTextAnchorV1 = (value: unknown): value is TargetTextAnchorV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(
+      value,
+      ["exact"],
+      ["prefix", "suffix", "startOffset", "endOffset"],
+    ) ||
+    !isBoundedString(value.exact, 1, TARGET_CONTRACT_LIMITS.textQuoteLength) ||
+    (Object.hasOwn(value, "prefix") &&
+      !isBoundedString(
+        value.prefix,
+        1,
+        TARGET_CONTRACT_LIMITS.textContextLength,
+      )) ||
+    (Object.hasOwn(value, "suffix") &&
+      !isBoundedString(
+        value.suffix,
+        1,
+        TARGET_CONTRACT_LIMITS.textContextLength,
+      ))
+  ) {
+    return false;
+  }
+  const hasStartOffset = Object.hasOwn(value, "startOffset");
+  const hasEndOffset = Object.hasOwn(value, "endOffset");
+  if (hasStartOffset !== hasEndOffset) return false;
+  if (!hasStartOffset) return true;
+  return (
+    isSafeIntegerRange(
+      value.startOffset,
+      0,
+      TARGET_CONTRACT_LIMITS.textOffset,
+    ) &&
+    isSafeIntegerRange(value.endOffset, 0, TARGET_CONTRACT_LIMITS.textOffset) &&
+    value.startOffset < value.endOffset &&
+    value.endOffset - value.startOffset === value.exact.length
+  );
+};
+
+const isTargetRegionAnchorV1 = (
+  value: unknown,
+  requireContainingBlock: boolean,
+): value is TargetRegionAnchorV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(
+      value,
+      ["layoutMode"],
+      ["containingBlock", "previousVisibleSibling", "nextVisibleSibling"],
+    ) ||
+    !isString(value.layoutMode) ||
+    !["flow", "flex", "grid", "positioned", "unknown"].includes(
+      value.layoutMode,
+    )
+  ) {
+    return false;
+  }
+  const anchorKeys = [
+    "containingBlock",
+    "previousVisibleSibling",
+    "nextVisibleSibling",
+  ] as const;
+  if (requireContainingBlock && !Object.hasOwn(value, "containingBlock")) {
+    return false;
+  }
+  return anchorKeys.every(
+    (key) => !Object.hasOwn(value, key) || isElementAnchorV1(value[key]),
+  );
+};
+
+const isTargetBlockV1 = (value: unknown): value is TargetBlockV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["source", "level"]) &&
+  isString(value.source) &&
+  ["semantic", "landmark", "heuristic", "user"].includes(value.source) &&
+  isSafeIntegerRange(value.level, 0, TARGET_CONTRACT_LIMITS.blockLevel);
+
+const TARGET_COMMON_KEYS = [
+  "schemaVersion",
+  "targetId",
+  "captureRevisionId",
+  "captureSource",
+  "pagePath",
+  "kind",
+  "label",
+  "viewport",
+  "document",
+] as const;
+
+const hasValidTargetCommonFields = (value: UnknownRecord): boolean =>
+  value.schemaVersion === TARGET_SCHEMA_VERSION &&
+  isBoundedId(value.targetId) &&
+  isBoundedId(value.captureRevisionId) &&
+  isTargetPagePath(value.pagePath) &&
+  isBoundedString(value.label, 1, TARGET_CONTRACT_LIMITS.labelLength) &&
+  isTargetViewportV1(value.viewport) &&
+  isTargetDocumentV1(value.document) &&
+  ((value.captureSource === "accepted" &&
+    !Object.hasOwn(value, "captureProposalId")) ||
+    (value.captureSource === "proposal" &&
+      Object.hasOwn(value, "captureProposalId") &&
+      isBoundedId(value.captureProposalId)));
+
+export const isTargetV1 = (value: unknown): value is TargetV1 => {
+  if (!isRecord(value) || !hasValidTargetCommonFields(value)) return false;
+  const captureProposalKey = ["captureProposalId"] as const;
+  switch (value.kind) {
+    case "page":
+      return hasExactKeys(value, TARGET_COMMON_KEYS, captureProposalKey);
+    case "block":
+      return (
+        hasExactKeys(
+          value,
+          [...TARGET_COMMON_KEYS, "elementAnchor", "block"],
+          [...captureProposalKey, "geometry"],
+        ) &&
+        isElementAnchorV1(value.elementAnchor) &&
+        isTargetBlockV1(value.block) &&
+        (!Object.hasOwn(value, "geometry") ||
+          isTargetGeometryV1(value.geometry, false))
+      );
+    case "element":
+      return (
+        hasExactKeys(
+          value,
+          [...TARGET_COMMON_KEYS, "elementAnchor"],
+          [...captureProposalKey, "geometry"],
+        ) &&
+        isElementAnchorV1(value.elementAnchor) &&
+        (!Object.hasOwn(value, "geometry") ||
+          isTargetGeometryV1(value.geometry, false))
+      );
+    case "text":
+      return (
+        hasExactKeys(
+          value,
+          [...TARGET_COMMON_KEYS, "elementAnchor", "textAnchor"],
+          [...captureProposalKey, "geometry"],
+        ) &&
+        isElementAnchorV1(value.elementAnchor) &&
+        isTargetTextAnchorV1(value.textAnchor) &&
+        (!Object.hasOwn(value, "geometry") ||
+          isTargetGeometryV1(value.geometry, false))
+      );
+    case "point":
+      return (
+        hasExactKeys(
+          value,
+          [...TARGET_COMMON_KEYS, "point", "regionAnchor"],
+          captureProposalKey,
+        ) &&
+        isTargetPointV1(value.point) &&
+        isTargetRegionAnchorV1(value.regionAnchor, true)
+      );
+    case "region":
+      return (
+        hasExactKeys(
+          value,
+          [...TARGET_COMMON_KEYS, "geometry", "regionAnchor"],
+          captureProposalKey,
+        ) &&
+        isTargetGeometryV1(value.geometry, true) &&
+        isTargetRegionAnchorV1(value.regionAnchor, false)
+      );
+    default:
+      return false;
+  }
+};
+
+const TARGET_RESOLVER_SIGNALS = [
+  "unique_id",
+  "semantic_fingerprint",
+  "text_quote",
+  "ancestor",
+  "sibling",
+  "dom_path",
+  "geometry",
+] as const satisfies readonly TargetResolverSignalV1[];
+
+const isTargetResolverSignalV1 = (
+  value: unknown,
+): value is TargetResolverSignalV1 =>
+  isString(value) &&
+  (TARGET_RESOLVER_SIGNALS as readonly string[]).includes(value);
+
+const isTargetResolverCandidateV1 = (
+  value: unknown,
+): value is TargetResolverCandidateV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(
+      value,
+      ["candidateId", "score", "reasons", "summary"],
+      ["elementAnchor", "geometry"],
+    ) ||
+    !isBoundedId(value.candidateId) ||
+    !isFiniteRange(value.score, 0, 1) ||
+    !isBoundedExactArray(
+      value.reasons,
+      1,
+      TARGET_CONTRACT_LIMITS.resolverReasons,
+      isTargetResolverSignalV1,
+    ) ||
+    new Set(value.reasons).size !== value.reasons.length ||
+    !isBoundedString(value.summary, 1, TARGET_CONTRACT_LIMITS.labelLength)
+  ) {
+    return false;
+  }
+  return (
+    (!Object.hasOwn(value, "elementAnchor") ||
+      isElementAnchorV1(value.elementAnchor)) &&
+    (!Object.hasOwn(value, "geometry") ||
+      isTargetGeometryV1(value.geometry, false))
+  );
+};
+
+export const isTargetResolverResultV1 = (
+  value: unknown,
+): value is TargetResolverResultV1 => {
+  if (!isRecord(value)) return false;
+  const resolved = value.status === "resolved";
+  if (
+    !hasExactKeys(value, [
+      "schemaVersion",
+      "resolverVersion",
+      "targetId",
+      "captureRevisionId",
+      "resolvedRevisionId",
+      "status",
+      "candidates",
+      ...(resolved ? ["selectedCandidateId"] : []),
+    ]) ||
+    value.schemaVersion !== TARGET_SCHEMA_VERSION ||
+    value.resolverVersion !== TARGET_RESOLVER_VERSION ||
+    !isBoundedId(value.targetId) ||
+    !isBoundedId(value.captureRevisionId) ||
+    !isBoundedId(value.resolvedRevisionId) ||
+    !isString(value.status) ||
+    !["resolved", "ambiguous", "detached"].includes(value.status) ||
+    !isBoundedExactArray(
+      value.candidates,
+      value.status === "detached" ? 0 : 1,
+      TARGET_CONTRACT_LIMITS.resolverCandidates,
+      isTargetResolverCandidateV1,
+    )
+  ) {
+    return false;
+  }
+  const candidateIds = value.candidates.map(
+    (candidate) => candidate.candidateId,
+  );
+  if (new Set(candidateIds).size !== candidateIds.length) return false;
+  return (
+    !resolved ||
+    (isBoundedId(value.selectedCandidateId) &&
+      candidateIds.includes(value.selectedCandidateId))
+  );
+};
+
 export const isProject = (value: unknown): value is Project => {
   if (
     !isRecord(value) ||
@@ -538,8 +1296,14 @@ export const isBootstrapResponse = (
     isNonEmptyString(value.editorOrigin) &&
     isPreviewScopeBaseOrigin(value.previewOrigin) &&
     isExactArrayOf(capabilities.targetKinds, isString) &&
-    capabilities.targetKinds.length === 1 &&
-    capabilities.targetKinds[0] === "element" &&
+    capabilities.targetKinds.length === 6 &&
+    capabilities.targetKinds.every(
+      (kind, index) =>
+        kind ===
+        (["page", "block", "element", "text", "point", "region"] as const)[
+          index
+        ],
+    ) &&
     isStringArray(capabilities.dispositions) &&
     capabilities.dispositions.length > 0 &&
     new Set(capabilities.dispositions).size ===
@@ -635,28 +1399,20 @@ export const isImportPreviewResponse = (
 };
 
 export const isTargetResponse = (value: unknown): value is TargetResponse => {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["schemaVersion", "target"]) ||
-    !hasVersion(value) ||
-    !isRecord(value.target) ||
-    !hasExactKeys(value.target, [
-      "id",
-      "revisionId",
-      "kind",
-      "elementId",
-      "label",
-    ])
-  ) {
-    return false;
-  }
-  const target = value.target;
   return (
-    isNonEmptyString(target.id) &&
-    isNonEmptyString(target.revisionId) &&
-    target.kind === "element" &&
-    isNonEmptyString(target.elementId) &&
-    isNonEmptyString(target.label)
+    isRecord(value) &&
+    hasExactKeys(value, [
+      "schemaVersion",
+      "target",
+      "resolution",
+      "resolutionId",
+    ]) &&
+    hasVersion(value) &&
+    isTargetV1(value.target) &&
+    isTargetResolverResultV1(value.resolution) &&
+    value.resolution.targetId === value.target.targetId &&
+    value.resolution.captureRevisionId === value.target.captureRevisionId &&
+    isBoundedId(value.resolutionId)
   );
 };
 
@@ -670,6 +1426,7 @@ export const isContextResponse = (value: unknown): value is ContextResponse => {
       "id",
       "revisionId",
       "targetId",
+      "targetResolutionId",
       "instruction",
       "canonicalJson",
       "sha256",
@@ -682,6 +1439,7 @@ export const isContextResponse = (value: unknown): value is ContextResponse => {
     isNonEmptyString(context.id) &&
     isNonEmptyString(context.revisionId) &&
     isNonEmptyString(context.targetId) &&
+    isBoundedId(context.targetResolutionId) &&
     isString(context.instruction) &&
     isString(context.canonicalJson) &&
     isSha256(context.sha256)
@@ -922,6 +1680,86 @@ export const isPreviewDiagnosticMessage = (
     value.code === "unhandled_rejection") &&
   value.sourceUnavailable === true;
 
+export const isPreviewTargetMessage = (
+  value: unknown,
+): value is PreviewTargetMessage =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "type",
+    "schemaVersion",
+    "channelId",
+    "projectId",
+    "snapshotId",
+    "revisionId",
+    "target",
+  ]) &&
+  value.type === "synapsegit-lp.target-draft" &&
+  value.schemaVersion === SCHEMA_VERSION &&
+  isNonEmptyString(value.channelId) &&
+  isNonEmptyString(value.projectId) &&
+  isNonEmptyString(value.snapshotId) &&
+  isNonEmptyString(value.revisionId) &&
+  isTargetV1(value.target) &&
+  value.target.captureRevisionId === value.revisionId &&
+  ((value.target.captureSource === "accepted" &&
+    value.snapshotId === value.revisionId) ||
+    (value.target.captureSource === "proposal" &&
+      value.target.captureProposalId === value.snapshotId &&
+      value.snapshotId !== value.revisionId));
+
+const isPreviewStructureNode = (
+  value: unknown,
+): value is PreviewStructureNode =>
+  isRecord(value) &&
+  hasExactKeys(
+    value,
+    ["runtimeNodeHandle", "kind", "label", "tagName", "depth"],
+    ["parentRuntimeNodeHandle"],
+  ) &&
+  isBoundedString(value.runtimeNodeHandle, 1, 128) &&
+  (!Object.hasOwn(value, "parentRuntimeNodeHandle") ||
+    isBoundedString(value.parentRuntimeNodeHandle, 1, 128)) &&
+  (value.kind === "block" || value.kind === "element") &&
+  isBoundedString(value.label, 1, TARGET_CONTRACT_LIMITS.labelLength) &&
+  isBoundedString(value.tagName, 1, TARGET_CONTRACT_LIMITS.classTokenLength) &&
+  /^[a-z][a-z0-9-]*$/u.test(value.tagName) &&
+  isSafeIntegerRange(value.depth, 0, TARGET_CONTRACT_LIMITS.blockLevel);
+
+export const isPreviewStructureMessage = (
+  value: unknown,
+): value is PreviewStructureMessage => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "type",
+      "schemaVersion",
+      "channelId",
+      "projectId",
+      "snapshotId",
+      "revisionId",
+      "nodes",
+    ]) ||
+    value.type !== "synapsegit-lp.structure" ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    !isNonEmptyString(value.channelId) ||
+    !isNonEmptyString(value.projectId) ||
+    !isNonEmptyString(value.snapshotId) ||
+    !isNonEmptyString(value.revisionId) ||
+    !isBoundedExactArray(value.nodes, 0, 200, isPreviewStructureNode)
+  ) {
+    return false;
+  }
+  const handles = value.nodes.map((node) => node.runtimeNodeHandle);
+  if (new Set(handles).size !== handles.length) return false;
+  const known = new Set(handles);
+  return value.nodes.every(
+    (node) =>
+      node.parentRuntimeNodeHandle === undefined ||
+      (node.parentRuntimeNodeHandle !== node.runtimeNodeHandle &&
+        known.has(node.parentRuntimeNodeHandle)),
+  );
+};
+
 export const isPreviewActionMessage = (
   value: unknown,
 ): value is PreviewActionMessage => {
@@ -945,9 +1783,34 @@ export const isPreviewActionMessage = (
   if (!hasValidEnvelope) return false;
   if (value.action === "set_mode") {
     return (
-      hasExactKeys(value, [...commonKeys, "mode"]) &&
-      (value.mode === "select" || value.mode === "interact")
+      hasExactKeys(value, [
+        ...commonKeys,
+        "mode",
+        "targetKind",
+        "previewScale",
+      ]) &&
+      (value.mode === "select" || value.mode === "interact") &&
+      isString(value.targetKind) &&
+      ["page", "block", "element", "text", "point", "region"].includes(
+        value.targetKind,
+      ) &&
+      isFiniteRange(value.previewScale, Number.MIN_VALUE, 8)
     );
   }
-  return value.action === "clear_selection" && hasExactKeys(value, commonKeys);
+  if (
+    value.action === "clear_selection" ||
+    value.action === "request_structure" ||
+    value.action === "capture_page"
+  ) {
+    return hasExactKeys(value, commonKeys);
+  }
+  return (
+    value.action === "capture_node" &&
+    hasExactKeys(value, [...commonKeys, "runtimeNodeHandle", "targetKind"]) &&
+    isBoundedString(value.runtimeNodeHandle, 1, 128) &&
+    isString(value.targetKind) &&
+    ["page", "block", "element", "text", "point", "region"].includes(
+      value.targetKind,
+    )
+  );
 };

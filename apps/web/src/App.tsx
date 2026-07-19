@@ -16,9 +16,12 @@ import type {
   PreviewDiagnosticMessage,
   PreviewMode,
   PreviewSource,
+  PreviewStructureNode,
   Project,
   Proposal,
-  Target,
+  TargetKind,
+  TargetSelection,
+  TargetV1,
   ViewportPreset,
 } from "@synapsegit-lp/contracts";
 import {
@@ -36,17 +39,42 @@ import {
 import {
   createChannelId,
   isAllowedPreviewUrl,
+  postCaptureNode,
+  postCapturePage,
   postClearSelection,
   postPreviewMode,
+  postRequestStructure,
   readPreviewDiagnostic,
-  readPreviewSelection,
+  readPreviewStructure,
+  readPreviewTarget,
 } from "./preview/bridge";
 
-const ELEMENTS = [
-  { elementId: "hero-heading", label: "ヒーロー見出し" },
-  { elementId: "hero-copy", label: "ヒーロー説明文" },
-  { elementId: "hero-cta", label: "ヒーローCTA" },
-] as const;
+const TARGET_KINDS: readonly TargetKind[] = [
+  "page",
+  "block",
+  "element",
+  "text",
+  "point",
+  "region",
+];
+
+const targetKindLabel: Record<TargetKind, string> = {
+  page: "ページ",
+  block: "ブロック",
+  element: "要素",
+  text: "テキスト",
+  point: "座標",
+  region: "領域",
+};
+
+type CaptureCommand =
+  | { id: number; action: "page" }
+  | {
+      id: number;
+      action: "node";
+      runtimeNodeHandle: string;
+      targetKind: TargetKind;
+    };
 
 const VIEWPORTS: Record<Exclude<ViewportPreset, "custom">, number> = {
   desktop: 1440,
@@ -231,44 +259,88 @@ function StudioHeader({
 }
 
 interface PageTreeProps {
-  target: Target | null;
+  target: TargetSelection | null;
+  targetKind: TargetKind;
+  structure: PreviewStructureNode[];
   disabled: boolean;
-  onSelect: (elementId: string) => void;
+  onTargetKind: (kind: TargetKind) => void;
+  onCapturePage: () => void;
+  onCaptureNode: (node: PreviewStructureNode) => void;
 }
 
-function PageTree({ target, disabled, onSelect }: PageTreeProps) {
+function PageTree({
+  target,
+  targetKind,
+  structure,
+  disabled,
+  onTargetKind,
+  onCapturePage,
+  onCaptureNode,
+}: PageTreeProps) {
   return (
     <nav className="page-tree panel" aria-label="ページと要素">
       <div className="panel-heading">
         <p className="eyebrow">STRUCTURE</p>
         <h2>ページ</h2>
       </div>
-      <div className="tree-root">
+      <p className="tree-label">ターゲット種別</p>
+      <div
+        className="target-kind-grid"
+        role="group"
+        aria-label="ターゲット種別"
+      >
+        {TARGET_KINDS.map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            disabled={disabled}
+            aria-pressed={targetKind === kind}
+            onClick={() => onTargetKind(kind)}
+          >
+            {targetKindLabel[kind]}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="tree-root"
+        disabled={disabled}
+        aria-current={target?.target.kind === "page" ? "true" : undefined}
+        onClick={onCapturePage}
+      >
         <span className="tree-file" aria-hidden="true">
           ◇
         </span>
-        <span>index.html</span>
-      </div>
-      <p className="tree-label">要素</p>
+        <span>index.html 全体</span>
+      </button>
+      <p className="tree-label">プレビューから検出した構造</p>
       <ul className="element-list">
-        {ELEMENTS.map((element) => (
-          <li key={element.elementId}>
+        {structure.map((node) => (
+          <li key={node.runtimeNodeHandle}>
             <button
               type="button"
               disabled={disabled}
-              aria-current={
-                target?.elementId === element.elementId ? "true" : undefined
-              }
-              onClick={() => onSelect(element.elementId)}
+              title={`${node.label} <${node.tagName}>`}
+              style={{
+                paddingInlineStart: `${0.65 + Math.min(node.depth, 4) * 0.65}rem`,
+              }}
+              onClick={() => onCaptureNode(node)}
             >
-              <span aria-hidden="true">↳</span>
-              {element.label}
+              <span aria-hidden="true">
+                {node.kind === "block" ? "▦" : "↳"}
+              </span>
+              <span>{node.label}</span>
+              <small>{node.tagName}</small>
             </button>
           </li>
         ))}
       </ul>
+      {structure.length === 0 ? (
+        <p className="tree-empty">プレビューの読み込み後に構造を表示します。</p>
+      ) : null}
       <div className="keyboard-hint">
-        <kbd>Tab</kbd> で移動 · <kbd>Enter</kbd> で選択
+        <kbd>Tab</kbd> で移動 · <kbd>Enter</kbd>{" "}
+        で選択。座標・領域はプレビュー上で指定します。
       </div>
     </nav>
   );
@@ -278,7 +350,9 @@ interface PreviewPaneProps {
   project: Project;
   proposal: Proposal | null;
   previewScopeBaseOrigin: string;
-  target: Target | null;
+  target: TargetSelection | null;
+  targetKind: TargetKind;
+  captureCommand: CaptureCommand | null;
   mode: PreviewMode;
   source: PreviewSource;
   viewport: ViewportPreset;
@@ -286,7 +360,8 @@ interface PreviewPaneProps {
   disabled: boolean;
   onMode: (mode: PreviewMode) => void;
   onSource: (source: PreviewSource) => void;
-  onSelection: (elementId: string) => void;
+  onTarget: (target: TargetV1) => void;
+  onStructure: (nodes: PreviewStructureNode[]) => void;
   onBridgeError: (message: string) => void;
   onClear: () => void;
 }
@@ -296,6 +371,8 @@ function PreviewPane({
   proposal,
   previewScopeBaseOrigin,
   target,
+  targetKind,
+  captureCommand,
   mode,
   source,
   viewport,
@@ -303,11 +380,13 @@ function PreviewPane({
   disabled,
   onMode,
   onSource,
-  onSelection,
+  onTarget,
+  onStructure,
   onBridgeError,
   onClear,
 }: PreviewPaneProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const handledCaptureCommand = useRef(0);
   const [diagnostic, setDiagnostic] = useState<PreviewDiagnosticMessage | null>(
     null,
   );
@@ -360,12 +439,20 @@ function PreviewPane({
     const frameWindow = iframeRef.current?.contentWindow;
     if (frameWindow === null || frameWindow === undefined) return;
     const listener = (event: MessageEvent<unknown>) => {
-      const selection = readPreviewSelection(event, {
+      const targetDraft = readPreviewTarget(event, {
         ...bridgeBinding,
         expectedSource: frameWindow,
       });
-      if (selection !== null) {
-        onSelection(selection.elementId);
+      if (targetDraft !== null) {
+        onTarget(targetDraft.target);
+        return;
+      }
+      const structure = readPreviewStructure(event, {
+        ...bridgeBinding,
+        expectedSource: frameWindow,
+      });
+      if (structure !== null) {
+        onStructure(structure.nodes);
         return;
       }
       const nextDiagnostic = readPreviewDiagnostic(event, {
@@ -376,16 +463,44 @@ function PreviewPane({
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
-  }, [bridgeBinding, onSelection]);
+  }, [bridgeBinding, onStructure, onTarget]);
+
+  useEffect(() => {
+    onStructure([]);
+  }, [bridgeBinding, onStructure]);
 
   const synchronizeMode = () => {
     if (!previewUrlAllowed) return;
     const frameWindow = iframeRef.current?.contentWindow;
     if (frameWindow === null || frameWindow === undefined) return;
-    postPreviewMode(frameWindow, bridgeBinding, mode);
+    postPreviewMode(frameWindow, bridgeBinding, mode, targetKind, 1);
+    postRequestStructure(frameWindow, bridgeBinding);
   };
 
-  useEffect(synchronizeMode, [bridgeBinding, mode]);
+  useEffect(synchronizeMode, [bridgeBinding, mode, targetKind]);
+
+  useEffect(() => {
+    if (
+      captureCommand === null ||
+      captureCommand.id <= handledCaptureCommand.current ||
+      !previewUrlAllowed
+    ) {
+      return;
+    }
+    const frameWindow = iframeRef.current?.contentWindow;
+    if (frameWindow === null || frameWindow === undefined) return;
+    handledCaptureCommand.current = captureCommand.id;
+    if (captureCommand.action === "page") {
+      postCapturePage(frameWindow, bridgeBinding);
+      return;
+    }
+    postCaptureNode(
+      frameWindow,
+      bridgeBinding,
+      captureCommand.runtimeNodeHandle,
+      captureCommand.targetKind,
+    );
+  }, [bridgeBinding, captureCommand, previewUrlAllowed]);
 
   const clearSelection = () => {
     const frameWindow = iframeRef.current?.contentWindow;
@@ -426,6 +541,7 @@ function PreviewPane({
         >
           <button
             type="button"
+            disabled={disabled}
             aria-pressed={mode === "select"}
             onClick={() => onMode("select")}
           >
@@ -433,6 +549,7 @@ function PreviewPane({
           </button>
           <button
             type="button"
+            disabled={disabled}
             aria-pressed={mode === "interact"}
             onClick={() => onMode("interact")}
           >
@@ -446,6 +563,7 @@ function PreviewPane({
         >
           <button
             type="button"
+            disabled={disabled}
             aria-pressed={activeSource === "accepted"}
             onClick={() => onSource("accepted")}
           >
@@ -453,7 +571,7 @@ function PreviewPane({
           </button>
           <button
             type="button"
-            disabled={proposal === null}
+            disabled={disabled || proposal === null}
             aria-pressed={activeSource === "proposed"}
             onClick={() => onSource("proposed")}
           >
@@ -464,6 +582,7 @@ function PreviewPane({
           <button
             type="button"
             className="text-button"
+            disabled={disabled}
             onClick={clearSelection}
           >
             選択解除 <kbd>Esc</kbd>
@@ -605,7 +724,7 @@ function ContextDialog({
 
 interface TargetComposerProps {
   project: Project;
-  target: Target | null;
+  target: TargetSelection | null;
   prompt: string;
   disabled: boolean;
   reviewButtonRef: React.RefObject<HTMLButtonElement | null>;
@@ -623,6 +742,8 @@ function TargetComposer({
   onReviewContext,
 }: TargetComposerProps) {
   const instructionBytes = utf8Bytes(prompt);
+  const capturedTarget = target?.target ?? null;
+  const resolution = target?.resolution ?? null;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onReviewContext();
@@ -634,7 +755,7 @@ function TargetComposer({
         <p className="eyebrow">INTENT</p>
         <h2 id="target-panel-title">選択中のターゲット</h2>
       </div>
-      {target === null ? (
+      {capturedTarget === null || resolution === null ? (
         <div className="empty-target">
           <span className="target-crosshair" aria-hidden="true">
             ⌖
@@ -646,35 +767,82 @@ function TargetComposer({
           <div>
             <dt>Kind</dt>
             <dd>
-              <span className="pill">element</span>
+              <span className="pill">{capturedTarget.kind}</span>
             </dd>
           </div>
           <div>
             <dt>Page</dt>
-            <dd>index.html</dd>
+            <dd>{capturedTarget.pagePath}</dd>
           </div>
           <div>
             <dt>Label</dt>
-            <dd>{target.label}</dd>
+            <dd>{capturedTarget.label}</dd>
           </div>
-          <div>
-            <dt>Element</dt>
-            <dd>
-              <code>#{target.elementId}</code>
-            </dd>
-          </div>
+          {"elementAnchor" in capturedTarget ? (
+            <div>
+              <dt>Anchor</dt>
+              <dd>
+                <code>
+                  {capturedTarget.elementAnchor.uniqueElementId === undefined
+                    ? capturedTarget.elementAnchor.tagName.toLowerCase()
+                    : `#${capturedTarget.elementAnchor.uniqueElementId}`}
+                </code>
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt>Capture revision</dt>
-            <dd>{shortIdentity(target.revisionId)}</dd>
+            <dd>{shortIdentity(capturedTarget.captureRevisionId)}</dd>
+          </div>
+          <div>
+            <dt>Capture source</dt>
+            <dd>
+              {capturedTarget.captureSource === "accepted"
+                ? "Accepted"
+                : `Proposed · ${shortIdentity(capturedTarget.captureProposalId)}`}
+            </dd>
           </div>
           <div>
             <dt>Resolution</dt>
             <dd>
-              <span className="resolved">✓ resolved</span>
+              <span className={`resolution resolution-${resolution.status}`}>
+                {resolution.status === "resolved" ? "✓" : "!"}{" "}
+                {resolution.status}
+              </span>
             </dd>
+          </div>
+          <div>
+            <dt>Candidates</dt>
+            <dd>{resolution.candidates.length}</dd>
           </div>
         </dl>
       )}
+
+      {capturedTarget?.kind === "point" || capturedTarget?.kind === "region" ? (
+        <p className="target-resolution-note">
+          座標・領域は視覚的な要望の手がかりです。AIへの送信前に、サーバーが現在のAccepted
+          revision上の意味的な対象へ解決します。
+        </p>
+      ) : null}
+      {resolution !== null && resolution.status !== "resolved" ? (
+        <div className="resolution-warning" role="status">
+          <p>
+            {resolution.status === "ambiguous"
+              ? "候補を一意に決められません。プレビュー上でより具体的な対象を選び直してください。"
+              : "現在のAccepted revisionから対象を再検出できません。対象を選び直してください。"}
+          </p>
+          {resolution.candidates.length > 0 ? (
+            <ul>
+              {resolution.candidates.map((candidate) => (
+                <li key={candidate.candidateId}>
+                  <span>{candidate.summary}</span>
+                  <strong>{candidate.reasons.join(" · ")}</strong>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
 
       <form className="prompt-composer" onSubmit={submit}>
         <label htmlFor="ai-instruction">AIへの要望</label>
@@ -701,10 +869,12 @@ function TargetComposer({
           className="button button-primary button-wide"
           disabled={
             disabled ||
-            target === null ||
+            capturedTarget === null ||
+            resolution?.status !== "resolved" ||
             prompt.trim().length === 0 ||
             instructionBytes > 2000 ||
-            target.revisionId !== project.revisionId
+            capturedTarget.captureRevisionId !== project.revisionId ||
+            resolution.resolvedRevisionId !== project.revisionId
           }
         >
           送信内容を確認
@@ -716,7 +886,7 @@ function TargetComposer({
 
 interface ReviewDrawerProps {
   proposal: Proposal;
-  target: Target | null;
+  target: TargetV1 | null;
   prompt: string;
   busy: boolean;
   rationale: string;
@@ -1126,6 +1296,13 @@ function Studio({ session }: StudioProps) {
     "見出しを、未来への期待が伝わる表現にしてください",
   );
   const [rationale, setRationale] = useState("");
+  const [targetKind, setTargetKind] = useState<TargetKind>("element");
+  const [structure, setStructure] = useState<PreviewStructureNode[]>([]);
+  const [captureCommand, setCaptureCommand] = useState<CaptureCommand | null>(
+    null,
+  );
+  const captureCommandId = useRef(0);
+  const targetRequestId = useRef(0);
   const reviewButtonRef = useRef<HTMLButtonElement>(null);
   const importButtonRef = useRef<HTMLButtonElement>(null);
   const busy = state.operation !== null || homeOperation !== null;
@@ -1216,20 +1393,102 @@ function Studio({ session }: StudioProps) {
   };
 
   const selectTarget = useCallback(
-    (elementId: string) => {
+    (targetDraft: TargetV1) => {
       if (state.project === null || state.operation !== null) return;
       const project = state.project;
-      void run(async () => {
+      const proposal = state.proposal;
+      const expectedCaptureSource =
+        state.previewSource === "proposed" && proposal !== null
+          ? "proposal"
+          : "accepted";
+      if (
+        targetDraft.captureRevisionId !== project.revisionId ||
+        targetDraft.captureSource !== expectedCaptureSource ||
+        (targetDraft.captureSource === "proposal" &&
+          targetDraft.captureProposalId !== proposal?.id)
+      ) {
+        dispatch({
+          type: "FAILED",
+          message:
+            "表示中のプレビューとTargetのcapture bindingが一致しません。Accepted LPは変更されていません。",
+        });
+        return;
+      }
+      const requestId = ++targetRequestId.current;
+      void (async () => {
         dispatch({ type: "OPERATION_STARTED", operation: "selecting_target" });
-        const target = await session.api.createTarget(
-          project.id,
-          project.revisionId,
-          elementId,
-        );
-        dispatch({ type: "TARGET_SELECTED", target });
-      });
+        try {
+          const target = await session.api.createTarget(
+            project.id,
+            targetDraft,
+          );
+          if (requestId !== targetRequestId.current) return;
+          if (
+            target.target.targetId !== targetDraft.targetId ||
+            target.target.captureRevisionId !== targetDraft.captureRevisionId ||
+            target.target.captureSource !== targetDraft.captureSource ||
+            target.target.captureProposalId !== targetDraft.captureProposalId ||
+            target.target.pagePath !== targetDraft.pagePath ||
+            target.target.kind !== targetDraft.kind
+          ) {
+            throw new ApiError(
+              "Target APIのcapture bindingが要求と一致しません。",
+              { code: "target_binding_mismatch", retryable: false },
+            );
+          }
+          dispatch({ type: "TARGET_SELECTED", target });
+        } catch (error) {
+          if (requestId === targetRequestId.current) {
+            dispatch({ type: "FAILED", message: errorMessage(error) });
+          }
+        }
+      })();
     },
-    [run, session.api, state.operation, state.project],
+    [
+      session.api,
+      state.operation,
+      state.previewSource,
+      state.project,
+      state.proposal,
+    ],
+  );
+
+  const requestPageCapture = useCallback(() => {
+    setTargetKind("page");
+    dispatch({ type: "SET_PREVIEW_MODE", mode: "select" });
+    if (state.target !== null && state.operation === null) {
+      dispatch({ type: "TARGET_CLEARED" });
+    }
+    captureCommandId.current += 1;
+    setCaptureCommand({ id: captureCommandId.current, action: "page" });
+  }, [state.operation, state.target]);
+
+  const requestNodeCapture = useCallback(
+    (node: PreviewStructureNode) => {
+      captureCommandId.current += 1;
+      setCaptureCommand(
+        targetKind === "page"
+          ? { id: captureCommandId.current, action: "page" }
+          : {
+              id: captureCommandId.current,
+              action: "node",
+              runtimeNodeHandle: node.runtimeNodeHandle,
+              targetKind,
+            },
+      );
+    },
+    [targetKind],
+  );
+
+  const changeTargetKind = useCallback(
+    (kind: TargetKind) => {
+      setTargetKind(kind);
+      dispatch({ type: "SET_PREVIEW_MODE", mode: "select" });
+      if (state.target !== null && state.operation === null) {
+        dispatch({ type: "TARGET_CLEARED" });
+      }
+    },
+    [state.operation, state.target],
   );
 
   const clearTarget = useCallback(() => {
@@ -1254,17 +1513,34 @@ function Studio({ session }: StudioProps) {
   const reviewContext = () => {
     if (state.project === null || state.target === null) return;
     const project = state.project;
-    const target = state.target;
+    const selection = state.target;
     const instruction = prompt.trim();
-    if (instruction.length === 0) return;
+    if (
+      instruction.length === 0 ||
+      selection.resolution.status !== "resolved" ||
+      selection.resolution.resolvedRevisionId !== project.revisionId
+    ) {
+      return;
+    }
     void run(async () => {
       dispatch({ type: "OPERATION_STARTED", operation: "assembling_context" });
       const context = await session.api.createContext(
         project.id,
         project.revisionId,
-        target.id,
+        selection.target.targetId,
+        selection.resolutionId,
         instruction,
       );
+      if (
+        context.revisionId !== project.revisionId ||
+        context.targetId !== selection.target.targetId ||
+        context.targetResolutionId !== selection.resolutionId
+      ) {
+        throw new ApiError("送信コンテキストのTarget bindingが一致しません。", {
+          code: "context_binding_mismatch",
+          retryable: false,
+        });
+      }
       dispatch({ type: "CONTEXT_READY", context });
     });
   };
@@ -1505,14 +1781,20 @@ function Studio({ session }: StudioProps) {
       <div className="studio-grid">
         <PageTree
           target={state.target}
-          disabled={busy || state.proposal !== null}
-          onSelect={selectTarget}
+          targetKind={targetKind}
+          structure={structure}
+          disabled={busy}
+          onTargetKind={changeTargetKind}
+          onCapturePage={requestPageCapture}
+          onCaptureNode={requestNodeCapture}
         />
         <PreviewPane
           project={state.project}
           proposal={state.proposal}
           previewScopeBaseOrigin={session.bootstrap.previewOrigin}
           target={state.target}
+          targetKind={targetKind}
+          captureCommand={captureCommand}
           mode={state.previewMode}
           source={state.previewSource}
           viewport={state.viewportPreset}
@@ -1522,7 +1804,8 @@ function Studio({ session }: StudioProps) {
           onSource={(source) =>
             dispatch({ type: "SET_PREVIEW_SOURCE", source })
           }
-          onSelection={selectTarget}
+          onTarget={selectTarget}
+          onStructure={setStructure}
           onBridgeError={(message) => dispatch({ type: "FAILED", message })}
           onClear={clearTarget}
         />

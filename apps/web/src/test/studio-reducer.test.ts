@@ -1,7 +1,9 @@
 import { initialStudioState, studioReducer } from "../app/studio-reducer";
 import {
+  elementTargetFixture,
   projectFixture,
   proposalResponseFixture,
+  targetResolutionFixture,
   targetResponseFixture,
 } from "./fixtures";
 
@@ -32,7 +34,11 @@ describe("studio reducer Accepted invariant", () => {
     const before = {
       ...initialStudioState,
       project: projectFixture("revision-accepted-001"),
-      target: targetResponseFixture.target,
+      target: {
+        target: targetResponseFixture.target,
+        resolution: targetResponseFixture.resolution,
+        resolutionId: targetResponseFixture.resolutionId,
+      },
     };
     const refreshed = studioReducer(before, {
       type: "PROJECT_REFRESHED",
@@ -47,15 +53,36 @@ describe("studio reducer Accepted invariant", () => {
       {
         ...initialStudioState,
         project: projectFixture(),
-        target: targetResponseFixture.target,
+        target: {
+          target: targetResponseFixture.target,
+          resolution: targetResponseFixture.resolution,
+          resolutionId: targetResponseFixture.resolutionId,
+        },
       },
       { type: "PROPOSAL_READY", proposal: proposalResponseFixture.proposal },
     );
     const nextTarget = {
-      ...targetResponseFixture.target,
-      id: "target-002",
-      elementId: "hero-copy",
-      label: "ヒーロー説明文",
+      target: {
+        ...elementTargetFixture,
+        targetId: "target-002",
+        label: "ヒーロー説明文",
+        elementAnchor: {
+          ...elementTargetFixture.elementAnchor,
+          uniqueElementId: "hero-copy",
+        },
+      },
+      resolution: {
+        ...targetResolutionFixture,
+        targetId: "target-002",
+        selectedCandidateId: "candidate-hero-copy",
+        candidates: [
+          {
+            ...targetResolutionFixture.candidates[0]!,
+            candidateId: "candidate-hero-copy",
+          },
+        ],
+      },
+      resolutionId: "resolution-002",
     };
     const selected = studioReducer(proposed, {
       type: "TARGET_SELECTED",
@@ -64,6 +91,27 @@ describe("studio reducer Accepted invariant", () => {
 
     expect(selected.target).toEqual(nextTarget);
     expect(selected.proposalTarget).toEqual(targetResponseFixture.target);
+  });
+
+  it("invalidates a Target when the preview source changes", () => {
+    const before = {
+      ...initialStudioState,
+      project: projectFixture(),
+      target: {
+        target: targetResponseFixture.target,
+        resolution: targetResponseFixture.resolution,
+        resolutionId: targetResponseFixture.resolutionId,
+      },
+    };
+
+    const proposed = studioReducer(before, {
+      type: "SET_PREVIEW_SOURCE",
+      source: "proposed",
+    });
+
+    expect(proposed.previewSource).toBe("proposed");
+    expect(proposed.target).toBeNull();
+    expect(proposed.contextReview).toBeNull();
   });
 
   it("clamps custom viewport width to the supported 320–1920 range", () => {

@@ -138,6 +138,115 @@ async fn bootstrap_token(state: &StudioState) -> String {
         .to_owned()
 }
 
+fn test_target_id(seed: u128) -> String {
+    format!("tgt_{seed:032x}")
+}
+
+fn target_request(revision_id: &str, seed: u128, kind: &str, element_id: &str) -> Value {
+    target_request_for_source(revision_id, seed, kind, element_id, "accepted", None)
+}
+
+fn target_request_for_source(
+    revision_id: &str,
+    seed: u128,
+    kind: &str,
+    element_id: &str,
+    capture_source: &str,
+    capture_proposal_id: Option<&str>,
+) -> Value {
+    let (tag_name, label, accessible_name) = match element_id {
+        "hero" => ("section", "ヒーローブロック", "ヒーローブロック"),
+        "hero-copy" => (
+            "p",
+            "ヒーロー説明文",
+            "伝えたいことを選び、AIとの対話から最初の一歩をつくります。",
+        ),
+        "hero-cta" => ("a", "ヒーローCTA", "構想を始める"),
+        _ => ("h1", "ヒーロー見出し", "まだ、白紙です。"),
+    };
+    let element_anchor = json!({
+        "tagName":tag_name,
+        "uniqueElementId":element_id,
+        "accessibleName":accessible_name,
+        "domPath":format!("main/{tag_name}#{element_id}")
+    });
+    let geometry = json!({
+        "documentCssPixelRect":{"x":80.0,"y":120.0,"width":640.0,"height":96.0},
+        "viewportCssPixelRect":{"x":80.0,"y":120.0,"width":640.0,"height":96.0},
+        "viewportNormalizedRect":{"x":0.05,"y":0.1,"width":0.4,"height":0.08}
+    });
+    let mut target = json!({
+        "schemaVersion":1,
+        "targetId":test_target_id(seed),
+        "captureRevisionId":revision_id,
+        "captureSource":capture_source,
+        "pagePath":"index.html",
+        "kind":kind,
+        "label":label,
+        "viewport":{
+            "cssWidth":1600.0,
+            "cssHeight":1200.0,
+            "scrollX":0.0,
+            "scrollY":0.0,
+            "devicePixelRatio":1.0,
+            "visualViewportScale":1.0,
+            "previewScale":1.0
+        },
+        "document":{"cssWidth":1600.0,"cssHeight":2400.0,"layoutEpoch":1}
+    });
+    if let Some(proposal_id) = capture_proposal_id {
+        target["captureProposalId"] = json!(proposal_id);
+    }
+    match kind {
+        "page" => {}
+        "block" => {
+            target["geometry"] = geometry;
+            target["elementAnchor"] = element_anchor;
+            target["block"] = json!({"source":"semantic","level":1});
+        }
+        "element" => {
+            target["geometry"] = geometry;
+            target["elementAnchor"] = element_anchor;
+        }
+        "text" => {
+            target["geometry"] = geometry;
+            target["elementAnchor"] = element_anchor;
+            target["textAnchor"] = json!({
+                "exact":accessible_name,
+                "startOffset":0,
+                "endOffset":accessible_name.encode_utf16().count()
+            });
+        }
+        "point" => {
+            target["point"] = json!({
+                "documentCssPixel":{"x":120.0,"y":160.0},
+                "viewportNormalized":{"x":0.075,"y":0.1333333333}
+            });
+            target["regionAnchor"] = json!({"containingBlock":element_anchor,"layoutMode":"flow"});
+        }
+        "region" => {
+            target["geometry"] = geometry;
+            target["regionAnchor"] = json!({"containingBlock":element_anchor,"layoutMode":"flow"});
+        }
+        _ => panic!("unsupported test target kind: {kind}"),
+    }
+    json!({"schemaVersion":"1","target":target})
+}
+
+fn element_target_request(revision_id: &str, seed: u128, element_id: &str) -> Value {
+    target_request(revision_id, seed, "element", element_id)
+}
+
+fn context_request(revision_id: &str, target_response: &Value, instruction: &str) -> Value {
+    json!({
+        "schemaVersion":"1",
+        "revisionId":revision_id,
+        "targetId":string_at(target_response, "/target/targetId"),
+        "resolutionId":string_at(target_response, "/resolutionId"),
+        "instruction":instruction
+    })
+}
+
 #[tokio::test]
 async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     // Production proposal creation is serialized by the single Store mutex.
@@ -165,26 +274,20 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     let target = harness
         .post(
             &format!("/api/v1/projects/{project_id}/targets"),
-            json!({
-                "schemaVersion":"1",
-                "revisionId":original_revision,
-                "kind":"element",
-                "elementId":"hero-heading"
-            }),
+            element_target_request(&original_revision, 1, "hero-heading"),
         )
         .await;
     assert_eq!(target.status(), StatusCode::CREATED);
-    let target_id = string_at(&response_json(target).await, "/target/id");
+    let target = response_json(target).await;
 
     let context = harness
         .post(
             &format!("/api/v1/projects/{project_id}/contexts"),
-            json!({
-                "schemaVersion":"1",
-                "revisionId":original_revision,
-                "targetId":target_id,
-                "instruction":"見出しを公開に向けた言葉へ変更してください。"
-            }),
+            context_request(
+                &original_revision,
+                &target,
+                "見出しを公開に向けた言葉へ変更してください。",
+            ),
         )
         .await;
     assert_eq!(context.status(), StatusCode::CREATED);
@@ -474,7 +577,9 @@ async fn fake_ai_proposal_is_bound_to_each_selected_element() {
         ),
     ];
 
-    for (element_id, accepted_text, proposed_text, summary_fragment) in cases {
+    for (case_index, (element_id, accepted_text, proposed_text, summary_fragment)) in
+        cases.into_iter().enumerate()
+    {
         let harness = Harness::new().await;
         let create = harness
             .post(
@@ -489,26 +594,20 @@ async fn fake_ai_proposal_is_bound_to_each_selected_element() {
         let target = harness
             .post(
                 &format!("/api/v1/projects/{project_id}/targets"),
-                json!({
-                    "schemaVersion":"1",
-                    "revisionId":revision_id,
-                    "kind":"element",
-                    "elementId":element_id
-                }),
+                element_target_request(&revision_id, case_index as u128 + 1, element_id),
             )
             .await;
         assert_eq!(target.status(), StatusCode::CREATED, "target {element_id}");
-        let target_id = string_at(&response_json(target).await, "/target/id");
+        let target = response_json(target).await;
 
         let context = harness
             .post(
                 &format!("/api/v1/projects/{project_id}/contexts"),
-                json!({
-                    "schemaVersion":"1",
-                    "revisionId":revision_id,
-                    "targetId":target_id,
-                    "instruction":"選択した要素だけを更新してください。"
-                }),
+                context_request(
+                    &revision_id,
+                    &target,
+                    "選択した要素だけを更新してください。",
+                ),
             )
             .await;
         assert_eq!(
@@ -522,7 +621,14 @@ async fn fake_ai_proposal_is_bound_to_each_selected_element() {
         let canonical: Value =
             serde_json::from_str(context_body["context"]["canonicalJson"].as_str().unwrap())
                 .unwrap();
-        assert_eq!(canonical["target"]["elementId"], element_id);
+        assert_eq!(
+            canonical["target"]["elementAnchor"]["uniqueElementId"],
+            element_id
+        );
+        assert_eq!(
+            canonical["targetResolution"]["targetId"],
+            target["target"]["targetId"]
+        );
         assert_eq!(canonical["selectedText"], accepted_text);
 
         let proposal = harness
@@ -618,6 +724,465 @@ async fn fake_ai_proposal_is_bound_to_each_selected_element() {
             .await;
         assert_eq!(decision.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn target_v1_all_six_kinds_resolve_and_bind_context_receipts() {
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let cases = [
+        ("page", ""),
+        ("block", "hero"),
+        ("element", "hero-heading"),
+        ("text", "hero-heading"),
+        ("point", "hero"),
+        ("region", "hero"),
+    ];
+
+    for (index, (kind, element_id)) in cases.into_iter().enumerate() {
+        let response = harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                target_request(&revision_id, index as u128 + 1, kind, element_id),
+            )
+            .await;
+        let status = response.status();
+        let target = response_json(response).await;
+        assert_eq!(status, StatusCode::CREATED, "{kind} target: {target}");
+        assert_eq!(target["target"]["kind"], kind);
+        assert_eq!(target["target"]["schemaVersion"], 1);
+        assert_eq!(target["resolution"]["schemaVersion"], 1);
+        assert_eq!(target["resolution"]["resolverVersion"], 1);
+        assert_eq!(target["resolution"]["status"], "resolved");
+        assert_eq!(target["resolution"]["selectedCandidateId"], "candidate-1");
+        assert_eq!(
+            target["resolution"]["targetId"],
+            target["target"]["targetId"]
+        );
+        assert_eq!(target["resolution"]["captureRevisionId"], revision_id);
+        assert_eq!(target["resolution"]["resolvedRevisionId"], revision_id);
+        let resolution_id = string_at(&target, "/resolutionId");
+        assert!(resolution_id.starts_with("res_"));
+        assert_eq!(resolution_id.len(), 36);
+
+        let context = harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/contexts"),
+                context_request(&revision_id, &target, &format!("{kind} target only")),
+            )
+            .await;
+        let context_status = context.status();
+        let context = response_json(context).await;
+        assert_eq!(
+            context_status,
+            StatusCode::CREATED,
+            "{kind} context: {context}"
+        );
+        assert_eq!(context["context"]["targetResolutionId"], resolution_id);
+        let canonical: Value =
+            serde_json::from_str(context["context"]["canonicalJson"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            canonical["numericEncoding"],
+            "serde-json-shortest-decimal-string-v1"
+        );
+        assert_eq!(canonical["target"]["kind"], kind);
+        assert_eq!(canonical["targetResolution"]["status"], "resolved");
+        assert!(canonical["target"]["viewport"]["cssWidth"].is_string());
+        assert!(canonical["targetResolution"]["candidates"][0]["score"].is_string());
+    }
+
+    let page_target = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                target_request(&revision_id, 99, "page", ""),
+            )
+            .await,
+    )
+    .await;
+    let mut mismatched = context_request(&revision_id, &page_target, "wrong receipt");
+    mismatched["resolutionId"] = json!("res_00000000000000000000000000000000");
+    let response = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            mismatched,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "target_resolution_mismatch"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_and_detached_targets_are_preserved_but_cannot_create_contexts() {
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+
+    let mut ambiguous_request = element_target_request(&revision_id, 1, "hero-heading");
+    ambiguous_request["target"]["elementAnchor"]["uniqueElementId"] =
+        json!("missing-but-text-matches");
+    let ambiguous = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                ambiguous_request,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(ambiguous["resolution"]["status"], "ambiguous");
+    assert!(
+        ambiguous["resolution"]["selectedCandidateId"].is_null(),
+        "an ambiguous result must never select a candidate"
+    );
+    assert_eq!(
+        ambiguous["resolution"]["candidates"][0]["reasons"][0],
+        "text_quote"
+    );
+    let ambiguous_context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            context_request(&revision_id, &ambiguous, "must not guess"),
+        )
+        .await;
+    assert_eq!(ambiguous_context.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(ambiguous_context).await["error"]["code"],
+        "target_ambiguous"
+    );
+
+    let mut detached_request = element_target_request(&revision_id, 2, "hero-heading");
+    detached_request["target"]["elementAnchor"]["uniqueElementId"] = json!("missing-detached");
+    detached_request["target"]["elementAnchor"]["accessibleName"] =
+        json!("content that is not in the document");
+    let detached = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                detached_request,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(detached["resolution"]["status"], "detached");
+    assert!(
+        detached["resolution"]["candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let detached_context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            context_request(&revision_id, &detached, "must fail closed"),
+        )
+        .await;
+    assert_eq!(detached_context.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(detached_context).await["error"]["code"],
+        "target_detached"
+    );
+}
+
+#[tokio::test]
+async fn proposal_captured_target_becomes_stale_after_the_proposal_is_closed() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let accepted_target = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                element_target_request(&revision_id, 1, "hero-heading"),
+            )
+            .await,
+    )
+    .await;
+    let context = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/contexts"),
+                context_request(&revision_id, &accepted_target, "make a proposal"),
+            )
+            .await,
+    )
+    .await;
+    let proposal = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/proposals"),
+                json!({
+                    "schemaVersion":"1",
+                    "contextId":string_at(&context, "/context/id"),
+                    "contextSha256":string_at(&context, "/context/sha256")
+                }),
+            )
+            .await,
+    )
+    .await;
+    let proposal_id = string_at(&proposal, "/proposal/id");
+    let review_id = string_at(&proposal, "/proposal/reviewId");
+    let proposed_target_request = target_request_for_source(
+        &revision_id,
+        2,
+        "element",
+        "hero-heading",
+        "proposal",
+        Some(&proposal_id),
+    );
+    let proposed_target_response = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/targets"),
+            proposed_target_request,
+        )
+        .await;
+    let proposed_target_status = proposed_target_response.status();
+    let proposed_target = response_json(proposed_target_response).await;
+    assert_eq!(
+        proposed_target_status,
+        StatusCode::CREATED,
+        "proposal target: {proposed_target}"
+    );
+    assert_eq!(proposed_target["resolution"]["status"], "resolved");
+    assert_eq!(proposed_target["target"]["captureProposalId"], proposal_id);
+
+    let intent = "close-proposal-target-test";
+    let approval = response_json(
+        harness
+            .post(
+                &format!("/api/v1/reviews/{review_id}/approvals"),
+                json!({
+                    "schemaVersion":"1",
+                    "proposalId":proposal_id,
+                    "expectedRevisionId":revision_id,
+                    "disposition":"rejected",
+                    "intentId":intent
+                }),
+            )
+            .await,
+    )
+    .await;
+    let decision = harness
+        .post(
+            &format!("/api/v1/reviews/{review_id}/decisions"),
+            json!({
+                "schemaVersion":"1",
+                "approvalToken":string_at(&approval, "/approval/token"),
+                "proposalId":proposal_id,
+                "expectedRevisionId":revision_id,
+                "disposition":"rejected",
+                "intentId":intent,
+                "rationale":"close the proposal fixture"
+            }),
+        )
+        .await;
+    assert_eq!(decision.status(), StatusCode::OK);
+
+    let stale_context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            context_request(
+                &revision_id,
+                &proposed_target,
+                "this proposal target is no longer authoritative",
+            ),
+        )
+        .await;
+    assert_eq!(stale_context.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(stale_context).await["error"]["code"],
+        "target_source_proposal_stale"
+    );
+}
+
+#[tokio::test]
+async fn target_is_immutable_private_metadata_and_rehydrates_across_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = || {
+        ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            root.path(),
+            root.path().join("missing-web-dist"),
+        )
+    };
+    let first_state = StudioState::new(config()).unwrap();
+    let first_token = bootstrap_token(&first_state).await;
+    let created = response_json(
+        post_for(
+            &first_state,
+            &first_token,
+            "/api/v1/projects",
+            json!({"schemaVersion":"1","template":"blank"}),
+        )
+        .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let request = element_target_request(&revision_id, 1, "hero-heading");
+    let expected_target = request["target"].clone();
+    let response = post_for(
+        &first_state,
+        &first_token,
+        &format!("/api/v1/projects/{project_id}/targets"),
+        request.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let target = response_json(response).await;
+    let target_id = string_at(&target, "/target/targetId");
+    let target_path = root
+        .path()
+        .join("managed-v1/projects")
+        .join(&project_id)
+        .join("targets")
+        .join(format!("{target_id}.json"));
+    let persisted_before = std::fs::read(&target_path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&persisted_before).unwrap(),
+        expected_target
+    );
+    assert!(!String::from_utf8_lossy(&persisted_before).contains("runtimeHandle"));
+
+    let duplicate = post_for(
+        &first_state,
+        &first_token,
+        &format!("/api/v1/projects/{project_id}/targets"),
+        request,
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(duplicate).await["error"]["code"],
+        "target_id_exists"
+    );
+    assert_eq!(std::fs::read(&target_path).unwrap(), persisted_before);
+
+    let mut runtime_handle = element_target_request(&revision_id, 2, "hero-heading");
+    runtime_handle["target"]["runtimeHandle"] = json!("node-123");
+    let rejected = post_for(
+        &first_state,
+        &first_token,
+        &format!("/api/v1/projects/{project_id}/targets"),
+        runtime_handle,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !target_path
+            .with_file_name(format!("{}.json", test_target_id(2)))
+            .exists()
+    );
+
+    drop(first_state);
+    let second_state = StudioState::new(config()).unwrap();
+    let second_token = bootstrap_token(&second_state).await;
+    let context = post_for(
+        &second_state,
+        &second_token,
+        &format!("/api/v1/projects/{project_id}/contexts"),
+        context_request(&revision_id, &target, "restored target"),
+    )
+    .await;
+    let context_status = context.status();
+    let context = response_json(context).await;
+    assert_eq!(
+        context_status,
+        StatusCode::CREATED,
+        "restored target context: {context}"
+    );
+    assert_eq!(
+        context["context"]["targetResolutionId"],
+        target["resolutionId"]
+    );
+    assert_eq!(std::fs::read(&target_path).unwrap(), persisted_before);
+}
+
+#[tokio::test]
+async fn restart_rejects_a_target_whose_filename_and_canonical_id_disagree() {
+    let root = tempfile::tempdir().unwrap();
+    let config = || {
+        ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            root.path(),
+            root.path().join("missing-web-dist"),
+        )
+    };
+    let state = StudioState::new(config()).unwrap();
+    let token = bootstrap_token(&state).await;
+    let created = response_json(
+        post_for(
+            &state,
+            &token,
+            "/api/v1/projects",
+            json!({"schemaVersion":"1","template":"blank"}),
+        )
+        .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let target = response_json(
+        post_for(
+            &state,
+            &token,
+            &format!("/api/v1/projects/{project_id}/targets"),
+            element_target_request(&revision_id, 1, "hero-heading"),
+        )
+        .await,
+    )
+    .await;
+    let target_id = string_at(&target, "/target/targetId");
+    let target_path = root
+        .path()
+        .join("managed-v1/projects")
+        .join(project_id)
+        .join("targets")
+        .join(format!("{target_id}.json"));
+    drop(state);
+
+    let mut mismatched = target["target"].clone();
+    mismatched["targetId"] = json!(test_target_id(2));
+    std::fs::write(target_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+
+    let error = StudioState::new(config()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[tokio::test]
@@ -881,17 +1446,16 @@ async fn drift_blocks_proposal_decision_and_export_without_burning_approval() {
         harness
             .post(
                 &format!("/api/v1/projects/{project_id}/targets"),
-                json!({"schemaVersion":"1","revisionId":revision_id,"kind":"element","elementId":"hero-heading"}),
+                element_target_request(&revision_id, 1, "hero-heading"),
             )
             .await,
     )
     .await;
-    let target_id = string_at(&target, "/target/id");
     let context = response_json(
         harness
             .post(
                 &format!("/api/v1/projects/{project_id}/contexts"),
-                json!({"schemaVersion":"1","revisionId":revision_id,"targetId":target_id,"instruction":"change heading"}),
+                context_request(&revision_id, &target, "change heading"),
             )
             .await,
     )
@@ -1365,6 +1929,11 @@ fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshak
     assert!(!injected.contains("new URL("));
     assert!(injected.contains("Object.defineProperty(owner,name"));
     assert!(injected.contains("RTCPeerConnection"));
+    assert!(injected.contains("function previewTargetRuntime"));
+    assert!(
+        injected.contains("\n}))(") && !injected.contains("\n});)("),
+        "the extracted target runtime must remain a callable expression"
+    );
     assert!(injected.contains("sourceUnavailable:true"));
     for private_field in [
         "error.message",

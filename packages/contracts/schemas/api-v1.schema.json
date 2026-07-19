@@ -13,6 +13,8 @@
     { "$ref": "#/$defs/confirmImportRequest" },
     { "$ref": "#/$defs/createTargetRequest" },
     { "$ref": "#/$defs/targetResponse" },
+    { "$ref": "#/$defs/targetV1" },
+    { "$ref": "#/$defs/targetResolverResultV1" },
     { "$ref": "#/$defs/createContextRequest" },
     { "$ref": "#/$defs/contextResponse" },
     { "$ref": "#/$defs/createProposalRequest" },
@@ -26,6 +28,8 @@
     { "$ref": "#/$defs/errorResponse" },
     { "$ref": "#/$defs/previewSelectionMessage" },
     { "$ref": "#/$defs/previewDiagnosticMessage" },
+    { "$ref": "#/$defs/previewTargetMessage" },
+    { "$ref": "#/$defs/previewStructureMessage" },
     { "$ref": "#/$defs/previewActionMessage" }
   ],
   "$defs": {
@@ -120,9 +124,16 @@
           "properties": {
             "targetKinds": {
               "type": "array",
-              "prefixItems": [{ "const": "element" }],
+              "prefixItems": [
+                { "const": "page" },
+                { "const": "block" },
+                { "const": "element" },
+                { "const": "text" },
+                { "const": "point" },
+                { "const": "region" }
+              ],
               "items": false,
-              "minItems": 1
+              "minItems": 6
             },
             "dispositions": {
               "type": "array",
@@ -268,43 +279,595 @@
     "createTargetRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "revisionId", "kind", "elementId"],
+      "required": ["schemaVersion", "target"],
       "properties": {
         "schemaVersion": { "$ref": "#/$defs/version" },
-        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
-        "kind": { "const": "element" },
-        "elementId": { "$ref": "#/$defs/nonEmptyString" }
-      }
-    },
-    "target": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "revisionId", "kind", "elementId", "label"],
-      "properties": {
-        "id": { "$ref": "#/$defs/nonEmptyString" },
-        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
-        "kind": { "const": "element" },
-        "elementId": { "$ref": "#/$defs/nonEmptyString" },
-        "label": { "$ref": "#/$defs/nonEmptyString" }
+        "target": { "$ref": "#/$defs/targetV1" }
       }
     },
     "targetResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "target"],
+      "required": ["schemaVersion", "target", "resolution", "resolutionId"],
       "properties": {
         "schemaVersion": { "$ref": "#/$defs/version" },
-        "target": { "$ref": "#/$defs/target" }
+        "target": { "$ref": "#/$defs/targetV1" },
+        "resolution": { "$ref": "#/$defs/targetResolverResultV1" },
+        "resolutionId": { "$ref": "#/$defs/targetIdV1" }
       }
+    },
+    "targetSchemaVersion": { "const": 1 },
+    "targetResolverVersion": { "const": 1 },
+    "targetIdV1": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "targetPagePathV1": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?:/|(?!/)(?!.*[\\\\?#\\u0000])(?!(?:\\.|\\.\\.)(?:/|$))[^/]+(?:/(?!\\.\\.?(?:/|$))[^/]+)*)$"
+    },
+    "targetLabelV1": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "targetRectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+        "y": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+        "width": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "height": { "type": "number", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "targetNonZeroRectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+        "y": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        }
+      }
+    },
+    "targetNormalizedRectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "width": { "type": "number", "minimum": 0, "maximum": 1 },
+        "height": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "targetNonZeroNormalizedRectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      }
+    },
+    "targetGeometryV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "documentCssPixelRect",
+        "viewportCssPixelRect",
+        "viewportNormalizedRect"
+      ],
+      "properties": {
+        "documentCssPixelRect": { "$ref": "#/$defs/targetRectV1" },
+        "viewportCssPixelRect": { "$ref": "#/$defs/targetRectV1" },
+        "viewportNormalizedRect": {
+          "$ref": "#/$defs/targetNormalizedRectV1"
+        }
+      }
+    },
+    "targetRegionGeometryV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "documentCssPixelRect",
+        "viewportCssPixelRect",
+        "viewportNormalizedRect"
+      ],
+      "properties": {
+        "documentCssPixelRect": { "$ref": "#/$defs/targetNonZeroRectV1" },
+        "viewportCssPixelRect": { "$ref": "#/$defs/targetNonZeroRectV1" },
+        "viewportNormalizedRect": {
+          "$ref": "#/$defs/targetNonZeroNormalizedRectV1"
+        }
+      }
+    },
+    "targetPointCoordinatesV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "targetNormalizedPointV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "targetPointV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["documentCssPixel", "viewportNormalized"],
+      "properties": {
+        "documentCssPixel": { "$ref": "#/$defs/targetPointCoordinatesV1" },
+        "viewportNormalized": { "$ref": "#/$defs/targetNormalizedPointV1" }
+      }
+    },
+    "targetViewportV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cssWidth",
+        "cssHeight",
+        "scrollX",
+        "scrollY",
+        "devicePixelRatio",
+        "visualViewportScale",
+        "previewScale"
+      ],
+      "properties": {
+        "cssWidth": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "cssHeight": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "scrollX": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "scrollY": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "devicePixelRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 16
+        },
+        "visualViewportScale": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 16
+        },
+        "previewScale": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 8
+        }
+      }
+    },
+    "targetDocumentV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cssWidth", "cssHeight", "layoutEpoch"],
+      "properties": {
+        "cssWidth": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "cssHeight": { "type": "number", "minimum": 0, "maximum": 1000000 },
+        "layoutEpoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "elementAnchorV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tagName"],
+      "properties": {
+        "tagName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z][A-Za-z0-9-]*$"
+        },
+        "uniqueElementId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "accessibleName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "domPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "classTokens": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[^\\s\\u0000]+$"
+          }
+        },
+        "ancestorFingerprint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "siblingIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      }
+    },
+    "targetTextAnchorV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exact"],
+      "dependentRequired": {
+        "startOffset": ["endOffset"],
+        "endOffset": ["startOffset"]
+      },
+      "properties": {
+        "exact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "prefix": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "suffix": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "startOffset": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "endOffset": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "targetRegionAnchorV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layoutMode"],
+      "properties": {
+        "containingBlock": { "$ref": "#/$defs/elementAnchorV1" },
+        "previousVisibleSibling": { "$ref": "#/$defs/elementAnchorV1" },
+        "nextVisibleSibling": { "$ref": "#/$defs/elementAnchorV1" },
+        "layoutMode": {
+          "enum": ["flow", "flex", "grid", "positioned", "unknown"]
+        }
+      }
+    },
+    "targetPointRegionAnchorV1": {
+      "allOf": [
+        { "$ref": "#/$defs/targetRegionAnchorV1" },
+        {
+          "type": "object",
+          "required": ["containingBlock"],
+          "properties": { "containingBlock": true }
+        }
+      ]
+    },
+    "targetBlockV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "level"],
+      "properties": {
+        "source": { "enum": ["semantic", "landmark", "heuristic", "user"] },
+        "level": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "targetCommonV1": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "targetId",
+        "captureRevisionId",
+        "captureSource",
+        "pagePath",
+        "kind",
+        "label",
+        "viewport",
+        "document"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/targetSchemaVersion" },
+        "targetId": { "$ref": "#/$defs/targetIdV1" },
+        "captureRevisionId": { "$ref": "#/$defs/targetIdV1" },
+        "captureSource": { "enum": ["accepted", "proposal"] },
+        "pagePath": { "$ref": "#/$defs/targetPagePathV1" },
+        "kind": {
+          "enum": ["page", "block", "element", "text", "point", "region"]
+        },
+        "label": { "$ref": "#/$defs/targetLabelV1" },
+        "viewport": { "$ref": "#/$defs/targetViewportV1" },
+        "document": { "$ref": "#/$defs/targetDocumentV1" }
+      }
+    },
+    "targetCaptureBindingV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["captureSource"],
+          "properties": { "captureSource": { "const": "accepted" } },
+          "not": {
+            "required": ["captureProposalId"],
+            "properties": { "captureProposalId": true }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["captureSource", "captureProposalId"],
+          "properties": {
+            "captureSource": { "const": "proposal" },
+            "captureProposalId": { "$ref": "#/$defs/targetIdV1" }
+          }
+        }
+      ]
+    },
+    "pageTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": { "kind": { "const": "page" } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "blockTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind", "elementAnchor", "block"],
+          "properties": {
+            "kind": { "const": "block" },
+            "elementAnchor": { "$ref": "#/$defs/elementAnchorV1" },
+            "block": { "$ref": "#/$defs/targetBlockV1" },
+            "geometry": { "$ref": "#/$defs/targetGeometryV1" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "elementTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind", "elementAnchor"],
+          "properties": {
+            "kind": { "const": "element" },
+            "elementAnchor": { "$ref": "#/$defs/elementAnchorV1" },
+            "geometry": { "$ref": "#/$defs/targetGeometryV1" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "textTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind", "elementAnchor", "textAnchor"],
+          "properties": {
+            "kind": { "const": "text" },
+            "elementAnchor": { "$ref": "#/$defs/elementAnchorV1" },
+            "textAnchor": { "$ref": "#/$defs/targetTextAnchorV1" },
+            "geometry": { "$ref": "#/$defs/targetGeometryV1" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "pointTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind", "point", "regionAnchor"],
+          "properties": {
+            "kind": { "const": "point" },
+            "point": { "$ref": "#/$defs/targetPointV1" },
+            "regionAnchor": { "$ref": "#/$defs/targetPointRegionAnchorV1" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "regionTargetV1": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/targetCommonV1" },
+        { "$ref": "#/$defs/targetCaptureBindingV1" },
+        {
+          "type": "object",
+          "required": ["kind", "geometry", "regionAnchor"],
+          "properties": {
+            "kind": { "const": "region" },
+            "geometry": { "$ref": "#/$defs/targetRegionGeometryV1" },
+            "regionAnchor": { "$ref": "#/$defs/targetRegionAnchorV1" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "targetV1": {
+      "oneOf": [
+        { "$ref": "#/$defs/pageTargetV1" },
+        { "$ref": "#/$defs/blockTargetV1" },
+        { "$ref": "#/$defs/elementTargetV1" },
+        { "$ref": "#/$defs/textTargetV1" },
+        { "$ref": "#/$defs/pointTargetV1" },
+        { "$ref": "#/$defs/regionTargetV1" }
+      ]
+    },
+    "targetResolverSignalV1": {
+      "enum": [
+        "unique_id",
+        "semantic_fingerprint",
+        "text_quote",
+        "ancestor",
+        "sibling",
+        "dom_path",
+        "geometry"
+      ]
+    },
+    "targetResolverCandidateV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "score", "reasons", "summary"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/targetIdV1" },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/targetResolverSignalV1" }
+        },
+        "summary": { "$ref": "#/$defs/targetLabelV1" },
+        "elementAnchor": { "$ref": "#/$defs/elementAnchorV1" },
+        "geometry": { "$ref": "#/$defs/targetGeometryV1" }
+      }
+    },
+    "targetResolverResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "resolverVersion",
+        "targetId",
+        "captureRevisionId",
+        "resolvedRevisionId",
+        "status",
+        "candidates"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/targetSchemaVersion" },
+        "resolverVersion": { "$ref": "#/$defs/targetResolverVersion" },
+        "targetId": { "$ref": "#/$defs/targetIdV1" },
+        "captureRevisionId": { "$ref": "#/$defs/targetIdV1" },
+        "resolvedRevisionId": { "$ref": "#/$defs/targetIdV1" },
+        "status": { "enum": ["resolved", "ambiguous", "detached"] },
+        "selectedCandidateId": { "$ref": "#/$defs/targetIdV1" },
+        "candidates": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/targetResolverCandidateV1" }
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "selectedCandidateId"],
+          "properties": {
+            "status": { "const": "resolved" },
+            "selectedCandidateId": true,
+            "candidates": { "type": "array", "minItems": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "const": "ambiguous" },
+            "candidates": { "type": "array", "minItems": 1 }
+          },
+          "not": {
+            "required": ["selectedCandidateId"],
+            "properties": { "selectedCandidateId": true }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status"],
+          "properties": { "status": { "const": "detached" } },
+          "not": {
+            "required": ["selectedCandidateId"],
+            "properties": { "selectedCandidateId": true }
+          }
+        }
+      ]
     },
     "createContextRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "revisionId", "targetId", "instruction"],
+      "required": [
+        "schemaVersion",
+        "revisionId",
+        "targetId",
+        "resolutionId",
+        "instruction"
+      ],
       "properties": {
         "schemaVersion": { "$ref": "#/$defs/version" },
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "targetId": { "$ref": "#/$defs/nonEmptyString" },
+        "resolutionId": { "$ref": "#/$defs/targetIdV1" },
         "instruction": {
           "type": "string",
           "minLength": 1,
@@ -320,6 +883,7 @@
         "id",
         "revisionId",
         "targetId",
+        "targetResolutionId",
         "instruction",
         "canonicalJson",
         "sha256"
@@ -328,6 +892,7 @@
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "targetId": { "$ref": "#/$defs/nonEmptyString" },
+        "targetResolutionId": { "$ref": "#/$defs/targetIdV1" },
         "instruction": { "type": "string" },
         "canonicalJson": { "type": "string" },
         "sha256": { "$ref": "#/$defs/sha256" }
@@ -633,6 +1198,80 @@
         "sourceUnavailable": { "const": true }
       }
     },
+    "previewTargetMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "schemaVersion",
+        "channelId",
+        "projectId",
+        "snapshotId",
+        "revisionId",
+        "target"
+      ],
+      "properties": {
+        "type": { "const": "synapsegit-lp.target-draft" },
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "channelId": { "$ref": "#/$defs/nonEmptyString" },
+        "projectId": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "$ref": "#/$defs/targetV1" }
+      }
+    },
+    "previewStructureNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeNodeHandle", "kind", "label", "tagName", "depth"],
+      "properties": {
+        "runtimeNodeHandle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "parentRuntimeNodeHandle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": { "enum": ["block", "element"] },
+        "label": { "$ref": "#/$defs/targetLabelV1" },
+        "tagName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "previewStructureMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "schemaVersion",
+        "channelId",
+        "projectId",
+        "snapshotId",
+        "revisionId",
+        "nodes"
+      ],
+      "properties": {
+        "type": { "const": "synapsegit-lp.structure" },
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "channelId": { "$ref": "#/$defs/nonEmptyString" },
+        "projectId": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "nodes": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/previewStructureNode" }
+        }
+      }
+    },
     "previewActionMessage": {
       "oneOf": [
         {
@@ -644,6 +1283,8 @@
             "channelId",
             "action",
             "mode",
+            "targetKind",
+            "previewScale",
             "projectId",
             "snapshotId",
             "revisionId"
@@ -654,6 +1295,14 @@
             "channelId": { "$ref": "#/$defs/nonEmptyString" },
             "action": { "const": "set_mode" },
             "mode": { "enum": ["select", "interact"] },
+            "targetKind": {
+              "enum": ["page", "block", "element", "text", "point", "region"]
+            },
+            "previewScale": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 8
+            },
             "projectId": { "$ref": "#/$defs/nonEmptyString" },
             "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
             "revisionId": { "$ref": "#/$defs/nonEmptyString" }
@@ -675,7 +1324,41 @@
             "type": { "const": "synapsegit-lp.action" },
             "schemaVersion": { "$ref": "#/$defs/version" },
             "channelId": { "$ref": "#/$defs/nonEmptyString" },
-            "action": { "const": "clear_selection" },
+            "action": {
+              "enum": ["clear_selection", "request_structure", "capture_page"]
+            },
+            "projectId": { "$ref": "#/$defs/nonEmptyString" },
+            "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+            "revisionId": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schemaVersion",
+            "channelId",
+            "action",
+            "runtimeNodeHandle",
+            "targetKind",
+            "projectId",
+            "snapshotId",
+            "revisionId"
+          ],
+          "properties": {
+            "type": { "const": "synapsegit-lp.action" },
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "channelId": { "$ref": "#/$defs/nonEmptyString" },
+            "action": { "const": "capture_node" },
+            "runtimeNodeHandle": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "targetKind": {
+              "enum": ["page", "block", "element", "text", "point", "region"]
+            },
             "projectId": { "$ref": "#/$defs/nonEmptyString" },
             "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
             "revisionId": { "$ref": "#/$defs/nonEmptyString" }

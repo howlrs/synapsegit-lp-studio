@@ -1,12 +1,15 @@
 import {
   SCHEMA_VERSION,
   isPreviewDiagnosticMessage,
-  isPreviewSelectionMessage,
+  isPreviewStructureMessage,
+  isPreviewTargetMessage,
   isScopedPreviewUrl,
   type PreviewActionMessage,
   type PreviewDiagnosticMessage,
   type PreviewMode,
-  type PreviewSelectionMessage,
+  type PreviewStructureMessage,
+  type PreviewTargetMessage,
+  type TargetKind,
 } from "@synapsegit-lp/contracts";
 
 export interface BridgeBinding {
@@ -25,27 +28,55 @@ export const createChannelId = (): string => crypto.randomUUID();
  * envelope. A passing value is still only an untrusted selection draft and
  * must be validated by the local server before it becomes a Target.
  */
-export const readPreviewSelection = (
+export const readPreviewTarget = (
   event: MessageEvent<unknown>,
   binding: BridgeBinding,
-): PreviewSelectionMessage | null => {
+): PreviewTargetMessage | null => {
   if (
     event.origin !== binding.expectedOrigin ||
     event.source !== binding.expectedSource ||
-    !isPreviewSelectionMessage(event.data)
+    !isPreviewTargetMessage(event.data)
   ) {
     return null;
   }
-  const selection = event.data;
+  const target = event.data;
   if (
-    selection.channelId !== binding.channelId ||
-    selection.projectId !== binding.projectId ||
-    selection.snapshotId !== binding.snapshotId ||
-    selection.revisionId !== binding.revisionId
+    target.channelId !== binding.channelId ||
+    target.projectId !== binding.projectId ||
+    target.snapshotId !== binding.snapshotId ||
+    target.revisionId !== binding.revisionId
   ) {
     return null;
   }
-  return selection;
+  return target;
+};
+
+/**
+ * Runtime node handles are valid only for the currently bound iframe. They
+ * may drive a follow-up capture action but must never be persisted as Target
+ * evidence or sent to the local AI context endpoint.
+ */
+export const readPreviewStructure = (
+  event: MessageEvent<unknown>,
+  binding: BridgeBinding,
+): PreviewStructureMessage | null => {
+  if (
+    event.origin !== binding.expectedOrigin ||
+    event.source !== binding.expectedSource ||
+    !isPreviewStructureMessage(event.data)
+  ) {
+    return null;
+  }
+  const structure = event.data;
+  if (
+    structure.channelId !== binding.channelId ||
+    structure.projectId !== binding.projectId ||
+    structure.snapshotId !== binding.snapshotId ||
+    structure.revisionId !== binding.revisionId
+  ) {
+    return null;
+  }
+  return structure;
 };
 
 /**
@@ -79,6 +110,8 @@ export const postPreviewMode = (
   target: Window,
   binding: Omit<BridgeBinding, "expectedSource">,
   mode: PreviewMode,
+  targetKind: TargetKind,
+  previewScale: number,
 ): void => {
   const message: PreviewActionMessage = {
     type: "synapsegit-lp.action",
@@ -86,6 +119,55 @@ export const postPreviewMode = (
     channelId: binding.channelId,
     action: "set_mode",
     mode,
+    targetKind,
+    previewScale,
+    projectId: binding.projectId,
+    snapshotId: binding.snapshotId,
+    revisionId: binding.revisionId,
+  };
+  target.postMessage(message, binding.expectedOrigin);
+};
+
+const postBoundAction = (
+  target: Window,
+  binding: Omit<BridgeBinding, "expectedSource">,
+  action: "request_structure" | "capture_page",
+): void => {
+  const message: PreviewActionMessage = {
+    type: "synapsegit-lp.action",
+    schemaVersion: SCHEMA_VERSION,
+    channelId: binding.channelId,
+    action,
+    projectId: binding.projectId,
+    snapshotId: binding.snapshotId,
+    revisionId: binding.revisionId,
+  };
+  target.postMessage(message, binding.expectedOrigin);
+};
+
+export const postRequestStructure = (
+  target: Window,
+  binding: Omit<BridgeBinding, "expectedSource">,
+): void => postBoundAction(target, binding, "request_structure");
+
+export const postCapturePage = (
+  target: Window,
+  binding: Omit<BridgeBinding, "expectedSource">,
+): void => postBoundAction(target, binding, "capture_page");
+
+export const postCaptureNode = (
+  target: Window,
+  binding: Omit<BridgeBinding, "expectedSource">,
+  runtimeNodeHandle: string,
+  targetKind: TargetKind,
+): void => {
+  const message: PreviewActionMessage = {
+    type: "synapsegit-lp.action",
+    schemaVersion: SCHEMA_VERSION,
+    channelId: binding.channelId,
+    action: "capture_node",
+    runtimeNodeHandle,
+    targetKind,
     projectId: binding.projectId,
     snapshotId: binding.snapshotId,
     revisionId: binding.revisionId,

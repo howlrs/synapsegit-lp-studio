@@ -6,7 +6,8 @@ import type {
   PreviewSource,
   Project,
   Proposal,
-  Target,
+  TargetSelection,
+  TargetV1,
   ViewportPreset,
 } from "@synapsegit-lp/contracts";
 
@@ -22,10 +23,10 @@ export type StudioOperation =
 
 export interface StudioState {
   project: Project | null;
-  target: Target | null;
+  target: TargetSelection | null;
   contextReview: ContextReview | null;
   proposal: Proposal | null;
-  proposalTarget: Target | null;
+  proposalTarget: TargetV1 | null;
   previewMode: PreviewMode;
   previewSource: PreviewSource;
   viewportPreset: ViewportPreset;
@@ -62,7 +63,7 @@ export type StudioAction =
       origin?: "created" | "opened" | "imported";
     }
   | { type: "PROJECT_REFRESHED"; project: Project; afterDecision: boolean }
-  | { type: "TARGET_SELECTED"; target: Target }
+  | { type: "TARGET_SELECTED"; target: TargetSelection }
   | { type: "TARGET_CLEARED" }
   | { type: "CONTEXT_READY"; context: ContextReview }
   | { type: "CONTEXT_CLOSED" }
@@ -102,7 +103,9 @@ export const studioReducer = (
         ...state,
         project: action.project,
         target:
-          state.target?.revisionId === action.project.revisionId
+          !action.afterDecision &&
+          state.target?.resolution.resolvedRevisionId ===
+            action.project.revisionId
             ? state.target
             : null,
         contextReview: null,
@@ -121,7 +124,7 @@ export const studioReducer = (
         contextReview: null,
         operation: null,
         error: null,
-        announcement: `ターゲット「${action.target.label}」を選択しました。`,
+        announcement: `ターゲット「${action.target.target.label}」を選択しました。解決結果は${action.target.resolution.status}です。`,
       };
     case "TARGET_CLEARED":
       return {
@@ -144,7 +147,7 @@ export const studioReducer = (
         ...state,
         contextReview: null,
         proposal: action.proposal,
-        proposalTarget: state.target,
+        proposalTarget: state.target?.target ?? null,
         previewSource: "proposed",
         operation: null,
         announcement: "変更案が完成しました。採用前に内容を確認してください。",
@@ -169,7 +172,16 @@ export const studioReducer = (
     case "SET_PREVIEW_MODE":
       return { ...state, previewMode: action.mode };
     case "SET_PREVIEW_SOURCE":
-      return { ...state, previewSource: action.source };
+      return action.source === state.previewSource
+        ? state
+        : {
+            ...state,
+            previewSource: action.source,
+            target: null,
+            contextReview: null,
+            announcement:
+              "表示元を切り替えました。Targetを現在のプレビューから選び直してください。",
+          };
     case "SET_VIEWPORT":
       return {
         ...state,

@@ -20,7 +20,8 @@ import {
   type ImportPreview,
   type Project,
   type Proposal,
-  type Target,
+  type TargetSelection,
+  type TargetV1,
 } from "@synapsegit-lp/contracts";
 
 export class ApiError extends Error {
@@ -57,15 +58,12 @@ export interface AuthenticatedApi {
     previewId: string,
     expectedManifestSha256: string,
   ): Promise<Project>;
-  createTarget(
-    projectId: string,
-    revisionId: string,
-    elementId: string,
-  ): Promise<Target>;
+  createTarget(projectId: string, target: TargetV1): Promise<TargetSelection>;
   createContext(
     projectId: string,
     revisionId: string,
     targetId: string,
+    resolutionId: string,
     instruction: string,
   ): Promise<ContextReview>;
   createProposal(
@@ -293,28 +291,37 @@ export const bootstrapApi = async (
       return result.project;
     },
 
-    async createTarget(projectId, revisionId, elementId) {
+    async createTarget(projectId, target) {
       const result = await postJson(
         `/api/v1/projects/${encodeURIComponent(projectId)}/targets`,
         {
           schemaVersion: SCHEMA_VERSION,
-          revisionId,
-          kind: "element",
-          elementId,
+          target,
         },
         isTargetResponse,
         "ターゲット",
       );
-      return result.target;
+      return {
+        target: result.target,
+        resolution: result.resolution,
+        resolutionId: result.resolutionId,
+      };
     },
 
-    async createContext(projectId, revisionId, targetId, instruction) {
+    async createContext(
+      projectId,
+      revisionId,
+      targetId,
+      resolutionId,
+      instruction,
+    ) {
       const result = await postJson(
         `/api/v1/projects/${encodeURIComponent(projectId)}/contexts`,
         {
           schemaVersion: SCHEMA_VERSION,
           revisionId,
           targetId,
+          resolutionId,
           instruction,
         },
         isContextResponse,

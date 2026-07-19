@@ -53,6 +53,13 @@ const IMPORT_PREVIEW_TTL_SECONDS: i64 = 10 * 60;
 const MAX_INSTRUCTION_BYTES: usize = 2_000;
 const MAX_RATIONALE_BYTES: usize = 2_000;
 const MAX_PREVIEW_HTML_BYTES: usize = 2 * 1024 * 1024;
+const TARGET_SCHEMA_VERSION: u8 = 1;
+const TARGET_RESOLVER_VERSION: u8 = 1;
+const MAX_TARGET_LABEL_LENGTH: usize = 256;
+const MAX_TARGET_QUOTE_LENGTH: usize = 1_024;
+const MAX_TARGET_CONTEXT_LENGTH: usize = 256;
+const MAX_TARGET_ANCHOR_LENGTH: usize = 2_048;
+const MAX_TARGET_CLASS_TOKEN_LENGTH: usize = 128;
 const MAX_SESSIONS: usize = 32;
 const MAX_PROJECTS: usize = 8;
 const MAX_TARGETS_PER_PROJECT: usize = 32;
@@ -63,6 +70,7 @@ const MAX_RETAINED_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 const BLANK_INDEX: &str = include_str!("../../../templates/blank/index.html");
 const BLANK_STYLES: &str = include_str!("../../../templates/blank/styles.css");
+const PREVIEW_TARGET_RUNTIME: &str = include_str!("preview_target_runtime.js");
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -145,6 +153,30 @@ impl StudioState {
                     "persisted artifact manifest digest does not match its files",
                 ));
             }
+            let mut targets = HashMap::new();
+            for (stored_target_id, bytes) in persisted.targets {
+                let target: TargetRecord = serde_json::from_slice(&bytes).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "persisted Target metadata does not validate",
+                    )
+                })?;
+                validate_target_shape(&target).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "persisted Target metadata does not validate",
+                    )
+                })?;
+                if target.target_id != stored_target_id
+                    || serde_json::to_vec(&target).ok().as_deref() != Some(bytes.as_slice())
+                    || targets.insert(target.target_id.clone(), target).is_some()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "persisted Target metadata is not canonical",
+                    ));
+                }
+            }
             store.projects.insert(
                 persisted.id.clone(),
                 Project {
@@ -153,7 +185,7 @@ impl StudioState {
                     revision_id: persisted.revision_id,
                     accepted_files: persisted.files,
                     accepted_manifest_sha256: persisted.artifact_manifest_sha256,
-                    targets: HashMap::new(),
+                    targets,
                     contexts: HashMap::new(),
                     proposal: None,
                 },
@@ -205,17 +237,211 @@ struct Project {
     proposal: Option<ProposalRecord>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetCaptureSource {
+    Accepted,
+    Proposal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetKind {
+    Page,
+    Block,
+    Element,
+    Text,
+    Point,
+    Region,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetViewport {
+    css_width: f64,
+    css_height: f64,
+    scroll_x: f64,
+    scroll_y: f64,
+    device_pixel_ratio: f64,
+    visual_viewport_scale: f64,
+    preview_scale: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetDocument {
+    css_width: f64,
+    css_height: f64,
+    layout_epoch: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetPoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetGeometry {
+    document_css_pixel_rect: TargetRect,
+    viewport_css_pixel_rect: TargetRect,
+    viewport_normalized_rect: TargetRect,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetPointCapture {
+    document_css_pixel: TargetPoint,
+    viewport_normalized: TargetPoint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ElementAnchor {
+    tag_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unique_element_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessible_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dom_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class_tokens: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ancestor_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sibling_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TextAnchor {
+    exact: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_offset: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_offset: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetLayoutMode {
+    Flow,
+    Flex,
+    Grid,
+    Positioned,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegionAnchor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    containing_block: Option<ElementAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_visible_sibling: Option<ElementAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_visible_sibling: Option<ElementAnchor>,
+    layout_mode: TargetLayoutMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetBlockSource {
+    Semantic,
+    Landmark,
+    Heuristic,
+    User,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetBlock {
+    source: TargetBlockSource,
+    level: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TargetRecord {
-    id: String,
-    revision_id: String,
-    element_id: String,
+    schema_version: u8,
+    target_id: String,
+    capture_revision_id: String,
+    capture_source: TargetCaptureSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_proposal_id: Option<String>,
+    page_path: String,
+    kind: TargetKind,
     label: String,
+    viewport: TargetViewport,
+    document: TargetDocument,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry: Option<TargetGeometry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    point: Option<TargetPointCapture>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    element_anchor: Option<ElementAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_anchor: Option<TextAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region_anchor: Option<RegionAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block: Option<TargetBlock>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetResolutionStatus {
+    Resolved,
+    Ambiguous,
+    Detached,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetResolutionCandidate {
+    candidate_id: String,
+    score: f64,
+    reasons: Vec<&'static str>,
+    summary: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetResolution {
+    schema_version: u8,
+    resolver_version: u8,
+    target_id: String,
+    capture_revision_id: String,
+    resolved_revision_id: String,
+    status: TargetResolutionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_candidate_id: Option<String>,
+    candidates: Vec<TargetResolutionCandidate>,
 }
 
 struct ContextRecord {
     id: String,
     revision_id: String,
     target_id: String,
+    target_resolution_id: String,
     instruction: String,
     canonical_json: String,
     sha256: String,
@@ -310,7 +536,7 @@ struct SessionDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesDto {
-    target_kinds: [&'static str; 1],
+    target_kinds: [&'static str; 6],
     dispositions: [&'static str; 3],
     single_proposal_per_project: bool,
     import_available: bool,
@@ -399,24 +625,15 @@ struct ImportPreviewPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateTargetRequest {
     schema_version: String,
-    revision_id: String,
-    kind: String,
-    element_id: String,
+    target: TargetRecord,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TargetDto {
-    id: String,
-    revision_id: String,
-    kind: &'static str,
-    element_id: String,
-    label: String,
-}
-
-#[derive(Serialize)]
 struct TargetPayload {
-    target: TargetDto,
+    target: TargetRecord,
+    resolution: TargetResolution,
+    resolution_id: String,
 }
 
 #[derive(Deserialize)]
@@ -425,6 +642,7 @@ struct CreateContextRequest {
     schema_version: String,
     revision_id: String,
     target_id: String,
+    resolution_id: String,
     instruction: String,
 }
 
@@ -434,6 +652,7 @@ struct ContextDto {
     id: String,
     revision_id: String,
     target_id: String,
+    target_resolution_id: String,
     instruction: String,
     canonical_json: String,
     sha256: String,
@@ -1039,7 +1258,7 @@ async fn bootstrap(
         editor_origin: state.0.config.editor_origin.clone(),
         preview_origin: state.0.config.preview_origin.clone(),
         capabilities: CapabilitiesDto {
-            target_kinds: ["element"],
+            target_kinds: ["page", "block", "element", "text", "point", "region"],
             dispositions: ["adopted_unchanged", "rejected", "deferred"],
             single_proposal_per_project: true,
             import_available: state.0.config.import_root.is_some(),
@@ -1300,16 +1519,14 @@ async fn create_target(
     authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
-    if request.kind != "element" {
-        return Err(ApiError::invalid());
-    }
-    let label = selectable_label(&request.element_id).ok_or_else(ApiError::invalid)?;
+    let target = request.target;
+    validate_target_shape(&target)?;
     let mut store = state.store()?;
     let project = store
         .projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
-    require_revision(project, &request.revision_id)?;
+    require_revision(project, &target.capture_revision_id)?;
     state
         .0
         .storage
@@ -1319,27 +1536,28 @@ async fn create_target(
             &project.accepted_manifest_sha256,
         )
         .map_err(storage_api_error)?;
-    ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
-    if !contains_element(&project.accepted_files, &request.element_id) {
-        return Err(ApiError::invalid());
+    if project.targets.contains_key(&target.target_id) {
+        return Err(ApiError::conflict("target_id_exists"));
     }
-    let target = TargetRecord {
-        id: opaque_id("tgt"),
-        revision_id: request.revision_id,
-        element_id: request.element_id,
-        label: label.into(),
-    };
-    let response = TargetDto {
-        id: target.id.clone(),
-        revision_id: target.revision_id.clone(),
-        kind: "element",
-        element_id: target.element_id.clone(),
-        label: target.label.clone(),
-    };
-    project.targets.insert(target.id.clone(), target);
+    ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
+    let resolution = resolve_target(project, &target)?;
+    let resolution_id = target_resolution_id(&resolution)?;
+    let canonical_target = serde_json::to_vec(&target).map_err(|_| ApiError::internal())?;
+    state
+        .0
+        .storage
+        .persist_target(&project.id, &target.target_id, &canonical_target)
+        .map_err(storage_api_error)?;
+    project
+        .targets
+        .insert(target.target_id.clone(), target.clone());
     Ok((
         StatusCode::CREATED,
-        Json(Versioned::new(TargetPayload { target: response })),
+        Json(Versioned::new(TargetPayload {
+            target,
+            resolution,
+            resolution_id,
+        })),
     ))
 }
 
@@ -1373,8 +1591,22 @@ async fn create_context(
         .targets
         .get(&request.target_id)
         .ok_or_else(ApiError::not_found)?;
-    if target.revision_id != request.revision_id {
+    if target.capture_revision_id != request.revision_id {
         return Err(ApiError::conflict("target_revision_mismatch"));
+    }
+    let resolution = resolve_target(project, target)?;
+    match resolution.status {
+        TargetResolutionStatus::Resolved => {}
+        TargetResolutionStatus::Ambiguous => {
+            return Err(ApiError::conflict("target_ambiguous"));
+        }
+        TargetResolutionStatus::Detached => {
+            return Err(ApiError::conflict("target_detached"));
+        }
+    }
+    let resolution_id = target_resolution_id(&resolution)?;
+    if resolution_id != request.resolution_id {
+        return Err(ApiError::conflict("target_resolution_mismatch"));
     }
     let context_id = opaque_id("ctx");
     let canonical_json = canonical_context_json(
@@ -1382,6 +1614,7 @@ async fn create_context(
         &request.revision_id,
         &context_id,
         target,
+        &resolution,
         &request.instruction,
     )?;
     let sha256 =
@@ -1390,6 +1623,7 @@ async fn create_context(
         id: context_id,
         revision_id: request.revision_id,
         target_id: request.target_id,
+        target_resolution_id: resolution_id,
         instruction: request.instruction,
         canonical_json,
         sha256,
@@ -1398,6 +1632,7 @@ async fn create_context(
         id: context.id.clone(),
         revision_id: context.revision_id.clone(),
         target_id: context.target_id.clone(),
+        target_resolution_id: context.target_resolution_id.clone(),
         instruction: context.instruction.clone(),
         canonical_json: context.canonical_json.clone(),
         sha256: context.sha256.clone(),
@@ -1449,9 +1684,8 @@ async fn create_proposal(
     let target_element_id = project
         .targets
         .get(&context.target_id)
-        .ok_or_else(ApiError::not_found)?
-        .element_id
-        .clone();
+        .and_then(target_mutation_element_id)
+        .ok_or_else(ApiError::invalid)?;
     let mutation = fake_ai_mutation(&target_element_id).ok_or_else(ApiError::invalid)?;
     let proposed_files = proposed_files(&project.accepted_files, mutation)?;
     let accepted_manifest = manifest(&project.accepted_files)?;
@@ -2121,24 +2355,514 @@ fn validate_intent(value: &str) -> Result<(), ApiError> {
     }
 }
 
-fn selectable_label(element_id: &str) -> Option<&'static str> {
-    match element_id {
-        "hero-heading" => Some("ヒーロー見出し"),
-        "hero-copy" => Some("ヒーロー説明文"),
-        "hero-cta" => Some("ヒーローCTA"),
-        _ => None,
-    }
-}
-
 fn selectable_text(element_id: &str) -> Option<&'static str> {
     fake_ai_mutation(element_id).map(|mutation| mutation.accepted_text)
 }
 
-fn contains_element(files: &BTreeMap<String, Vec<u8>>, element_id: &str) -> bool {
-    files
-        .get("index.html")
+fn validate_target_shape(target: &TargetRecord) -> Result<(), ApiError> {
+    if target.schema_version != TARGET_SCHEMA_VERSION
+        || !is_opaque_identifier(&target.target_id, "tgt_")
+        || !is_opaque_identifier(&target.capture_revision_id, "rev_")
+        || !is_safe_page_path(&target.page_path)
+    {
+        return Err(ApiError::invalid());
+    }
+    match target.capture_source {
+        TargetCaptureSource::Accepted if target.capture_proposal_id.is_none() => {}
+        TargetCaptureSource::Proposal
+            if target
+                .capture_proposal_id
+                .as_deref()
+                .is_some_and(|value| is_opaque_identifier(value, "pro_")) => {}
+        _ => return Err(ApiError::invalid()),
+    }
+    validate_target_text(&target.label, MAX_TARGET_LABEL_LENGTH, false)?;
+    validate_viewport(&target.viewport)?;
+    validate_document_capture(&target.document)?;
+    if let Some(geometry) = &target.geometry {
+        validate_geometry(geometry)?;
+    }
+    if let Some(point) = &target.point {
+        validate_point_capture(point)?;
+    }
+    if let Some(anchor) = &target.element_anchor {
+        validate_element_anchor(anchor)?;
+    }
+    if let Some(anchor) = &target.text_anchor {
+        validate_text_anchor(anchor)?;
+    }
+    if let Some(anchor) = &target.region_anchor {
+        validate_region_anchor(anchor)?;
+    }
+    if target.block.as_ref().is_some_and(|block| block.level > 64) {
+        return Err(ApiError::invalid());
+    }
+
+    let specific_shape_is_valid = match target.kind {
+        TargetKind::Page => {
+            target.geometry.is_none()
+                && target.point.is_none()
+                && target.element_anchor.is_none()
+                && target.text_anchor.is_none()
+                && target.region_anchor.is_none()
+                && target.block.is_none()
+        }
+        TargetKind::Block => {
+            target.element_anchor.is_some()
+                && target.block.is_some()
+                && target.point.is_none()
+                && target.text_anchor.is_none()
+                && target.region_anchor.is_none()
+        }
+        TargetKind::Element => {
+            target.element_anchor.is_some()
+                && target.point.is_none()
+                && target.text_anchor.is_none()
+                && target.region_anchor.is_none()
+                && target.block.is_none()
+        }
+        TargetKind::Text => {
+            target.element_anchor.is_some()
+                && target.text_anchor.is_some()
+                && target.point.is_none()
+                && target.region_anchor.is_none()
+                && target.block.is_none()
+        }
+        TargetKind::Point => {
+            target.point.is_some()
+                && target
+                    .region_anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.containing_block.as_ref())
+                    .is_some()
+                && target.geometry.is_none()
+                && target.element_anchor.is_none()
+                && target.text_anchor.is_none()
+                && target.block.is_none()
+        }
+        TargetKind::Region => {
+            target.geometry.as_ref().is_some_and(|geometry| {
+                non_zero_geometry(geometry)
+                    && geometry.viewport_css_pixel_rect.width >= 8.0
+                    && geometry.viewport_css_pixel_rect.height >= 8.0
+                    && geometry.viewport_normalized_rect.width > 0.0
+                    && geometry.viewport_normalized_rect.height > 0.0
+            }) && target.region_anchor.is_some()
+                && target.point.is_none()
+                && target.element_anchor.is_none()
+                && target.text_anchor.is_none()
+                && target.block.is_none()
+        }
+    };
+    if specific_shape_is_valid {
+        Ok(())
+    } else {
+        Err(ApiError::invalid())
+    }
+}
+
+fn is_opaque_identifier(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn is_safe_page_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= STORAGE_MAX_PATH_BYTES
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+        && value
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| matches!(extension, "html" | "htm"))
+}
+
+fn validate_target_text(value: &str, max_length: usize, allow_empty: bool) -> Result<(), ApiError> {
+    let lower = value.to_ascii_lowercase();
+    let secret_like = ["ghp_", "github_pat_", "akia", "bearer ", "sk-"]
+        .iter()
+        .any(|prefix| contains_credential_shaped_token(&lower, prefix));
+    if (!allow_empty && value.trim().is_empty())
+        || value.chars().count() > max_length
+        || secret_like
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        Err(ApiError::invalid())
+    } else {
+        Ok(())
+    }
+}
+
+fn contains_credential_shaped_token(value: &str, prefix: &str) -> bool {
+    value.match_indices(prefix).any(|(index, _)| {
+        value[index + prefix.len()..]
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
+            .take(12)
+            .count()
+            == 12
+    })
+}
+
+fn finite_between(value: f64, minimum: f64, maximum: f64) -> bool {
+    value.is_finite() && value >= minimum && value <= maximum
+}
+
+fn validate_viewport(viewport: &TargetViewport) -> Result<(), ApiError> {
+    if finite_between(viewport.css_width, f64::MIN_POSITIVE, 1_000_000.0)
+        && finite_between(viewport.css_height, f64::MIN_POSITIVE, 1_000_000.0)
+        && finite_between(viewport.scroll_x, 0.0, 1_000_000.0)
+        && finite_between(viewport.scroll_y, 0.0, 1_000_000.0)
+        && finite_between(viewport.device_pixel_ratio, f64::MIN_POSITIVE, 16.0)
+        && finite_between(viewport.visual_viewport_scale, f64::MIN_POSITIVE, 16.0)
+        && finite_between(viewport.preview_scale, f64::MIN_POSITIVE, 8.0)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::invalid())
+    }
+}
+
+fn validate_document_capture(document: &TargetDocument) -> Result<(), ApiError> {
+    if finite_between(document.css_width, 0.0, 1_000_000.0)
+        && finite_between(document.css_height, 0.0, 1_000_000.0)
+        && document.layout_epoch <= 9_007_199_254_740_991
+    {
+        Ok(())
+    } else {
+        Err(ApiError::invalid())
+    }
+}
+
+fn validate_rect(rect: &TargetRect, normalized: bool) -> Result<(), ApiError> {
+    let (minimum, maximum) = if normalized {
+        (0.0, 1.0)
+    } else {
+        (-1_000_000.0, 1_000_000.0)
+    };
+    if finite_between(rect.x, minimum, maximum)
+        && finite_between(rect.y, minimum, maximum)
+        && finite_between(rect.width, 0.0, maximum)
+        && finite_between(rect.height, 0.0, maximum)
+        && (!normalized || rect.x + rect.width <= 1.000_001)
+        && (!normalized || rect.y + rect.height <= 1.000_001)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::invalid())
+    }
+}
+
+fn validate_geometry(geometry: &TargetGeometry) -> Result<(), ApiError> {
+    validate_rect(&geometry.document_css_pixel_rect, false)?;
+    validate_rect(&geometry.viewport_css_pixel_rect, false)?;
+    validate_rect(&geometry.viewport_normalized_rect, true)
+}
+
+fn non_zero_geometry(geometry: &TargetGeometry) -> bool {
+    geometry.document_css_pixel_rect.width > 0.0
+        && geometry.document_css_pixel_rect.height > 0.0
+        && geometry.viewport_css_pixel_rect.width > 0.0
+        && geometry.viewport_css_pixel_rect.height > 0.0
+}
+
+fn validate_point_capture(point: &TargetPointCapture) -> Result<(), ApiError> {
+    if finite_between(point.document_css_pixel.x, 0.0, 1_000_000.0)
+        && finite_between(point.document_css_pixel.y, 0.0, 1_000_000.0)
+        && finite_between(point.viewport_normalized.x, 0.0, 1.0)
+        && finite_between(point.viewport_normalized.y, 0.0, 1.0)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::invalid())
+    }
+}
+
+fn validate_element_anchor(anchor: &ElementAnchor) -> Result<(), ApiError> {
+    if anchor.tag_name.is_empty()
+        || anchor.tag_name.chars().count() > MAX_TARGET_CLASS_TOKEN_LENGTH
+        || !anchor.tag_name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic() || (index > 0 && (byte.is_ascii_digit() || byte == b'-'))
+        })
+    {
+        return Err(ApiError::invalid());
+    }
+    for value in [
+        anchor.unique_element_id.as_deref(),
+        anchor.dom_path.as_deref(),
+        anchor.ancestor_fingerprint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_target_text(value, MAX_TARGET_ANCHOR_LENGTH, false)?;
+    }
+    if let Some(role) = &anchor.role {
+        validate_target_text(role, MAX_TARGET_CLASS_TOKEN_LENGTH, false)?;
+    }
+    if let Some(name) = &anchor.accessible_name {
+        validate_target_text(name, 512, false)?;
+    }
+    if let Some(tokens) = &anchor.class_tokens {
+        if tokens.is_empty() || tokens.len() > 32 {
+            return Err(ApiError::invalid());
+        }
+        for token in tokens {
+            validate_target_text(token, MAX_TARGET_CLASS_TOKEN_LENGTH, false)?;
+            if token.chars().any(char::is_whitespace) {
+                return Err(ApiError::invalid());
+            }
+        }
+        let unique = tokens.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len() != tokens.len() {
+            return Err(ApiError::invalid());
+        }
+    }
+    if anchor.sibling_index.is_some_and(|index| index > 1_000_000) {
+        return Err(ApiError::invalid());
+    }
+    Ok(())
+}
+
+fn validate_text_anchor(anchor: &TextAnchor) -> Result<(), ApiError> {
+    validate_target_text(&anchor.exact, MAX_TARGET_QUOTE_LENGTH, false)?;
+    for value in [anchor.prefix.as_deref(), anchor.suffix.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        validate_target_text(value, MAX_TARGET_CONTEXT_LENGTH, false)?;
+    }
+    match (anchor.start_offset, anchor.end_offset) {
+        (None, None) => Ok(()),
+        (Some(start), Some(end)) => {
+            let utf16_length = anchor.exact.encode_utf16().count() as u32;
+            if start < end && end <= 1_000_000 && end - start == utf16_length {
+                Ok(())
+            } else {
+                Err(ApiError::invalid())
+            }
+        }
+        _ => Err(ApiError::invalid()),
+    }
+}
+
+fn validate_region_anchor(anchor: &RegionAnchor) -> Result<(), ApiError> {
+    for candidate in [
+        anchor.containing_block.as_ref(),
+        anchor.previous_visible_sibling.as_ref(),
+        anchor.next_visible_sibling.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_element_anchor(candidate)?;
+    }
+    Ok(())
+}
+
+fn target_source_files<'a>(
+    project: &'a Project,
+    target: &TargetRecord,
+) -> Result<&'a BTreeMap<String, Vec<u8>>, ApiError> {
+    if target.capture_revision_id != project.revision_id {
+        return Err(ApiError::conflict("target_revision_mismatch"));
+    }
+    match target.capture_source {
+        TargetCaptureSource::Accepted if target.capture_proposal_id.is_none() => {
+            Ok(&project.accepted_files)
+        }
+        TargetCaptureSource::Proposal => {
+            let proposal_id = target
+                .capture_proposal_id
+                .as_deref()
+                .ok_or_else(ApiError::invalid)?;
+            project
+                .proposal
+                .as_ref()
+                .filter(|proposal| {
+                    proposal.id == proposal_id
+                        && proposal.base_revision_id == project.revision_id
+                        && proposal.status == ProposalStatus::PendingReview
+                })
+                .map(|proposal| &proposal.proposed_files)
+                .ok_or_else(|| ApiError::conflict("target_source_proposal_stale"))
+        }
+        TargetCaptureSource::Accepted => Err(ApiError::invalid()),
+    }
+}
+
+fn target_anchor(target: &TargetRecord) -> Option<&ElementAnchor> {
+    match target.kind {
+        TargetKind::Block | TargetKind::Element | TargetKind::Text => {
+            target.element_anchor.as_ref()
+        }
+        TargetKind::Point | TargetKind::Region => target
+            .region_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.containing_block.as_ref()),
+        TargetKind::Page => None,
+    }
+}
+
+fn count_anchor_occurrences(html: &str, anchor: &ElementAnchor) -> (usize, bool) {
+    let Some(identifier) = anchor.unique_element_id.as_deref() else {
+        return (0, false);
+    };
+    let patterns = [
+        format!("data-lp-id=\"{identifier}\""),
+        format!("data-lp-id='{identifier}'"),
+        format!("data-studio-block=\"{identifier}\""),
+        format!("data-studio-block='{identifier}'"),
+        format!("id=\"{identifier}\""),
+        format!("id='{identifier}'"),
+    ];
+    for pair in patterns.chunks(2) {
+        let mut offsets = pair
+            .iter()
+            .flat_map(|pattern| html.match_indices(pattern).map(|(offset, _)| offset))
+            .collect::<Vec<_>>();
+        offsets.sort_unstable();
+        offsets.dedup();
+        if !offsets.is_empty() {
+            let tag_match = offsets.iter().any(|offset| {
+                let mut start = offset.saturating_sub(192);
+                while start < *offset && !html.is_char_boundary(start) {
+                    start += 1;
+                }
+                html[start..*offset]
+                    .rfind('<')
+                    .and_then(|position| {
+                        html[start + position + 1..*offset]
+                            .split_whitespace()
+                            .next()
+                    })
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case(&anchor.tag_name))
+            });
+            return (offsets.len(), tag_match);
+        }
+    }
+    (0, false)
+}
+
+fn resolve_target(project: &Project, target: &TargetRecord) -> Result<TargetResolution, ApiError> {
+    let files = target_source_files(project, target)?;
+    let html = files
+        .get(&target.page_path)
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .is_some_and(|html| html.contains(&format!("data-lp-id=\"{element_id}\"")))
+        .ok_or_else(|| ApiError::conflict("target_page_detached"))?;
+    let (status, candidates) = if matches!(target.kind, TargetKind::Page) {
+        (
+            TargetResolutionStatus::Resolved,
+            vec![TargetResolutionCandidate {
+                candidate_id: "candidate-1".into(),
+                score: 1.0,
+                reasons: vec!["semantic_fingerprint", "dom_path"],
+                summary: target.label.clone(),
+            }],
+        )
+    } else {
+        let anchor = target_anchor(target).ok_or_else(ApiError::invalid)?;
+        let (identifier_count, tag_match) = count_anchor_occurrences(html, anchor);
+        if identifier_count == 1 && tag_match {
+            let mut score = 0.92;
+            let mut reasons = vec!["unique_id", "semantic_fingerprint"];
+            if target
+                .text_anchor
+                .as_ref()
+                .is_some_and(|text| html.contains(&text.exact))
+            {
+                score = 0.98;
+                reasons.push("text_quote");
+            }
+            (
+                TargetResolutionStatus::Resolved,
+                vec![TargetResolutionCandidate {
+                    candidate_id: "candidate-1".into(),
+                    score,
+                    reasons,
+                    summary: target.label.clone(),
+                }],
+            )
+        } else if identifier_count > 1 {
+            (
+                TargetResolutionStatus::Ambiguous,
+                (0..identifier_count.min(5))
+                    .map(|index| TargetResolutionCandidate {
+                        candidate_id: format!("candidate-{}", index + 1),
+                        score: 0.72,
+                        reasons: vec!["unique_id", "geometry"],
+                        summary: target.label.clone(),
+                    })
+                    .collect(),
+            )
+        } else {
+            let quote_matches = target
+                .text_anchor
+                .as_ref()
+                .map(|text| html.matches(&text.exact).count())
+                .unwrap_or(0);
+            let name_matches = anchor
+                .accessible_name
+                .as_ref()
+                .map(|name| html.matches(name).count())
+                .unwrap_or(0);
+            if quote_matches > 0 || name_matches > 0 {
+                (
+                    TargetResolutionStatus::Ambiguous,
+                    vec![TargetResolutionCandidate {
+                        candidate_id: "candidate-1".into(),
+                        score: 0.65,
+                        reasons: vec!["text_quote"],
+                        summary: target.label.clone(),
+                    }],
+                )
+            } else {
+                (TargetResolutionStatus::Detached, Vec::new())
+            }
+        }
+    };
+    let selected_candidate_id =
+        matches!(status, TargetResolutionStatus::Resolved).then(|| "candidate-1".to_owned());
+    Ok(TargetResolution {
+        schema_version: TARGET_SCHEMA_VERSION,
+        resolver_version: TARGET_RESOLVER_VERSION,
+        target_id: target.target_id.clone(),
+        capture_revision_id: target.capture_revision_id.clone(),
+        resolved_revision_id: project.revision_id.clone(),
+        status,
+        selected_candidate_id,
+        candidates,
+    })
+}
+
+fn target_resolution_id(resolution: &TargetResolution) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(resolution).map_err(|_| ApiError::internal())?;
+    let digest = raw_sha256(&bytes);
+    Ok(format!("res_{}", &digest[..32]))
+}
+
+fn target_mutation_element_id(target: &TargetRecord) -> Option<String> {
+    let identifier = target_anchor(target).and_then(|anchor| anchor.unique_element_id.as_deref());
+    match identifier {
+        Some("hero-heading" | "hero-title") => Some("hero-heading".into()),
+        Some("hero-copy") => Some("hero-copy".into()),
+        Some("hero-cta") => Some("hero-cta".into()),
+        Some("hero") => Some("hero-heading".into()),
+        Some("next") => Some("hero-copy".into()),
+        _ if matches!(target.kind, TargetKind::Page) => Some("hero-heading".into()),
+        _ => None,
+    }
 }
 
 fn canonical_context_json(
@@ -2146,14 +2870,9 @@ fn canonical_context_json(
     revision_id: &str,
     context_id: &str,
     target: &TargetRecord,
+    resolution: &TargetResolution,
     instruction: &str,
 ) -> Result<String, ApiError> {
-    let mut target_json = BTreeMap::<String, Value>::new();
-    target_json.insert("elementId".into(), json!(target.element_id));
-    target_json.insert("id".into(), json!(target.id));
-    target_json.insert("kind".into(), json!("element"));
-    target_json.insert("label".into(), json!(target.label));
-
     let mut root = BTreeMap::<String, Value>::new();
     root.insert("contextId".into(), json!(context_id));
     root.insert("instruction".into(), json!(instruction));
@@ -2161,14 +2880,62 @@ fn canonical_context_json(
     root.insert("revisionId".into(), json!(revision_id));
     root.insert("schemaVersion".into(), json!(SCHEMA_VERSION));
     root.insert(
+        "numericEncoding".into(),
+        json!("serde-json-shortest-decimal-string-v1"),
+    );
+    root.insert(
         "selectedText".into(),
-        json!(selectable_text(&target.element_id).ok_or_else(ApiError::invalid)?),
+        json!(
+            selectable_text(&target_mutation_element_id(target).ok_or_else(ApiError::invalid)?)
+                .ok_or_else(ApiError::invalid)?
+        ),
     );
     root.insert(
         "target".into(),
-        serde_json::to_value(target_json).map_err(|_| ApiError::internal())?,
+        canonical_safe_number_projection(
+            serde_json::to_value(target).map_err(|_| ApiError::internal())?,
+        )?,
+    );
+    root.insert(
+        "targetResolution".into(),
+        canonical_safe_number_projection(
+            serde_json::to_value(resolution).map_err(|_| ApiError::internal())?,
+        )?,
     );
     serde_json::to_string(&root).map_err(|_| ApiError::internal())
+}
+
+/// Project JSON fractions into application-defined decimal strings before the
+/// review context crosses SynapseGit's strict canonical boundary. Integer
+/// tokens stay integers. Negative zero is normalized so equal measurements do
+/// not acquire different review digests. This local profile is intentionally
+/// versioned in the context until SynapseGit exposes a public fixed-point
+/// helper (upstream issue #29).
+fn canonical_safe_number_projection(value: Value) -> Result<Value, ApiError> {
+    match value {
+        Value::Array(values) => values
+            .into_iter()
+            .map(canonical_safe_number_projection)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| Ok((key, canonical_safe_number_projection(value)?)))
+            .collect::<Result<serde_json::Map<_, _>, ApiError>>()
+            .map(Value::Object),
+        Value::Number(number) if number.is_f64() => {
+            let value = number
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(ApiError::invalid)?;
+            Ok(Value::String(if value == 0.0 {
+                "0".into()
+            } else {
+                number.to_string()
+            }))
+        }
+        value => Ok(value),
+    }
 }
 
 fn blank_files() -> BTreeMap<String, Vec<u8>> {
@@ -2407,6 +3174,10 @@ fn inject_preview_bridge(
     );
     script.push_str(&format!(
         r#"<script nonce="{nonce}">(()=>{{"use strict";const blocked=()=>{{dispatchEvent(new Event("securitypolicyviolation"));throw new DOMException("Blocked","SecurityError");}};for(const name of ["RTCPeerConnection","webkitRTCPeerConnection"]){{try{{Object.defineProperty(window,name,{{value:blocked,writable:false,configurable:false}});}}catch{{dispatchEvent(new Event("securitypolicyviolation"));}}}}}})();</script>"#
+    ));
+    script.push_str(&format!(
+        r#"<script nonce="{nonce}">({runtime})({origin},{project},{snapshot},{revision});</script>"#,
+        runtime = PREVIEW_TARGET_RUNTIME.trim().trim_end_matches(';')
     ));
     let mut output = String::with_capacity(html.len() + script.len());
     let insertion = preview_bridge_insertion(html);

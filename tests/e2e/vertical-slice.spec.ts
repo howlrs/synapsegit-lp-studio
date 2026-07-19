@@ -20,7 +20,8 @@ import {
   isImportPreviewResponse,
   isPreviewActionMessage,
   isPreviewDiagnosticMessage,
-  isPreviewSelectionMessage,
+  isPreviewStructureMessage,
+  isPreviewTargetMessage,
   isProjectResponse,
   isProjectsResponse,
   isProposalResponse,
@@ -308,6 +309,8 @@ async function createBlankProject(
 test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを得る", async ({
   page,
 }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   const configuredEditorOrigin = process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
   const configuredPreviewOrigin = process.env.LP_STUDIO_E2E_PREVIEW_ORIGIN;
   if (
@@ -429,6 +432,68 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
     preview.getByRole("heading", { name: INITIAL_HEADING }),
   ).toBeVisible();
 
+  const targetRegion = page.getByRole("complementary", {
+    name: "選択中のターゲット",
+  });
+  const targetKindOutput = targetRegion.locator(".pill");
+  const structureButtons = page.locator(".element-list button");
+  await expect(structureButtons.first()).toBeVisible();
+  const heroBlockButton = structureButtons
+    .filter({ has: page.locator("small", { hasText: "section" }) })
+    .first();
+  const headingTreeButton = structureButtons
+    .filter({ has: page.locator("small", { hasText: "h1" }) })
+    .first();
+
+  await page.getByRole("button", { name: "ページ", exact: true }).click();
+  await page
+    .getByRole("button", { name: "index.html 全体", exact: true })
+    .click();
+  await expect(targetKindOutput).toHaveText("page");
+  await expect(targetRegion.locator(".resolution")).toContainText("resolved");
+
+  for (const [label, kind, captureButton] of [
+    ["ブロック", "block", heroBlockButton],
+    ["要素", "element", headingTreeButton],
+    ["テキスト", "text", headingTreeButton],
+    ["座標", "point", headingTreeButton],
+    ["領域", "region", headingTreeButton],
+  ] as const) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await captureButton.click();
+    await expect(targetKindOutput).toHaveText(kind);
+    await expect(targetRegion.locator(".resolution")).toContainText("resolved");
+  }
+
+  await page.getByRole("button", { name: "座標", exact: true }).click();
+  const pointResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/targets"),
+  );
+  await preview.locator("body").click({ position: { x: 32, y: 48 } });
+  expect((await pointResponsePromise).ok()).toBeTruthy();
+  await expect(targetKindOutput).toHaveText("point");
+
+  await page.getByRole("button", { name: "領域", exact: true }).click();
+  const previewBodyBox = await preview.locator("body").boundingBox();
+  expect(previewBodyBox).not.toBeNull();
+  const regionResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/targets"),
+  );
+  await page.mouse.move(previewBodyBox!.x + 36, previewBodyBox!.y + 52);
+  await page.mouse.down();
+  await page.mouse.move(previewBodyBox!.x + 180, previewBodyBox!.y + 132, {
+    steps: 4,
+  });
+  await page.mouse.up();
+  expect((await regionResponsePromise).ok()).toBeTruthy();
+  await expect(targetKindOutput).toHaveText("region");
+
+  await page.getByRole("button", { name: "要素", exact: true }).click();
+
   const mobileViewport = page.getByRole("button", { name: "モバイル" });
   const desktopViewport = page.getByRole("button", { name: "デスクトップ" });
   const viewportFrame = page.locator(".viewport-frame");
@@ -454,9 +519,6 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   ).toBeTruthy();
 
   await preview.getByRole("heading", { name: INITIAL_HEADING }).click();
-  const targetRegion = page.getByRole("complementary", {
-    name: "選択中のターゲット",
-  });
   await expect(targetRegion).toContainText("ヒーロー見出し");
   await expect(targetRegion).toContainText(/element|要素/i);
 
@@ -477,12 +539,19 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
       ).__LP_STUDIO_E2E_BRIDGE_ENVELOPES__ ?? [],
   );
   const bridgeEnvelopes = [...editorBridgeEnvelopes, ...previewBridgeEnvelopes];
-  const selectionEnvelopes = bridgeEnvelopes.filter(
+  const targetEnvelopes = bridgeEnvelopes.filter(
     (value): value is Record<string, unknown> =>
       typeof value === "object" &&
       value !== null &&
       "type" in value &&
-      value.type === "synapsegit-lp.selection",
+      value.type === "synapsegit-lp.target-draft",
+  );
+  const structureEnvelopes = bridgeEnvelopes.filter(
+    (value): value is Record<string, unknown> =>
+      typeof value === "object" &&
+      value !== null &&
+      "type" in value &&
+      value.type === "synapsegit-lp.structure",
   );
   const actionEnvelopes = bridgeEnvelopes.filter(
     (value): value is Record<string, unknown> =>
@@ -491,22 +560,28 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
       "type" in value &&
       value.type === "synapsegit-lp.action",
   );
-  expect(selectionEnvelopes.length).toBeGreaterThan(0);
+  expect(targetEnvelopes.length).toBeGreaterThanOrEqual(6);
+  expect(structureEnvelopes.length).toBeGreaterThan(0);
   expect(actionEnvelopes.length).toBeGreaterThan(0);
-  for (const envelope of selectionEnvelopes) {
-    expectSchemaValid("previewSelectionMessage", envelope);
-    expect(isPreviewSelectionMessage(envelope)).toBe(true);
+  for (const envelope of targetEnvelopes) {
+    expectSchemaValid("previewTargetMessage", envelope);
+    expect(isPreviewTargetMessage(envelope)).toBe(true);
+    expect(JSON.stringify(envelope)).not.toContain("runtimeNodeHandle");
+  }
+  for (const envelope of structureEnvelopes) {
+    expectSchemaValid("previewStructureMessage", envelope);
+    expect(isPreviewStructureMessage(envelope)).toBe(true);
   }
   for (const envelope of actionEnvelopes) {
     expectSchemaValid("previewActionMessage", envelope);
     expect(isPreviewActionMessage(envelope)).toBe(true);
   }
-  const selectionWithExtraField = {
-    ...selectionEnvelopes[0],
+  const targetWithExtraField = {
+    ...targetEnvelopes[0],
     unexpected: true,
   };
-  expectSchemaRejected("previewSelectionMessage", selectionWithExtraField);
-  expect(isPreviewSelectionMessage(selectionWithExtraField)).toBe(false);
+  expectSchemaRejected("previewTargetMessage", targetWithExtraField);
+  expect(isPreviewTargetMessage(targetWithExtraField)).toBe(false);
   const actionWithExtraField = { ...actionEnvelopes[0], unexpected: true };
   expectSchemaRejected("previewActionMessage", actionWithExtraField);
   expect(isPreviewActionMessage(actionWithExtraField)).toBe(false);
@@ -664,6 +739,7 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   await Promise.all(apiValidationTasks);
   expect(capturedApiResponseCount).toBeGreaterThanOrEqual(10);
   expect(apiValidationErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 });
 
 test("scoped Preview originが権限・storage・navigationをproject/session間で隔離する", async ({
@@ -1272,6 +1348,7 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
     expect(failure).toMatch(/^(?:csp|net::ERR_BLOCKED_BY_CLIENT)$/i);
   }
   expect(missingAssetStatuses).toEqual([404]);
+  await page.getByRole("button", { name: "操作モード" }).click();
   await importedPreview.getByRole("link", { name: "同じLP内の詳細へ" }).click();
   await expect(
     importedPreview.getByRole("heading", { name: "同じLP内の詳細ページ" }),

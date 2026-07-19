@@ -1,9 +1,14 @@
 import {
   isAllowedPreviewUrl,
+  postCaptureNode,
+  postCapturePage,
   postPreviewMode,
+  postRequestStructure,
   readPreviewDiagnostic,
-  readPreviewSelection,
+  readPreviewStructure,
+  readPreviewTarget,
 } from "../preview/bridge";
+import { targetResponseFixture } from "./fixtures";
 
 const previewScopeBase = "http://localhost:4174";
 const acceptedOrigin =
@@ -13,14 +18,18 @@ const proposedOrigin =
 
 const source = {} as Window;
 const message = {
-  type: "synapsegit-lp.selection",
+  type: "synapsegit-lp.target-draft",
   schemaVersion: "1",
   channelId: "channel-123",
   projectId: "project-001",
   snapshotId: "proposal-001",
   revisionId: "revision-001",
-  elementId: "hero-heading",
-  rect: { x: 20, y: 30, width: 240, height: 60 },
+  target: {
+    ...targetResponseFixture.target,
+    captureRevisionId: "revision-001",
+    captureSource: "proposal",
+    captureProposalId: "proposal-001",
+  },
 };
 const binding = {
   expectedOrigin: proposedOrigin,
@@ -43,34 +52,48 @@ const event = (
 
 describe("untrusted preview bridge", () => {
   it("accepts only the expected origin, source, channel, version, and bindings", () => {
-    expect(readPreviewSelection(event(), binding)).toEqual(message);
+    expect(readPreviewTarget(event(), binding)).toEqual(message);
     expect(
-      readPreviewSelection(event({ origin: "https://attacker.test" }), binding),
+      readPreviewTarget(event({ origin: "https://attacker.test" }), binding),
     ).toBeNull();
     expect(
-      readPreviewSelection(event({ source: {} as Window }), binding),
+      readPreviewTarget(event({ source: {} as Window }), binding),
     ).toBeNull();
     expect(
-      readPreviewSelection(
+      readPreviewTarget(
         event({ data: { ...message, schemaVersion: "2" } }),
         binding,
       ),
     ).toBeNull();
     expect(
-      readPreviewSelection(
+      readPreviewTarget(
         event({ data: { ...message, channelId: "other-channel" } }),
         binding,
       ),
     ).toBeNull();
     expect(
-      readPreviewSelection(
+      readPreviewTarget(
         event({ data: { ...message, snapshotId: "other-proposal" } }),
         binding,
       ),
     ).toBeNull();
     expect(
-      readPreviewSelection(
+      readPreviewTarget(
         event({ data: { ...message, revisionId: "stale-revision" } }),
+        binding,
+      ),
+    ).toBeNull();
+    expect(
+      readPreviewTarget(
+        event({
+          data: {
+            ...message,
+            target: {
+              ...targetResponseFixture.target,
+              captureRevisionId: "revision-001",
+            },
+          },
+        }),
         binding,
       ),
     ).toBeNull();
@@ -88,6 +111,8 @@ describe("untrusted preview bridge", () => {
         revisionId: "revision-001",
       },
       "select",
+      "element",
+      1,
     );
     expect(postMessage).toHaveBeenCalledWith(
       {
@@ -96,10 +121,77 @@ describe("untrusted preview bridge", () => {
         channelId: "channel-123",
         action: "set_mode",
         mode: "select",
+        targetKind: "element",
+        previewScale: 1,
         projectId: "project-001",
         snapshotId: "proposal-001",
         revisionId: "revision-001",
       },
+      proposedOrigin,
+    );
+  });
+
+  it("accepts a bound dynamic structure but keeps runtime handles outside targets", () => {
+    const structure = {
+      type: "synapsegit-lp.structure",
+      schemaVersion: "1",
+      channelId: "channel-123",
+      projectId: "project-001",
+      snapshotId: "proposal-001",
+      revisionId: "revision-001",
+      nodes: [
+        {
+          runtimeNodeHandle: "node-hero",
+          kind: "block",
+          label: "Hero section",
+          tagName: "section",
+          depth: 0,
+        },
+      ],
+    };
+    expect(readPreviewStructure(event({ data: structure }), binding)).toEqual(
+      structure,
+    );
+    expect(
+      readPreviewStructure(
+        event({ data: { ...structure, snapshotId: "other" } }),
+        binding,
+      ),
+    ).toBeNull();
+    expect(JSON.stringify(message.target)).not.toContain("runtimeNodeHandle");
+  });
+
+  it("sends page, structure, and runtime-node capture actions to the bound origin", () => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const actionBinding = {
+      expectedOrigin: proposedOrigin,
+      channelId: "channel-123",
+      projectId: "project-001",
+      snapshotId: "proposal-001",
+      revisionId: "revision-001",
+    };
+    postRequestStructure(target, actionBinding);
+    postCapturePage(target, actionBinding);
+    postCaptureNode(target, actionBinding, "node-hero", "block");
+
+    expect(postMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ action: "request_structure" }),
+      proposedOrigin,
+    );
+    expect(postMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ action: "capture_page" }),
+      proposedOrigin,
+    );
+    expect(postMessage).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        action: "capture_node",
+        runtimeNodeHandle: "node-hero",
+        targetKind: "block",
+      }),
       proposedOrigin,
     );
   });
