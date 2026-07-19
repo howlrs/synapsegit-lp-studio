@@ -160,6 +160,9 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
   で追跡する。
 - browser Human approval boundaryを
   [#24](https://github.com/howlrs/synapsegit/issues/24)で追跡する。
+- iterative dialogue用のsequential Proposalを
+  [#26](https://github.com/howlrs/synapsegit/issues/26)、Decision-selected
+  site checkoutを[#27](https://github.com/howlrs/synapsegit/issues/27)で追跡する。
 - unsupported機能をverified/admittedと表示しない。
 
 ### Phase S1: C1

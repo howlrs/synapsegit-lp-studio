@@ -42,6 +42,13 @@ Completed progress: 20%
 - Checked re-registration and the journal are separate primitives. They are not
   a journal-integrated restart-resumable orchestrator or cryptographic durable
   admission evidence; full reconciliation remains C7 work and #23 scope.
+- Source integration also confirmed that the convenience workflow permits one
+  Proposal in one Ref-empty repository and has no selected-site checkout API.
+  Iterative admission is tracked in
+  [#26](https://github.com/howlrs/synapsegit/issues/26), and bounded verified
+  checkout in [#27](https://github.com/howlrs/synapsegit/issues/27). C2 is one
+  isolated evaluation Proposal; host-retained Accepted bytes are not described
+  as a SynapseGit checkout.
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
 - C0 and C1 are committed and pushed. No LP runtime package, tag, merge,

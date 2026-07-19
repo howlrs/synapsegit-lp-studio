@@ -893,10 +893,14 @@ errorの不明瞭さが見つかった場合、LP Studio内だけの恒久workar
    process restartをまたぐdurable pending reviewとoutcome query
 3. [SynapseGit #24](https://github.com/howlrs/synapsegit/issues/24):
    host-authenticated one-shot Human approval boundary
-4. [SynapseGit #17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363):
+4. [SynapseGit #26](https://github.com/howlrs/synapsegit/issues/26):
+   one projectでのsequential generic artifact Proposal
+5. [SynapseGit #27](https://github.com/howlrs/synapsegit/issues/27):
+   selected generic site Treeのbounded verified checkout
+6. [SynapseGit #17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363):
    LP-specific provider-neutral publication projection
-5. Target v1/SpatialRegionを安全にbindingするextension profile
-6. non-cooperative CLIを含むshared writer fencing/outcome detection
+7. Target v1/SpatialRegionを安全にbindingするextension profile
+8. non-cooperative CLIを含むshared writer fencing/outcome detection
 
 実際の起票時はremoteの重複Issueと最新実装を再確認し、必要なら分割する。
 
