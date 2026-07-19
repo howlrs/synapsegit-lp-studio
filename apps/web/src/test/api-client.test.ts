@@ -1,6 +1,7 @@
 import { bootstrapApi } from "../api/client";
 import {
   HASH_C,
+  apiErrorResponseFixture,
   bootstrapFixture,
   contextResponseFixture,
   importPreviewResponseFixture,
@@ -8,11 +9,18 @@ import {
   projectsResponseFixture,
 } from "./fixtures";
 
-const jsonResponse = (value: unknown, status = 200): Response =>
-  new Response(JSON.stringify(value), {
+const jsonResponse = (
+  value: unknown,
+  status = 200,
+  headers: HeadersInit = {},
+): Response => {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Content-Type", "application/json");
+  return new Response(JSON.stringify(value), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: responseHeaders,
   });
+};
 
 describe("authenticated API client", () => {
   it("keeps the session token inside a closure and authenticates privileged calls", async () => {
@@ -48,6 +56,82 @@ describe("authenticated API client", () => {
       "Bearer secret-only-in-api-closure",
     );
     storageWrite.mockRestore();
+  });
+
+  it("updates Project metadata through an exact authenticated PATCH CAS request", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture("http://editor.test"));
+        }
+        expect(path).toBe("/api/v1/projects/project-001");
+        expect(init?.method).toBe("PATCH");
+        expect(new Headers(init?.headers).get("Content-Type")).toBe(
+          "application/json",
+        );
+        expect(new Headers(init?.headers).get("Authorization")).toBe(
+          "Bearer secret-only-in-api-closure",
+        );
+        expect(init?.credentials).toBe("omit");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          schemaVersion: "1",
+          expectedDisplayName: "Untitled landing page",
+          displayName: "Campaign LP",
+        });
+        return jsonResponse({
+          ...projectResponseFixture(),
+          project: {
+            ...projectResponseFixture().project,
+            displayName: "Campaign LP",
+          },
+        });
+      },
+    );
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(
+      session.api.updateProjectDisplayName(
+        "project-001",
+        "Untitled landing page",
+        "Campaign LP",
+      ),
+    ).resolves.toMatchObject({
+      id: "project-001",
+      displayName: "Campaign LP",
+      revisionId: "revision-accepted-001",
+    });
+  });
+
+  it("rejects invalid Project names before sending authority or bytes", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture("http://editor.test"));
+      }
+      throw new Error("Invalid metadata must not be fetched");
+    });
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(
+      session.api.updateProjectDisplayName(
+        "project-001",
+        "Untitled landing page",
+        "/home/private/project",
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid_project_display_name",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("binds context creation to the selected attempt, provider, and model", async () => {
@@ -184,6 +268,94 @@ describe("authenticated API client", () => {
 
     await expect(session.api.getProject("project-001")).rejects.toMatchObject({
       code: "invalid_response_schema",
+    });
+  });
+
+  it("gets and explicitly cancels the exact server-owned AI attempt", async () => {
+    const attempt = {
+      schemaVersion: "1" as const,
+      attemptId: "attempt-001",
+      status: "running" as const,
+    };
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture("http://editor.test"));
+        }
+        expect(path).toBe(
+          "/api/v1/projects/project-001/ai-attempts/attempt-001" +
+            (init?.method === "POST" ? "/cancel" : ""),
+        );
+        if (init?.method === "POST") {
+          expect(JSON.parse(String(init.body))).toEqual({ schemaVersion: "1" });
+          return jsonResponse({ ...attempt, status: "cancelled" });
+        }
+        expect(init?.method).toBe("GET");
+        return jsonResponse(attempt);
+      },
+    );
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(
+      session.api.getAiAttemptStatus("project-001", "attempt-001"),
+    ).resolves.toEqual(attempt);
+    await expect(
+      session.api.cancelAiAttempt("project-001", "attempt-001"),
+    ).resolves.toEqual({ ...attempt, status: "cancelled" });
+  });
+
+  it("binds structured errors to matching request and operation headers", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture("http://editor.test"));
+      }
+      return jsonResponse(apiErrorResponseFixture, 409, {
+        "x-request-id": apiErrorResponseFixture.error.requestId,
+        "x-operation-id": apiErrorResponseFixture.error.operationId,
+      });
+    });
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(session.api.getProject("project-001")).rejects.toMatchObject({
+      code: "revision_conflict",
+      requestId: "request-001",
+      operationId: "operation-001",
+      retryable: false,
+      detail: {
+        acceptedState: "unchanged",
+        recoveryAction: "refresh",
+      },
+    });
+  });
+
+  it("rejects a structured error whose body/header operation binding differs", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture("http://editor.test"));
+      }
+      return jsonResponse(apiErrorResponseFixture, 409, {
+        "x-request-id": apiErrorResponseFixture.error.requestId,
+        "x-operation-id": "operation-mismatch",
+      });
+    });
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(session.api.getProject("project-001")).rejects.toMatchObject({
+      code: "invalid_error_correlation",
+      retryable: false,
     });
   });
 

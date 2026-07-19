@@ -8,7 +8,11 @@ Baseline integration PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pul
 
 C0–C6 baseline integration commit: `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`
 
-Completed progress: 65%
+Current branch: `agent/lp-studio-m1-completion`
+
+Automated local baseline: C0–C10 implemented; C11 clean-package handoff integrated
+
+M1 completion claim: blocked by the explicit gates below
 
 この文書は「現在実装され、検証済みの範囲」のdocumentation正本です。
 要件・計画・contract typeだけからruntime capabilityを推測しないでください。
@@ -24,12 +28,12 @@ Completed progress: 65%
 | C4 Separate-origin preview | 8% | complete | session/project/snapshot-scoped opaque Preview origins; exact Host/route binding and revocation; CSP/sandbox/storage/navigation isolation; privacy-safe diagnostics; Rust, Web, and Chromium evidence |
 | C5 Target v1 and resolution | 10% | complete | strict six-kind TargetV1/schema; immutable target persistence/restart; scoped bridge capture and dynamic tree; fail-closed resolution receipt; Web/Rust/Chromium evidence; [SynapseGit #29](https://github.com/howlrs/synapsegit/issues/29) |
 | C6 AI context and ChangeSet | 9% | complete | exact reviewed provider context/manifest; deterministic fake and optional OpenAI Responses adapters; strict four-operation ChangeSet; atomic isolated workspace, Target re-resolution, blocking active-behavior checks; Web/Rust/Chromium evidence |
-| C7 Review, Decision, recovery | 8% | planned | — |
-| C8 Export, publication, integrated E2E | 7% | planned | [#17 follow-up](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363) |
-| **80% local verification gate** | — | blocked until C0–C8 complete | Creator check required before C9 |
-| C9 Security and fault hardening | 10% | planned | — |
-| C10 Acceptance evidence | 7% | planned | — |
-| C11 M1 completion gate | 3% | planned | — |
+| C7 Review, Decision, recovery | 8% | automated local baseline complete | exact-pinned trusted Rust sidecar; durable Proposal/Decision binding; adopt/reject/defer UI; restart rehydration, reconciliation, and sequential lineage tests |
+| C8 Export, publication, integrated E2E | 7% | automated local baseline complete | deterministic Accepted static export/receipt; local privacy-filtered publication exact-byte UI; restart/recovery browser flow; [#17 follow-up](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363) |
+| **80% local verification gate** | — | automated criteria complete; Creator result pending | C0–C8 automated gates are integrated; the continuation instruction is not a recorded Creator UX/keyboard result |
+| C9 Security and fault hardening | 10% | automated local baseline complete | 26 test-only durable failpoints; returned-fault and real process-abort matrix; v1→v2 migration/backups; byte-preserving unknown-schema read-only recovery; exact reachability-based manual retention |
+| C10 Acceptance evidence | 7% | automated local evidence complete; manual/external gates pending | automated keyboard/focus/320px/contrast/reduced-motion flows; safe observability/privacy canaries; synthetic corpus and packaged production App 72-case geometry/autosave/ChangeSet measurements |
+| C11 M1 completion gate | 3% | automated package/handoff complete; Human/release gates pending | clean-source package verifier, checksums, launcher/restart/browser/safe-log evidence, traceability and claim-boundary schemas; Creator, screen-reader, live-provider, license/brand, merge/post-merge, and release decisions remain pending |
 
 ## Current facts
 
@@ -44,20 +48,21 @@ Completed progress: 65%
   authentication. Host-authenticated one-shot approval is tracked in
   [#24](https://github.com/howlrs/synapsegit/issues/24) and remains mandatory
   in the LP server integration.
-- Checked re-registration and the journal are separate primitives. They are not
-  a journal-integrated restart-resumable orchestrator or cryptographic durable
-  admission evidence; full reconciliation remains C7 work and #23 scope.
-- Source integration also confirmed that the convenience workflow permits one
-  Proposal in one Ref-empty repository and has no selected-site checkout API.
-  Iterative admission is tracked in
+- Checked re-registration and the upstream journal remain separate primitives.
+  The C7 integration therefore uses an exact-pinned trusted Rust sidecar plus a
+  Studio-owned durable command intent/receipt binding; the local journal is not
+  presented as SynapseGit authority.
+- The upstream convenience workflow still permits one Proposal in one Ref-empty
+  repository and has no selected-site checkout API. The C7 sidecar
+  maps each durable operation through lower-level exact-pinned crates while the
+  host retains and revalidates Accepted bytes; those bytes are not described as
+  a SynapseGit checkout. Iterative admission remains tracked in
   [#26](https://github.com/howlrs/synapsegit/issues/26), and bounded verified
-  checkout in [#27](https://github.com/howlrs/synapsegit/issues/27). C2 is one
-  isolated evaluation Proposal; host-retained Accepted bytes are not described
-  as a SynapseGit checkout.
+  checkout in [#27](https://github.com/howlrs/synapsegit/issues/27).
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
 - C0 through C6 are implemented and locally verified. The Creator explicitly
-  approved integrating this 65% development baseline through PR #1. `main`
+  approved integrating that historical C0–C6 development baseline through PR #1. `main`
   contains merge commit `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`, and the
   post-merge [GitHub Actions run](https://github.com/howlrs/synapsegit-lp-studio/actions/runs/29683014738)
   passed the documentation/lock, formatting, Web, Rust, build, and Chromium
@@ -68,17 +73,25 @@ Completed progress: 65%
   tests, 63 Rust library tests, 10 launcher tests, and 3 Chromium flows passed.
   The separately acknowledged, externally billed OpenAI live test remained
   intentionally ignored.
-- This baseline-completion audit passed the same complete gate set with 213 Web
-  tests, 66 Rust library tests, 10 launcher tests, and 3 Chromium flows. The
-  externally billed OpenAI live test remains intentionally ignored.
-- The 65% merge is an explicit exception to the default pre-80% draft-PR
-  policy. It establishes a development baseline only: C7–C11 and the 80% local
-  verification gate remain incomplete. No tag, release, product publication,
-  production-readiness claim, or distribution permission exists.
+- The post-65% baseline-completion audit passes 265 Web tests, 202 Rust library
+  tests, 11 launcher tests, one production-recovery integration test, and 4
+  Chromium flows. Two direct Rust test entries remain intentionally ignored:
+  the externally billed OpenAI live call and a subprocess-only abort helper
+  that is exercised by the parent crash-recovery matrix.
+- That C0–C6 merge was an explicit exception to the default pre-80% draft-PR
+  policy. The post-65% branch completes the automatable local C7–C11 baseline,
+  but it does not convert the manual 80% result or final Human/external/release
+  gates to passed. No tag, release, product publication, production-readiness
+  claim, or distribution permission exists.
 - The development repository is Public by explicit Creator direction. Public
   visibility is not a product-publication action or a license grant.
 - Development checkpoint pushes are explicitly authorized; product publication
   remains a separate Human action.
+- On 2026-07-19 the Creator explicitly instructed development to continue from
+  the 65% baseline through completion. That instruction authorizes work beyond
+  the historical 80% stop; it is not recorded as a completed Creator UX,
+  keyboard, screen-reader, live-provider, license, brand, merge, or release
+  verification.
 
 ## C1 evidence and limits
 
@@ -159,13 +172,14 @@ Completed progress: 65%
 - SynapseGit's strict timestamp bytes remain intact; integration ergonomics and
   earlier config validation are tracked in
   [Issue #28](https://github.com/howlrs/synapsegit/issues/28).
-- Deliberately deferred work includes archive upload, rename/delete/history
-  destruction UI, DOM-node/runtime limits, per-limit failure details,
-  restart-durable pending Proposal authority, and Synapse/local Accepted
-  outcome reconciliation. The last two remain C7/#23 work; fault-injection and
-  retention hardening remain C9. Imported non-UTF-8 or oversized entry HTML can
-  be accepted by the copy boundary but rejected by Preview. Aligned import-time
-  entry diagnostics remain deferred rather than weakening Preview validation.
+- At C3, deliberately deferred work included archive upload, destructive UI,
+  DOM-node/runtime limits, restart-durable pending Proposal authority, outcome
+  reconciliation, fault injection, and retention. C7 later completed Proposal
+  and Decision recovery, and C9 completed the automated fault/retention baseline.
+  Archive upload, terminal-history-only deletion, and some per-limit diagnostics
+  remain outside scope. Imported non-UTF-8 or oversized entry HTML can be
+  accepted by the copy boundary but rejected by Preview; aligned import-time
+  diagnostics remain deferred rather than weakening Preview validation.
 - An adversarial same-user process that swaps and restores the same directory
   inode during both complete scans remains a theoretical live-filesystem race.
   The registered-root, no-follow, identity, rescan, digest, and private-state
@@ -320,19 +334,43 @@ Completed progress: 65%
   or bytes, conflicting operations, rename cycles, and exact hash-precondition
   failures. All four operations apply to a clone before entry point, syntax,
   local-reference, export deny-list, and Target checks.
+- The syntax gate reparses the complete resulting site, not only changed files.
+  JSON remains strict; `.css`, `.js`, `.mjs`, and `.cjs` use language parsers
+  (with JavaScript semantic early-error checks); `.xml` and `.svg` use a strict,
+  namespace-aware XML parser with bounded nodes and no DTD/external-entity
+  processing. HTML/HTM uses HTML5 document parsing: tokenizer/tree-builder
+  recovery reports a bounded, redacted `static-syntax` advisory count because
+  browser HTML5 recovery is not a hard parse failure. UTF-8/NUL failures and
+  CSS/JavaScript/JSON/XML/SVG parser diagnostics remain hard failures. This
+  gate also parses executable inline classic/module `<script>` bodies,
+  `<style>` bodies, and `style` attributes in HTML and in SVG/XHTML XML
+  namespaces (including those embedded in `.xml`); unknown XML namespaces are
+  not activated by local element name alone. Inert data-block script types such
+  as `application/json`, `application/ld+json`, and `importmap` are not
+  misclassified as JavaScript. Inline event-handler attributes are handled by
+  the separate blocking active-behavior review gate rather than executed or
+  syntax-normalized here.
 - A valid result is materialized into an immutable isolated Proposal workspace,
   then registered through the pinned real SynapseGit generic artifact path.
   SynapseGit receives a privacy-filtered digest projection rather than the user
   prompt, full Target, site snippets, credential, or raw model result. The UI
   continues to state caller-supplied attribution and `execution未検証`.
 - Newly introduced external origins (including protocol-relative URLs), form
-  actions, script/iframe/download behavior, inline event handlers, changed
-  local or inline script bodies, analytics, and cookie behavior are visible
-  blocking warnings with exact destinations. Both the UI and Decision server
-  reject adoption while one is present. The strict server contract accepts
-  reject and defer dispositions, but the current Review UI exposes only
-  unchanged adoption. Accepted bytes are unchanged on every failed
-  generation/validation.
+  actions, script/iframe/download behavior, inline event handlers, analytics,
+  and cookie behavior are visible blocking warnings with exact destinations.
+  Script identity includes each occurrence, active attributes, and body bytes;
+  every new or changed JavaScript asset is conservatively blocking regardless
+  of statically observed reachability. Both the UI and Decision server reject
+  adoption while one is present. New or changed CSS/srcdoc reference syntax
+  that the bounded scanner cannot exhaustively classify is also a blocking
+  warning; removing or renaming any path while such an opaque source remains is
+  blocked as well. Quote-aware raw/RCDATA/script scanning, character-reference
+  checks on URL-sensitive attributes, and conservative handling of ambiguous
+  declarations, processing instructions, `image-set()`, and legacy fetch/base
+  attributes prevent tokenizer or escaping ambiguity from hiding a reference
+  or active behavior. Accepted bytes are unchanged on every failed
+  generation/validation. The C6 baseline UI exposed only adoption; the C7 adds
+  explicit Reject and Defer without rewriting this historical C6 evidence.
 - Local gates pass with 205 Web tests, 63 Rust library tests, 10 launcher
   tests, Clippy warnings denied, strict schema/guard parity, production build,
   and 3 Chromium E2E flows. One external-billing live-provider test remains
@@ -342,18 +380,174 @@ Completed progress: 65%
   not executed in the credential-free checkpoint gates. Its external network,
   billing, and account availability are therefore not claimed as automated CI
   evidence.
-- Consultation mode, message persistence/branching, streaming and cancellation,
-  screenshot opt-in, target-optimized snippets, pending Proposal restart
-  recovery, multi-Proposal history, and protected-range editing for redacted
-  site files remain deliberately deferred. Shared stream/cancel contract types
-  are not presented as an available runtime capability. Safe same-file secret
+- Consultation mode, message persistence/branching, streaming text, screenshot
+  opt-in, target-optimized snippets, concurrent ready Proposal comparison,
+  non-AI long-operation cancellation, and protected-range editing for redacted
+  site files remain deliberately deferred. The post-C6 baseline implements
+  explicit server-owned AI generation status/cancel with a late-response
+  tombstone; it does not imply conversation streaming. Safe same-file secret
   preservation requires a future digest-bound range-edit protocol rather than
-  ChangeSet v1 placeholder rehydration. Recovery and sequential admission
-  continue in C7 and SynapseGit Issues #23/#26.
+  ChangeSet v1 placeholder rehydration. Restart recovery and sequential
+  admission are implemented by C7 and are not retroactively counted as C6
+  evidence.
 
-## Next checkpoint
+## C7 evidence and limits
 
-C7 makes review decisions explicit and restart-safe: adopt, reject, and defer
-remain Human-only terminal actions; a durable local journal reconciles the
-Synapse receipt with the application Accepted pointer without inventing
-restart authority that the pinned SynapseGit contract does not expose.
+- The integration embeds only exact-pinned SynapseGit Rust crates behind a trusted
+  local sidecar. Proposal workspace/metadata and a canonical review binding are
+  durable before browser review; the browser never receives raw repository,
+  Actor, Policy, Grant, permit, Ref, or Decision authority.
+- Adopt, Reject, and Defer share one Human approval/Decision path. Reject and
+  Defer preserve Accepted, Defer is terminal, and continuation creates a new
+  Proposal on the latest base with a predecessor link.
+- Startup validates persisted Project, Proposal, review context, Synapse receipt,
+  Decision receipt, immutable workspace, Accepted lineage, and current
+  materialized bytes before rehydrating an active Review or history. An active
+  Proposal takes precedence over older terminal history. A committed Synapse
+  Decision with a missing local receipt/pointer is reconciled from durable state;
+  browser memory, raw private rationale, or approval tokens are not reconstructed.
+- The private rationale is accepted only as bounded transient Decision input.
+  Synapse/Core, Studio state, logs, export, and publication retain neither its
+  raw bytes nor a correlation digest; only a fixed disposition classification
+  is durable.
+- Tests cover pending and all three terminal dispositions across restart, a
+  Synapse Decision committed before local receipt/pointer completion, sequential
+  Reject/Defer/Adopt lineage, idempotent reconciliation, and the C9 returned-fault
+  and process-abort matrix.
+- Only one active Proposal per Project is exposed. Concurrent ready Proposal
+  comparison, partial/file/hunk adoption, and editing Proposed bytes remain out
+  of scope.
+
+## C8 evidence and limits
+
+- Static export takes an immutable Accepted snapshot and generates a fixed-profile
+  ZIP plus source manifest, option, file-manifest, validation, archive identity,
+  and checksum receipt. Proposal, prompt, Target, credential, raw provider data,
+  Studio metadata, and Synapse internal data are excluded by selecting only the
+  Accepted site manifest.
+- The publication generator produces versioned, provider-neutral, privacy-filtered
+  GitHub-ready files locally. The UI previews the exact generated bytes, field
+  provenance, checksum, redactions, and limitations before download. Its receipt
+  states `networkWrites: false` and `remotePublication: separate_human_action`.
+- Public title, summary, and Decision note remain explicitly author-supplied.
+  The bundle is not a signature, authorship proof, rights proof, GitHub action,
+  deployment, or release.
+- The static validator is quote-aware for HTML/XML attributes, treats malformed
+  markup fail closed, and refuses an offline-self-contained claim when CSS
+  escaping/comment ambiguity prevents exact reference classification. Active
+  SVG/XML/XHTML documents are never mounted as navigable Preview documents.
+- Generator, contract, Rust integration, and Chromium tests cover deterministic
+  output, purity, tamper/drift failure, exact-byte publication review, and the
+  create/import through restart/recovery/export/publication flow.
+
+## C9 evidence and limits
+
+- Twenty-six static test-only failpoints sit immediately around Decision intent,
+  Synapse call/receipt/query, CAS/object publication, Accepted pointer,
+  materialization, completion, response, write/sync, and rename boundaries.
+  Production has no request, environment, CLI, or configuration switch for
+  arming them. Exact thread ownership prevents unrelated parallel tests from
+  consuming an armed hit.
+- Returned ENOSPC/permission/write/sync/rename faults and 80 real child-process
+  abort executions reconstruct the server from disk and verify one terminal
+  disposition, unchanged Accepted bytes before authority, or deterministic
+  forward reconciliation after an adopted receipt.
+- v1→v2 migration verifies the old representation before mutation, creates a
+  versioned private backup and canonical checksum, stages and validates the new
+  representation, and publishes atomically. Interruption fixtures leave either
+  the verified old schema or complete new schema readable.
+- Read-only startup inventories and validates the complete source root before any
+  recovery mutation path. Corrupt/unknown-schema subprocess tests compare an
+  exact before/after tree fingerprint and prove that diagnostics and verified
+  last-Accepted export do not alter source bytes.
+- Manual retention shows exact scope/binding/byte impact and requires a separate
+  confirmation. Cleanup revalidates CAS reachability across retained Accepted,
+  Proposal/Decision/reconciliation, Synapse bindings, generated artifacts, and
+  recovery backups; unknown or shared objects are not removed. Automatic GC and
+  telemetry remain absent.
+- Safe-log, persisted-state, archive, and publication canary tests cover prompt,
+  file body, credentials, tokens, raw provider response, absolute paths, and raw
+  private rationale. The READY protocol is isolated on stdout, diagnostics use
+  stderr, server formatting disables ANSI, and the package verifier rejects VT
+  control sequences in raw captured logs before field correlation.
+
+## C10 evidence and limits
+
+- Every API error has a stable code, safe static message, request ID, operation
+  ID, retryability, Accepted-state classification, and recovery action. Body and
+  response-header IDs must match. Once a Decision can have crossed the Synapse
+  authority boundary, all subsequent failures require reconciliation and never
+  claim that Accepted is unchanged or that a blind retry is safe.
+- AI generation exposes phase, elapsed time, server-owned status, and explicit
+  cancel. Queued cancel and active cancel converge on the same tombstone; HTTP
+  disconnect is not semantic cancel; double cancel is idempotent; cancelled or
+  timed-out late provider results cannot become a Proposal; retry requires a new
+  attempt.
+- Every claimed run also receives a process-local monotonic generation. After
+  provider return, the handler rechecks cancellation and exact
+  project/attempt/generation ownership under the Store lock before any
+  ChangeSet, storage, or sidecar side effect; stale guards can neither complete
+  nor release a later reuse of the same public attempt ID after terminal-status
+  eviction.
+- Keyboard/browser tests cover Target selection, context review, fake Proposal,
+  Adopt/Reject/Defer, export, focus containment/return, iframe escape, visible
+  focus, 320 CSS px, reduced motion, forced colors, and point/region semantic
+  alternatives. Generated-LP accessibility checks remain advisory and do not
+  establish WCAG conformance.
+- The browser smoke fixture records navigation/response p95, DOM size, basic
+  names/labels/landmarks/IDs, initial Tab focus, 320 CSS px overflow,
+  reduced-motion rendering, and forced-colors rendering. Its result schema
+  always preserves manual evidence as pending and explicitly denies WCAG,
+  full-performance-profile, production, and release claims. Performance reference
+  thresholds are advisory on an uncharacterized shared CI runner, as required by
+  ADR-0011; deterministic functional timeouts remain failures.
+- A separate deterministic runner generates exactly 500 regular files totaling
+  50 MiB and an exact 10,000-element DOM at runtime. Its bounded scan and
+  72-case overlay matrix cover three viewports, two DPRs, three content-zoom
+  factors, two preview scales, two scroll cases, transforms, and nested scrolling;
+  the 2 CSS px geometry limit is a hard gate. The result records exact
+  OS/kernel/toolchain bindings and all 72 raw case identities, errors, and
+  feedback durations; the verifier independently recomputes the maximum and
+  p95. The 100 ms feedback reference is advisory on shared CI.
+- The packaged production runner imports its fixture through the actual App,
+  verifies the scoped Preview iframe, traverses `preview_target_runtime` and the
+  bound bridge into the Target API, and measures the actual runtime overlay over
+  72 cases: three configured widths × two DPRs × three content zoom factors ×
+  two Preview scales × two scroll conditions. Height is recorded from runtime,
+  not claimed as a configured viewport dimension. Maximum overlay error is a
+  hard 2 CSS px gate; timing references remain environment-bound.
+- The same production run measures display-name final input through durable
+  PATCH/UI completion and invokes the packaged production ChangeSet parser and
+  full bounded validator for exactly ten changed text files totaling 2 MiB.
+  Raw cases/samples and recomputable p95 values are retained without project IDs,
+  paths, prompt, file body, tokens, or provider content.
+- Creator UX, manual screen-reader, cross-browser security/geometry, and the
+  acknowledged external live-provider run remain pending. Cancellation for
+  import/Preview/diff queues is also outside the implemented AI-attempt scope.
+
+## C11 evidence and limits
+
+- Versioned evidence/support templates remain fail closed: manual and external
+  fields stay pending, license/brand ownership stays unresolved, and no merge,
+  release, tag, product publication, production, distribution, or broad support
+  claim is inferred from automated success.
+- `pnpm check:evidence` validates all 348 requirement mappings, P0 evidence
+  cells, checkpoint weights, manual pending gates, pinned profiles/result
+  schemas, and contradictory-result rejection.
+- The package verifier rejects a dirty source unless `--allow-dirty` is explicit,
+  snapshots the exact tracked/nonignored source, requires Linux x86-64 GNU, and
+  builds from that snapshot. It verifies launcher/start/health/Editor, separate
+  Preview listener, graceful stop, same-root restart, browser/accessibility
+  smoke, synthetic corpus, production integration performance, maximum-level
+  safe logs, evidence JSON, dependency inventory, unresolved-license notice,
+  per-file SHA-256 manifest, and retained `SHA256SUMS` outside the repository.
+- This is a local evaluation package, not a redistribution or release artifact.
+
+## Remaining Human and external gates
+
+- Record the Creator 80% UX/keyboard scenario and a manual screen-reader flow.
+- Run the separately acknowledged live-provider test only with explicit
+  credential, network, billing, and data-transfer consent.
+- Assign and resolve license/brand/support owners and distribution terms.
+- Review the draft completion PR, choose merge or rejection, run post-merge
+  verification if merged, and make a separate explicit release/tag decision.

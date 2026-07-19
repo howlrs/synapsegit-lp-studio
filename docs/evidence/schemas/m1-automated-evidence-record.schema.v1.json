@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit.invalid/schemas/lp-studio/m1-automated-evidence-record.v1.json",
+  "title": "SynapseGit LP Studio actual automated evidence record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recordKind",
+    "status",
+    "scope",
+    "sourceBinding",
+    "results",
+    "pendingGates",
+    "claimBoundary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "synapsegit-lp-studio.automated-evidence-record/1"
+    },
+    "recordKind": { "const": "automated_result" },
+    "status": { "const": "passed" },
+    "scope": { "const": "local_internal_evaluation_only" },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "clean",
+        "evaluationMode",
+        "statusSha256",
+        "contentFingerprintSha256"
+      ],
+      "properties": {
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "clean": { "type": "boolean" },
+        "evaluationMode": {
+          "enum": ["clean_tree", "explicit_dirty_tree"]
+        },
+        "statusSha256": { "$ref": "#/$defs/sha256" },
+        "contentFingerprintSha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "clean": { "const": true } } },
+          "then": {
+            "properties": { "evaluationMode": { "const": "clean_tree" } }
+          },
+          "else": {
+            "properties": {
+              "evaluationMode": { "const": "explicit_dirty_tree" }
+            }
+          }
+        }
+      ]
+    },
+    "results": {
+      "type": "array",
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/result" },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "id": { "const": "package-browser-smoke" } },
+            "required": ["id", "profile"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "id": { "const": "production-integration-performance" },
+              "coverageKind": { "const": "partial_automated_evidence" }
+            },
+            "required": ["id", "profile", "coverageKind"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "id": { "const": "performance-geometry-corpus" }
+            },
+            "required": ["id", "profile"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "id": { "const": "safe-observability-fake-flow" }
+            },
+            "required": ["id", "profile"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "id": { "const": "local-evaluation-package" }
+            },
+            "required": ["id"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "pendingGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "creatorVerification",
+        "liveProvider",
+        "manualKeyboardZoomContrast",
+        "screenReader",
+        "applicationAutosaveAndChangeSetPerformance",
+        "boundedApplicationCancellation",
+        "license",
+        "brand",
+        "productionPermission",
+        "externalDeliveryPermission",
+        "redistributionPermission",
+        "releaseCreated",
+        "tagCreated"
+      ],
+      "properties": {
+        "creatorVerification": { "const": "pending" },
+        "liveProvider": {
+          "const": "pending_external_credential_and_billing_acknowledgement"
+        },
+        "manualKeyboardZoomContrast": { "const": "pending" },
+        "screenReader": { "const": "pending" },
+        "applicationAutosaveAndChangeSetPerformance": {
+          "const": "measured"
+        },
+        "boundedApplicationCancellation": {
+          "const": "pending_unmeasured"
+        },
+        "license": { "const": "unresolved" },
+        "brand": { "const": "unresolved" },
+        "productionPermission": { "const": "not_recorded" },
+        "externalDeliveryPermission": { "const": "not_recorded" },
+        "redistributionPermission": { "const": "not_recorded" },
+        "releaseCreated": { "const": false },
+        "tagCreated": { "const": false }
+      }
+    },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirementCompletionInferred",
+        "allP0Complete",
+        "productionReady",
+        "releaseCreated",
+        "distributionPermissionInferred"
+      ],
+      "properties": {
+        "requirementCompletionInferred": { "const": false },
+        "allP0Complete": { "const": false },
+        "productionReady": { "const": false },
+        "releaseCreated": { "const": false },
+        "distributionPermissionInferred": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "coverageKind",
+        "command",
+        "result",
+        "requirementIds"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "status": { "const": "passed" },
+        "coverageKind": {
+          "enum": ["automated_evidence", "partial_automated_evidence"]
+        },
+        "command": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["executable", "arguments", "redactions"],
+          "properties": {
+            "executable": { "enum": ["node", "pnpm"] },
+            "arguments": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+            },
+            "redactions": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+            }
+          }
+        },
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^docs/evidence/fixtures/[a-z0-9.-]+\\.json$"
+            },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["embeddedAt", "sha256"],
+          "properties": {
+            "embeddedAt": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9]*(?:\\.[A-Za-z][A-Za-z0-9]*)+$"
+            },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "requirementIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[0-9]{3}$"
+          }
+        }
+      }
+    }
+  }
+}

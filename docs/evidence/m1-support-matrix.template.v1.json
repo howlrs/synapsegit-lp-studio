@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.support-matrix/1",
+  "recordKind": "template",
+  "completionState": "incomplete",
+  "scope": "local_internal_evaluation_only",
+  "sourceRevision": null,
+  "verifiedAt": null,
+  "candidateEnvironment": {
+    "osFamily": "Linux",
+    "architecture": "x86_64",
+    "environment": "GNU or WSL2",
+    "kernel": null,
+    "browserFamily": "Chromium",
+    "browserVersion": null,
+    "browserDistribution": "Playwright Chromium",
+    "playwrightVersion": "1.61.1",
+    "requiredBrowserFeatures": ["Navigation API"],
+    "nodeVersion": "24.14.1",
+    "pnpmVersion": "10.33.0",
+    "rustVersion": "1.95.0",
+    "verificationStatus": "pending"
+  },
+  "supportedClaims": [],
+  "explicitlyUnverified": [
+    "Firefox",
+    "Safari and WebKit",
+    "Windows native",
+    "macOS",
+    "Linux architectures other than x86_64",
+    "hosted or reverse-proxy deployment",
+    "public or multi-user service"
+  ],
+  "synapseGit": {
+    "releasedBaseline": "v0.3.0",
+    "contractSourceRevision": null,
+    "contractLockSha256": null,
+    "installProfile": "exact pinned Rust source dependency",
+    "verificationStatus": "pending",
+    "releaseStatus": "generic artifact source contract is not a released v0.3.0 capability"
+  },
+  "licenseAndBrand": {
+    "lpStudioLicenseIdentifier": "LicenseRef-SynapseGit-LP-Studio-Evaluation",
+    "lpStudioLicenseTextStatus": "not_recorded",
+    "thirdPartyNoticeStatus": "not_recorded",
+    "templateAndAssetRightsStatus": "not_recorded",
+    "responsibleOwner": "unassigned",
+    "synapseGitRightsHolderPermission": "not_recorded",
+    "productionPermission": "not_recorded",
+    "externalDeliveryPermission": "not_recorded",
+    "redistributionPermission": "not_recorded",
+    "brandPermission": "not_recorded"
+  },
+  "claimBoundary": {
+    "m1CompletionMayMean": "verified local Product MVP within one exact support combination",
+    "doesNotMean": [
+      "production ready",
+      "release or tag",
+      "distribution permission",
+      "external delivery permission",
+      "hosted service support",
+      "SynapseGit brand permission"
+    ]
+  },
+  "evidence": []
+}

@@ -1,5 +1,6 @@
 import {
   SCHEMA_VERSION,
+  isAiAttemptStatusV1,
   isApiErrorResponse,
   isApprovalResponse,
   isBootstrapResponse,
@@ -7,37 +8,63 @@ import {
   isDecisionResponse,
   isExportResponse,
   isImportPreviewResponse,
+  isProjectDisplayName,
+  isPublicationResponse,
   isProjectResponse,
   isProjectsResponse,
   isProposalResponse,
+  isRecoveryResponse,
+  isRetentionCleanupResponse,
+  isRetentionResponse,
+  isReviewResponse,
   isTargetResponse,
   type ApprovalRequest,
+  type AiAttemptStatusV1,
+  type ApiErrorDetail,
   type ArtifactDisposition,
   type BootstrapResponse,
   type ContextReview,
   type DecisionResponse,
   type ExportReceipt,
   type ImportPreview,
+  type PublicationDraft,
   type Project,
   type Proposal,
+  type RecoveryPoint,
+  type RetentionCleanupRequest,
+  type RetentionCleanupResponse,
+  type RetentionInventory,
+  type Review,
   type TargetSelection,
   type TargetV1,
+  type UpdateProjectMetadataRequest,
 } from "@synapsegit-lp/contracts";
 
 export class ApiError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly requestId?: string;
+  readonly operationId?: string;
+  readonly detail?: ApiErrorDetail;
 
   constructor(
     message: string,
-    options: { code: string; retryable: boolean; requestId?: string },
+    options: {
+      code: string;
+      retryable: boolean;
+      requestId?: string;
+      operationId?: string;
+      detail?: ApiErrorDetail;
+    },
   ) {
     super(message);
     this.name = "ApiError";
     this.code = options.code;
     this.retryable = options.retryable;
     if (options.requestId !== undefined) this.requestId = options.requestId;
+    if (options.operationId !== undefined)
+      this.operationId = options.operationId;
+    if (options.detail !== undefined) this.detail = options.detail;
   }
 }
 
@@ -53,6 +80,11 @@ export interface AuthenticatedApi {
   createBlankProject(): Promise<Project>;
   listProjects(): Promise<Project[]>;
   getProject(projectId: string): Promise<Project>;
+  updateProjectDisplayName(
+    projectId: string,
+    expectedDisplayName: string,
+    displayName: string,
+  ): Promise<Project>;
   previewRegisteredImport(): Promise<ImportPreview>;
   confirmRegisteredImport(
     previewId: string,
@@ -74,6 +106,14 @@ export interface AuthenticatedApi {
     contextId: string,
     contextSha256: string,
   ): Promise<Proposal>;
+  getAiAttemptStatus(
+    projectId: string,
+    attemptId: string,
+  ): Promise<AiAttemptStatusV1>;
+  cancelAiAttempt(
+    projectId: string,
+    attemptId: string,
+  ): Promise<AiAttemptStatusV1>;
   approveDecision(input: {
     reviewId: string;
     proposalId: string;
@@ -90,8 +130,25 @@ export interface AuthenticatedApi {
     intentId: string;
     rationale?: string;
   }): Promise<DecisionResponse>;
+  getReview(reviewId: string): Promise<Review>;
+  reconcileReview(reviewId: string): Promise<Review>;
   createExport(projectId: string, revisionId: string): Promise<ExportReceipt>;
   downloadExport(downloadUrl: string): Promise<Blob>;
+  createPublication(input: {
+    projectId: string;
+    revisionId: string;
+    publicLabel: string;
+    title: string;
+    summary: string;
+    publicDecisionNote?: string;
+  }): Promise<PublicationDraft>;
+  downloadPublication(downloadUrl: string): Promise<Blob>;
+  getRetention(): Promise<RetentionInventory>;
+  cleanupRetention(
+    input: RetentionCleanupRequest,
+  ): Promise<RetentionCleanupResponse>;
+  getRecoveryPoints(): Promise<RecoveryPoint[]>;
+  downloadRecoveryExport(exportUrl: string): Promise<Blob>;
 }
 
 export interface BootstrappedApi {
@@ -131,10 +188,23 @@ const validateResponse = <T>(
 
 const throwResponseError = (response: Response, value: unknown): never => {
   if (isApiErrorResponse(value)) {
+    const operationId = response.headers.get("x-operation-id");
+    const requestId = response.headers.get("x-request-id");
+    if (
+      operationId !== value.error.operationId ||
+      requestId !== value.error.requestId
+    ) {
+      throw new ApiError("エラー応答の相関情報が一致しません。", {
+        code: "invalid_error_correlation",
+        retryable: false,
+      });
+    }
     throw new ApiError(value.error.message, {
       code: value.error.code,
       retryable: value.error.retryable,
       requestId: value.error.requestId,
+      operationId: value.error.operationId,
+      detail: value.error.detail,
     });
   }
   throw new ApiError(
@@ -161,6 +231,7 @@ const requestBootstrap = async (
 const ensureSameEditorOrigin = (
   rawUrl: string,
   editorOrigin: string,
+  collection: "exports" | "publications" | "recovery",
 ): string => {
   let resolved: URL;
   try {
@@ -173,8 +244,14 @@ const ensureSameEditorOrigin = (
   }
   if (
     resolved.origin !== editorOrigin ||
-    !resolved.pathname.startsWith("/api/v1/exports/") ||
-    !resolved.pathname.endsWith("/download")
+    resolved.username.length > 0 ||
+    resolved.password.length > 0 ||
+    resolved.search.length > 0 ||
+    resolved.hash.length > 0 ||
+    !resolved.pathname.startsWith(`/api/v1/${collection}/`) ||
+    !resolved.pathname.endsWith(
+      collection === "recovery" ? "/export" : "/download",
+    )
   ) {
     throw new ApiError("許可されていないダウンロードURLです。", {
       code: "invalid_download_origin",
@@ -240,6 +317,28 @@ export const bootstrapApi = async (
       label,
     );
 
+  const downloadArtifact = async (
+    downloadUrl: string,
+    collection: "exports" | "publications" | "recovery",
+  ): Promise<Blob> => {
+    const url = ensureSameEditorOrigin(downloadUrl, editorOrigin, collection);
+    const download = await fetcher(url, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      headers: {
+        Accept: "application/zip",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!download.ok) {
+      const value = await safeJson(download);
+      throwResponseError(download, value);
+    }
+    return download.blob();
+  };
+
   const api: AuthenticatedApi = {
     async createBlankProject() {
       const result = await postJson(
@@ -267,6 +366,38 @@ export const bootstrapApi = async (
         { method: "GET" },
         isProjectResponse,
         "プロジェクト",
+      );
+      return result.project;
+    },
+
+    async updateProjectDisplayName(
+      projectId,
+      expectedDisplayName,
+      displayName,
+    ) {
+      if (
+        !isProjectDisplayName(expectedDisplayName) ||
+        !isProjectDisplayName(displayName)
+      ) {
+        throw new ApiError("プロジェクト表示名が不正です。", {
+          code: "invalid_project_display_name",
+          retryable: false,
+        });
+      }
+      const body: UpdateProjectMetadataRequest = {
+        schemaVersion: SCHEMA_VERSION,
+        expectedDisplayName,
+        displayName,
+      };
+      const result = await requestJson(
+        `/api/v1/projects/${encodeURIComponent(projectId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        isProjectResponse,
+        "プロジェクト表示名",
       );
       return result.project;
     },
@@ -349,6 +480,24 @@ export const bootstrapApi = async (
       return result.proposal;
     },
 
+    async getAiAttemptStatus(projectId, attemptId) {
+      return requestJson(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/ai-attempts/${encodeURIComponent(attemptId)}`,
+        { method: "GET" },
+        isAiAttemptStatusV1,
+        "AI処理状態",
+      );
+    },
+
+    async cancelAiAttempt(projectId, attemptId) {
+      return postJson(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/ai-attempts/${encodeURIComponent(attemptId)}/cancel`,
+        { schemaVersion: SCHEMA_VERSION },
+        isAiAttemptStatusV1,
+        "AI処理の取消",
+      );
+    },
+
     async approveDecision(input) {
       const body: ApprovalRequest = {
         schemaVersion: SCHEMA_VERSION,
@@ -386,6 +535,26 @@ export const bootstrapApi = async (
       );
     },
 
+    async getReview(reviewId) {
+      const result = await requestJson(
+        `/api/v1/reviews/${encodeURIComponent(reviewId)}`,
+        { method: "GET" },
+        isReviewResponse,
+        "保存済みレビュー",
+      );
+      return result.review;
+    },
+
+    async reconcileReview(reviewId) {
+      const result = await postJson(
+        `/api/v1/operations/reviews/${encodeURIComponent(reviewId)}/reconcile`,
+        { schemaVersion: SCHEMA_VERSION },
+        isReviewResponse,
+        "Decision再照合",
+      );
+      return result.review;
+    },
+
     async createExport(projectId, revisionId) {
       const result = await postJson(
         `/api/v1/projects/${encodeURIComponent(projectId)}/exports`,
@@ -397,22 +566,63 @@ export const bootstrapApi = async (
     },
 
     async downloadExport(downloadUrl) {
-      const url = ensureSameEditorOrigin(downloadUrl, editorOrigin);
-      const download = await fetcher(url, {
-        method: "GET",
-        credentials: "omit",
-        cache: "no-store",
-        referrerPolicy: "no-referrer",
-        headers: {
-          Accept: "application/zip",
-          Authorization: `Bearer ${token}`,
+      return downloadArtifact(downloadUrl, "exports");
+    },
+
+    async createPublication(input) {
+      const result = await postJson(
+        `/api/v1/projects/${encodeURIComponent(input.projectId)}/publications`,
+        {
+          schemaVersion: SCHEMA_VERSION,
+          revisionId: input.revisionId,
+          publicLabel: input.publicLabel,
+          title: input.title,
+          summary: input.summary,
+          ...(input.publicDecisionNote === undefined
+            ? {}
+            : { publicDecisionNote: input.publicDecisionNote }),
         },
-      });
-      if (!download.ok) {
-        const value = await safeJson(download);
-        throwResponseError(download, value);
-      }
-      return download.blob();
+        isPublicationResponse,
+        "ローカルpublication draft",
+      );
+      return result.publication;
+    },
+
+    async downloadPublication(downloadUrl) {
+      return downloadArtifact(downloadUrl, "publications");
+    },
+
+    async getRetention() {
+      const result = await requestJson(
+        "/api/v1/retention",
+        { method: "GET" },
+        isRetentionResponse,
+        "保持データ一覧",
+      );
+      return result.retention;
+    },
+
+    async cleanupRetention(input) {
+      return postJson(
+        "/api/v1/retention/cleanup",
+        { schemaVersion: SCHEMA_VERSION, ...input },
+        isRetentionCleanupResponse,
+        "保持データ削除",
+      );
+    },
+
+    async getRecoveryPoints() {
+      const result = await requestJson(
+        "/api/v1/recovery",
+        { method: "GET" },
+        isRecoveryResponse,
+        "read-only recovery一覧",
+      );
+      return result.recoveryPoints;
+    },
+
+    async downloadRecoveryExport(exportUrl) {
+      return downloadArtifact(exportUrl, "recovery");
     },
   };
 

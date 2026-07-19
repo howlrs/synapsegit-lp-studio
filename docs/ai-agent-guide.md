@@ -7,8 +7,11 @@
 
 ## 1. 最初に固定する事実
 
-1. 現在のcheckpointはC6完了、M1進捗65%である。
-2. C7以降と80% local verification gateは未完了である。
+1. C0–C10の自動化可能なlocal開発・評価baselineと、C11のclean package/evidence
+   handoffは実装済みである。
+2. Creator UX、manual screen-reader、live provider、license/brand、merge/releaseは
+   distinctなHuman・外部gateとして未完了であり、M1製品完成やproduction-readyを
+   主張しない。
 3. この製品は単一user、単一端末、loopback-onlyのlocal applicationである。
 4. AI出力は常にProposalであり、Accepted revisionではない。
 5. 通常CIはdeterministic fake providerだけを使う。
@@ -66,23 +69,23 @@ statusを変えるときはgeneratorの入力と実装証拠を更新し、再�
 
 | Area | 現在の状態 | 次の未実装範囲 |
 | --- | --- | --- |
-| blank Project | implemented | rename、delete、history等の製品UI |
+| blank Project | opaque IDを維持する表示名rename/autosaveと、exact confirmation付きProject cleanupをimplemented | terminal historyだけの個別削除 |
 | static site import | startup登録rootからのreviewed copy importをimplemented | archive upload等 |
-| retained state | immutable revision、CAS、Accepted pointer、materialized `site/`をimplemented | pending ProposalとDecisionのrestart-safe recovery |
-| Preview | separate scoped origin、CSP、sandbox、revocable URLをimplemented | cross-browser evidenceと追加hardening |
+| retained state | immutable revision/CAS、restart-safe Proposal/Decision reconciliation、migration/read-only recovery、manual retentionをimplemented | manual backup/restoreとcross-version release evidence |
+| Preview | separate scoped origin、CSP、sandbox、revocable URL、Chromium application geometry matrixをimplemented | cross-browser release evidence |
 | TargetV1 | `page`、`block`、`element`、`text`、`point`、`region`をimplemented | reference Target、履歴UI、一般化したresolver corpus |
-| resolution | `resolved`、`ambiguous`、`detached`のfail-closed resolutionをimplemented | C9/C10の精度・browser matrix |
-| AI context | exact review、manifest、digest、redactionをimplemented | conversation履歴、streaming、cancel、screenshot、target最適化snippet |
+| resolution | `resolved`、`ambiguous`、`detached`と72条件の実overlay検証をimplemented | 一般化したresolver/cross-browser corpus |
+| AI context | exact review、manifest、digest、redaction、AI attempt status/cancelをimplemented | conversation履歴、streaming、screenshot、target最適化snippet |
 | provider | `fake`を常時提供。server key設定時だけ`openai`を提供 | live-provider acceptance evidence |
 | ChangeSetV1 | `create_text`、`replace_text`、`rename`、`delete`をimplemented | binary生成はv1 non-goal。将来のbounded asset adapterとprotected-range protocolは未実装 |
-| Proposal validation | cloneへのatomic apply、path/hash/syntax/reference/Target検証をimplemented | C7の完成したdiff/review workflow |
-| Human Decision | contract/serverは`adopted_unchanged`、`rejected`、`deferred`に対応 | 現在のReviewDrawer UIはAdoptだけ。Reject/Defer UIとrestart reconciliationはC7 |
-| active-behavior warning | blocking warningがあるProposalのAdoptをserverでも拒否 | Reject/Deferへ到達するUI |
-| sequential work | 一Project、一Proposalのbaselineだけ | multi-Proposal historyとiterative admission |
-| export | Acceptedだけのdeterministic ZIP baselineをimplemented | C8のpublication record、history/settings、統合handoff |
-| SynapseGit | pinned source contractを使うreal Proposal/Decision baseline | released generic contract、durable end-to-end orchestration |
+| Proposal validation | cloneへのatomic apply、path/hash/syntax/reference/Target検証とdiff/reviewをimplemented | partial/file/hunk adoptionとProposal直接編集 |
+| Human Decision | Adopt/Reject/Defer UI、durable receipt、restart reconciliationをimplemented | 複数ready Proposal比較 |
+| active-behavior warning | blocking warningがあるProposalのAdoptをserverでも拒否 | broader policy/version updates |
+| sequential work | terminal Decision後にlatest Acceptedから新Proposalを生成しlineage/historyを保持 | concurrent ready Proposal |
+| export | Acceptedだけのdeterministic ZIP、receipt、local publication exact-byte reviewをimplemented | remote publish/deploy |
+| SynapseGit | exact-pinned trusted sidecarでdurable Proposal/Decision/recoveryをimplemented | released generic contractとexternal-writer coordination |
 | GitHub publication | development checkpointのGit push/PRは別運用 | 製品からのpublicationは未実装で、常に別のHuman action |
-| M1 release | 未完了、production-readyではない | C7からC11、80% gate、license/brand/release判断 |
+| M1 release | 自動化可能なlocal package/evidenceまで完了、production-readyではない | Creator/manual/external/legal/merge/release gate |
 
 OpenAI live testは外部network、credential、billing、account availabilityを必要とし、
 通常testでは意図的にignoredである。実行していないlive testを証拠にしない。
@@ -270,26 +273,26 @@ user変更をreset、checkout、削除してはいけない。
 
 | 誤り | 正しい判断 |
 | --- | --- |
-| C6完了なのでM1は完成 | 65%であり、C7からC11は未完了 |
-| contractにDispositionが三つあるのでUIも三つある | current ReviewDrawerはAdoptだけ |
+| 自動baseline完了なのでM1製品も完成 | Human・外部・legal・release gateは別であり未完了 |
+| contractにDispositionが三つあるのでUIも三つある | current UI/testでAdopt/Reject/Deferの実動作を確認する |
 | `deferred`は後で同じProposalを再開できる | terminal Decision。再開は新しいProposalが必要 |
-| Proposalはrestart後もDecisionできる | pending authorityのrestart recoveryはC7 |
-| 一度Adoptした後も同Projectで何度でも生成できる | current capabilityは一Project、一Proposal |
+| Proposalはbrowser memoryだけでrestart復旧する | durable bindingとSynapse receiptを再検証して復旧する |
+| 一度Adoptした後は同Projectで生成できない | terminal後は新attempt/Proposalを作れるが、activeは同時に1件だけ |
 | `pnpm dev`で製品全体が起動する | Viteだけ。authority serverは`pnpm dev:server` |
 | OpenAIは常に利用可能 | server processにkeyがある場合だけbootstrapへavailableとして出る |
 | local-firstなのでOpenAIでもdataは外へ出ない | OpenAI選択時はreviewしたcontextを外部送信し、料金が発生し得る |
 | redactionが全secretを取り除く | 既知patternに対するbounded defense。利用者の確認を置き換えない |
 | redaction済みsite contextなら安全に生成できる | ChangeSetV1ではgeneration自体をprovider call前に拒否 |
-| blocking warningならRejectもできない | serverが止めるのはAdopt。Reject/Defer UIはまだない |
+| blocking warningならRejectもできない | serverが止めるのはAdopt。Reject/Deferで安全にterminal化できる |
 | importは元directoryを編集する | managed workspaceへcopyし、元を変更しない |
 | Preview DOMのnode handleは永続identity | render-local hintであり、diskやauthorityへ使わない |
 | SynapseGitがmodel実行を証明する | 現在はcaller-supplied attribution、execution未検証 |
 | host-retained Accepted bytesはSynapseGit checkout | application-owned Accepted viewであり、そのclaimはしない |
-| exportがあるのでC8完了 | baseline ZIPはあるがC8全体はplanned |
+| local publication draftはGitHubへ書き込む | exact-byte local ZIP生成だけでnetwork writeは行わない |
 | exportはdeployまたはGitHub publicationである | Accepted ZIPのlocal生成だけ。remote writeは別のHuman action |
 | Public repositoryなので自由に再配布できる | license/brand/release gateは未完了 |
 | traceability matrixを直接直せばstatus更新になる | generator入力を直し、生成・checkする |
-| shared stream/cancel typeがあるのでruntimeも完成 | typeの存在はcapabilityの証拠ではない |
+| cancelがあるのでconversation streamingも完成 | 明示cancel/statusはAI generation attempt限定で、streaming conversationは未実装 |
 | checkpoint完了なら割当要件がすべて実装済み | requirementごとにsource、test、matrixを確認する |
 
 ## 11. StopしてHumanへ確認する条件
@@ -306,7 +309,7 @@ user変更をreset、checkout、削除してはいけない。
 - 新dependency、network access、shell/package executionを製品へ追加する。
 - secret、token、private path、personal dataをdiff、log、fixtureで発見する。
 - redacted site fileをChangeSetV1で編集する必要がある。
-- pending Proposal recoveryやsequential ProposalをC7設計なしで実装する必要がある。
+- single-active Proposal、durable recovery、terminal lineageを弱める必要がある。
 - unrelatedな既存変更と同じfileを安全に分離できない。
 - implemented、secure、verified、production-readyというclaimをtestで証明できない。
 

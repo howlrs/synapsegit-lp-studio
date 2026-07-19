@@ -3,9 +3,11 @@
 SynapseGit LP Studioは、AIへLP（ランディングページ）の変更を依頼し、
 結果を人が確認してから採用する、ローカルファーストのWebアプリです。
 
-> **現在地:** M1実装の65%（C6完了）です。ローカル評価用であり、
-> production-readyな製品、配布物、またはリリース版ではありません。
-> 現在の実装事実は
+> **現在地:** 65% baseline以降のC7–C10と、C11の自動化可能なlocal
+> packaging/evidenceを統合した開発・評価baselineです。Creator UX、manual
+> screen-reader、live provider、license/brand、merge/releaseの各Human・外部gateは
+> 未完了です。ローカル評価用であり、production-readyな製品、配布物、または
+> リリース版ではありません。現在の実装事実は
 > [実装ステータス](docs/implementation-status.md)を正本として確認してください。
 
 ## まず知ってほしい3つの言葉
@@ -22,8 +24,8 @@ SynapseGit LP Studioは、AIへLP（ランディングページ）の変更を�
 Acceptedを選ぶ
   → AIへ要望を出す
   → Proposalを比較する
-  → 人が採用する
-  → 新しいAcceptedになる
+  → 人が採用・却下・保留を決める
+  → 採用時だけ新しいAcceptedになる
   → AcceptedだけをZIPへexportする
 ~~~
 
@@ -88,32 +90,37 @@ fake providerは動作確認専用です。要望文を解釈せず、対応す�
 | --- | --- |
 | blank project | 作成、保存、再オープンができます。 |
 | 既存LP | 起動時に登録したbuild済みstatic directoryを確認後にcopy importできます。 |
+| project metadata | opaque project IDを維持したまま表示名を自動保存できます。 |
 | Preview | Editorとは別のscoped originで実行します。現在のbrowser evidenceはChromiumのみです。 |
 | Target | page / block / element / text / point / regionの6種類を選べます。 |
 | AI context | Target、Accepted revision、provider、対象fileを含むexact contextを送信前に確認できます。 |
 | provider | deterministic fakeを常に利用できます。serverにkeyを設定した場合だけOpenAIを選べます。 |
+| AI attempt | phaseと経過を表示し、明示的にcancelできます。cancel後のlate responseはProposalになりません。 |
 | ChangeSet | create / replace / rename / deleteを厳格に検証し、isolated Proposalへ適用します。 |
 | review | Accepted / Proposed、変更file、text diff、Validationを確認できます。 |
-| Human Decision | 現在のUIは「変更をそのまま採用」のみ提供します。 |
-| export | Acceptedだけを決定的なZIPとして出力します。promptやStudio metadataは含みません。 |
+| Human Decision | UIからProposal全体を採用、却下、または終端の保留にできます。 |
+| recovery/history | pending ReviewとDecision reconciliationを再起動後に復旧し、terminal historyを表示します。 |
+| export | Acceptedだけを決定的なZIPとして出力し、file manifest・validation・archive identityを表示します。 |
+| publication draft | privacy-filteredなGitHub-ready filesをexact-byte reviewしてローカルZIPへ出力します。network writeは行いません。 |
+| retention/recovery | exact bindingを確認したmanual cleanupと、normal起動不能時のread-only diagnostics/verified Accepted exportを提供します。 |
 
 ## まだできないこと
 
 次の項目は型、要件、またはserver contractに存在しても、現在のUIで完成しているとは
 限りません。
 
-- 同じserver processで1 projectへ複数のProposalを順番に作ること
-- pending ProposalとDecisionをrestart後に完全復旧すること
-- UIからProposalをrejectまたはdeferすること
-- projectのrename、delete、history操作
-- conversationの保存、分岐、streaming、cancel
+- 同じprojectで複数のready Proposalを同時に保持・比較すること
+- terminal historyだけをProjectから独立して削除すること
+- conversationの保存、分岐、streaming（cancelはAI生成attemptだけに対応）
 - 複数Target、screenshot付きcontext、部分採用、Proposalの直接編集
-- archive upload、GitHub publication UI、配布用packaging
+- archive upload、GitHubへのremote publish/deploy
+- 完了済みCreator/keyboard/screen-reader/live-provider evidence
 - Chromium以外を含むrelease support matrix
 
-bootstrap contractの`singleProposalPerProject: true`は現在の制約です。
-Accepted project自体は明示的なstate rootへ保存できますが、反復reviewと
-restart reconciliationはC7の作業です。
+bootstrap contractの`singleProposalPerProject: true`は、1 projectで同時に扱う
+active Proposalを1件に制限する現在のcontractです。terminal Decision後は同じ
+server processで次のProposalを作れます。deferから続ける場合も旧Proposalを再利用せず、
+最新Acceptedをbaseに新しいProposalとして関連を記録します。
 
 要件文書に書かれた機能を「実装済み」と推測しないでください。
 [要件traceability](docs/requirements-traceability.md)と
@@ -182,7 +189,7 @@ package install、database、またはruntime serverを必要とするsiteは対
 
 詳しい境界は
 [ADR一覧](docs/adr/README.md)と
-[C6 evidence](docs/implementation-status.md#c6-evidence-and-limits)にあります。
+[checkpoint evidence](docs/implementation-status.md#checkpoints)にあります。
 
 ## 開発用command
 
@@ -194,8 +201,27 @@ package install、database、またはruntime serverを必要とするsiteは対
 | `pnpm test:e2e` | production buildをChromiumでE2E検証 |
 | `pnpm format:check` | Prettierとrustfmtを検査 |
 | `pnpm check:docs` | Markdown、link、要件ID、traceabilityを検査 |
+| `pnpm check:evidence` | C0–C11 evidence template、P0 traceability、manual gate、result schemaを検査 |
+| `pnpm measure:performance-geometry` | 500 files / 50 MiB / 10,000 DOM nodesのsynthetic fixtureと72-case geometry matrixを測定 |
+| `pnpm measure:production-integration-performance` | packaged production App、実Preview bridge/overlay、表示名autosave、ChangeSetを実測 |
+| `pnpm verify:package` | source snapshotからlocal evaluation packageをbuildし、launcher/restart、browser smoke、synthetic/production performance、safe logs、checksumsを検証 |
 
 通常の変更後は少なくとも`pnpm check`と関連testを実行してください。
+
+`verify:package`はdefaultでdirty worktreeを拒否します。未commitの開発候補を明示的に
+測定するときだけ`--allow-dirty`を付けます。packageとSHA-256 evidenceを保持する場合、
+repository外に存在しないoutput directoryを指定してください。
+
+~~~bash
+mkdir -p /tmp/lp-studio-evidence
+pnpm verify:package -- \
+  --allow-dirty \
+  --output-dir /tmp/lp-studio-evidence/candidate
+~~~
+
+保持された`LICENSE`は一般的なlicense grantではなく、repositoryにlicense termsが
+記録されていない事実を明示するnoticeです。`THIRD-PARTY-NOTICES.md`もdependency
+metadataのinventoryであり、upstream license textの代替ではありません。
 
 ## Repository map
 

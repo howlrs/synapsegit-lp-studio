@@ -1,11 +1,13 @@
 # SynapseGit LP Studio はじめての利用ガイド
 
 この文書は、LP制作や開発ツールに詳しくない人が、現在の開発版をローカルで
-試すためのガイドです。記載内容はC6完了時点の実装に合わせています。
+試すためのガイドです。記載内容は65% baseline以降を統合したlocal開発・評価版に
+合わせています。
 
-> **重要:** 現在の完成度は65%で、production-readyではありません。
-> 実在する顧客情報、公開前の機密情報、production用credentialを使わず、
-> 評価用のデータで試してください。
+> **重要:** CreatorによるUX確認、manual screen-reader、live provider証跡、
+> license/brand/merge/release判断は未完了で、production-readyではありません。
+> 実在する顧客情報、公開前の
+> 機密情報、production用credentialを使わず、評価用のデータで試してください。
 
 ## 1. このアプリでできること
 
@@ -19,8 +21,9 @@ SynapseGit LP Studioは、自分のPC上で静的なランディングページ�
 3. AIへ伝える要望と、実際に送るコンテキストを確認する。
 4. AIが返した変更を`Proposal`として別の作業領域に作る。
 5. AcceptedとProposedの表示、変更ファイル、diff、検査結果を確認する。
-6. 問題がなければ、Proposal全体を採用する。
-7. Acceptedになった静的ファイルだけをZIPで出力する。
+6. Proposal全体を採用、却下、または終端の保留にする。
+7. Acceptedだけをstatic ZIPへ出力するか、privacy-filteredなpublication draftを
+   exact-byte reviewしてローカルZIPへ出力する。
 
 AIの出力が自動で公開中のLPを書き換えることはありません。現在の画面で
 `変更を採用`を押したときだけ、Proposalが新しいAccepted revisionになります。
@@ -44,8 +47,9 @@ OpenAIを選んだ場合までofflineという意味ではありません。
 
 ## 3. 現在の対応環境と必要なもの
 
-現在の検証済みbaselineはLinux x86-64 GNUまたはWSLとChromium系ブラウザです。
-SafariやFirefoxを含む他の環境は、対応済みとはみなしません。
+現在の開発・評価版はLinux x86-64 GNUまたはWSLと、固定したChromium系ブラウザを
+local evidence対象にしています。これはrelease supportやcross-browser supportの
+宣言ではありません。SafariやFirefoxを含む他の環境は未検証です。
 
 必要なruntimeは次の固定versionです。
 
@@ -81,7 +85,7 @@ LP_STUDIO_STATE_ROOT=.studio-data pnpm dev:server
 起動が完了すると、terminalに次の形式の1行が表示されます。
 
 ```text
-LP_STUDIO_READY {"editorOrigin":"http://127.0.0.1:...","previewOrigin":"http://127.0.0.1:..."}
+LP_STUDIO_READY {"editorOrigin":"http://127.0.0.1:...","previewOrigin":"http://127.0.0.1:...","operatingMode":"normal"}
 ```
 
 Chromium系ブラウザで`editorOrigin`のURLを開いてください。`previewOrigin`は
@@ -101,6 +105,10 @@ terminalは利用中ずっと開いたままにします。停止するときは
 1. 起動画面で`空のLPを作成`を押す。
 2. `LPプレビュー`の読み込みが終わるまで待つ。
 3. 必要なら上部の`デスクトップ`、`タブレット`、`モバイル`で幅を変える。
+4. Headerの`Project`欄は表示名です。変更すると自動保存され、opaque project IDや
+   filesystem rootは変わりません。`保存済み`を確認してから画面を移動します。
+5. Preview toolbarの`75%`/`100%`は表示倍率です。Targetのauthorityやsource bytesを
+   変更しません。
 
 ### 5.2 Targetを選ぶ
 
@@ -126,6 +134,10 @@ Targetは`ページ`、`ブロック`、`要素`、`テキスト`、`座標`、`
    確認する。
 6. 問題がなければ`変更案を作成`を押す。
 
+処理中はphaseと経過秒が表示されます。中止する場合は`AI処理を取り消す`を一度だけ
+押してください。cancel済みattemptのlate provider responseはProposalへ昇格しません。
+再実行は同じattemptの上書きではなく、新しい送信確認から新attemptとして行います。
+
 fake providerは一般的な生成AIではありません。入力した要望とTargetのbindingを
 検証しますが、空templateにある次の3要素へ固定の変更を返すデモ用providerです。
 
@@ -138,15 +150,16 @@ fake providerは一般的な生成AIではありません。入力した要望�
 固定のデモ変更以外を評価する場合はOpenAI adapterを選びます。OpenAI adapterでも、
 希望した品質や内容の出力が得られることを保証するものではありません。
 
-### 5.4 Proposalを確認して採用する
+### 5.4 Proposalを確認してDecisionする
 
 1. `変更案を確認`で、変更ファイルと`Text diff`を読む。
 2. `Acceptedを表示`と`Proposedを表示`を切り替えて見た目を比べる。
 3. `Validation`にblocking warningがないことを確認する。
-4. 必要なら`非公開メモ（任意）`へ採用理由を書く。
-5. 内容に同意するときだけ`変更を採用`を押す。
-6. 上部の`Accepted revision`が変わり、採用した表示がAcceptedになったことを
-   確認する。
+4. 必要なら`非公開メモ（任意）`へ判断理由を書く。
+5. 内容に同意するときだけ`変更を採用`を押す。採用しない場合は
+   `変更案を却下`または`今回は保留`を選ぶ。
+6. Adoptでは上部の`Accepted revision`が変わること、Reject/Deferでは変わらない
+   ことを確認する。
 
 現在はProposalの一部だけを採用したり、Proposalを画面内で直接編集したりは
 できません。`変更を採用`は変更ファイル全体をそのまま採用します。
@@ -156,24 +169,16 @@ accessibilityを保証するものではありません。最終判断は利用�
 
 ### 5.5 さらに変更したい場合
 
-C6には、**同じ起動process内で1つのProjectにつきProposalは1件だけ**という
-制限があります。採用済みのProjectへ次のProposalを作る場合は、次の手順を
-使います。
+1つのProjectで同時に扱うactive Proposalは1件です。Adopt、Reject、Deferのいずれかで
+terminalにした後は、serverを再起動せずに新しいTargetと要望から次のProposalを
+作れます。Review historyには各terminal Decisionが残ります。
 
-1. Decisionが完了し、Accepted revisionが変わったことを確認する。
-2. terminalで`Ctrl+C`を押してserverを止める。
-3. 同じstate rootで再起動する。
+Deferは同じProposalを再びDecision可能にする一時停止ではありません。続きを作るときも
+最新Acceptedをbaseにした新しいProposalとなり、旧Proposalとの関連が記録されます。
 
-   ```bash
-   LP_STUDIO_STATE_ROOT=.studio-data pnpm dev:server
-   ```
-
-4. 新しく表示された`editorOrigin`を開く。
-5. Project一覧から対象Projectの`開く`を押す。
-6. 新しいTargetを選び、次のProposalを作る。
-
-Decision前のpending Proposalは再起動後に安全に再開できません。pending状態の
-recoveryと、1process内での複数ProposalはC7以降の作業です。
+Decision前にserverを止めても、同じstate rootで再起動すると保存済みReviewを再開します。
+Decision結果が確定した可能性とlocal receipt/pointerが一致しない場合は、画面の
+`Decision結果を再照合`を使います。blind retryで二度目のDecisionを送る操作ではありません。
 
 ## 6. 既存の静的LPを取り込む
 
@@ -285,10 +290,10 @@ SynapseGitとの契約では、Human Decisionを次の3種類に限定してい�
 | Reject | Proposalを却下して終端にする | 変わらない |
 | Defer | Proposalを保留として終端にする。後で同じProposalを再利用する意味ではない | 変わらない |
 
-現在のC6 server contractは3種類を受け付けますが、**現在のReview画面にあるDecision
-buttonは`変更を採用`だけ**です。RejectとDeferのUI、およびrestart-safeなDecision
-recoveryはC7で実装予定です。利用者向け画面にない操作を、browser consoleやAPIの
-直接呼び出しで代用しないでください。
+Review画面は3種類を明示的に分けます。どれもProposal全体に対するHuman-onlyの
+terminal Decisionで、同じProposalへ二度目のDecisionはできません。Deferからの
+継続も最新baseの新Proposalです。Decision結果が不確かなときは画面のreconciliationを
+使い、browser consoleやAPIの直接呼び出しで再送しないでください。
 
 ## 9. AcceptedをZIPで出力する
 
@@ -304,6 +309,44 @@ SynapseGit内部dataは含めません。
 出力物は通常の静的hostingへ置ける構成です。`file://`でHTMLを直接開く互換性は
 保証していないため、確認時は通常の静的HTTP serverを使ってください。LP Studioが
 hostingやGitHubへの公開を自動で行うことはありません。
+
+### 9.1 GitHub-ready publication draftをローカル生成する
+
+1. `GitHub-ready filesを生成`を押す。
+2. public title、summary、decision noteを入力する。これらはsource factではなく
+   `author_supplied`として記録される。
+3. file tree、各fileのexact bytes、redaction、checksum、limitationsを読む。
+4. 問題がなければ確認済みpublication ZIPをローカルへdownloadする。
+
+この操作はGit commit、push、Issue、PR、release、その他のnetwork writeを行いません。
+画面にも`GitHubへ公開: 別Human操作`と表示されます。publication draftは公開・署名・
+authorship・rights・production readinessの証明ではありません。
+
+### 9.2 保持データを確認・削除する
+
+HomeとEditorの「保持データと手動削除」には、ProjectごとのAccepted payload、
+memory-only context、Failed Proposal、static export、publication draftが表示されます。
+自動GCとtelemetryはありません。
+
+削除する場合は、画面に表示されたProject / Proposal / Artifact IDを確認欄へ正確に
+入力します。Project全体の削除は、表示中のAccepted revisionとmanifestもserver側で
+再照合します。表示bytesは対象payloadの大きさであり、共有CASが別Projectやretained
+revisionから参照されている場合の実空き容量増加を保証しません。削除済みのローカル
+projectionを、外部の記録まで削除したものとは扱わないでください。Failed Proposalや
+個別artifactの削除はAcceptedとSynapse記録を保持しますが、Project全体の削除はその
+Project内のlocal Synapse repository/journalとowned recovery backupも対象にします。
+別途export済みのarchiveは削除しません。画面のcleanup impactを必ず確認してください。
+
+### 9.3 Read-only recoveryを使う
+
+保存領域の通常検証に失敗しても、last Acceptedまたはversioned backupを検証できる
+場合、起動行の`operatingMode`が`read_only_recovery`になり、専用画面を開きます。
+この画面は自動修復を行いません。Proposal、Decision、Accepted更新、publication、
+cleanupは停止し、`VERIFIED`のrecovery pointだけをZIPへexportできます。
+
+`UNVERIFIED`の項目は、未知・破損・中断したentryを削除せずに隔離した診断です。
+その項目はexportできません。元のstate rootを直接編集せず、まず検証済みZIPとstate
+root全体の別媒体backupを確保してください。
 
 ## 10. 困ったとき
 
@@ -367,8 +410,8 @@ C6のChangeSetはfile全体を置き換える方式です。site fileの一部�
 
 新しい外部origin、form action、script、iframe、download、inline event handler、
 analytics、cookieなどのactive behaviorを検出すると、Adoptを止めます。現在のUIには
-Reject/Defer buttonがないため、Acceptedをそのままexportするか、別Projectで安全な
-要望を試してください。Accepted fileは変更されていません。
+Reject/Deferがあるため、安全でないProposalをterminalにできます。Accepted fileは
+変更されません。
 
 ### Projectのfileを直接変更した後、操作が止まる
 
@@ -376,11 +419,12 @@ Accepted manifestとのずれを検出すると、Proposal、Decision、export�
 停止します。`.studio-data`内のfileを直接編集しないでください。元の静的siteを修正し、
 新しいProjectとして取り込むのが安全です。
 
-### serverを再起動したらpending Proposalを再開できない
+### serverを再起動したら`Decision結果を再照合`と表示される
 
-これは現在の既知の制限です。C6はpending Proposalのrestart-safe recoveryを提供
-しません。ProposalをDecision前の一時候補として扱い、必要ならAcceptedをexportして
-から新しいProjectでやり直してください。
+SynapseGit側のterminal Decisionと、local receiptまたはAccepted pointerの更新の間で
+serverが停止した可能性があります。表示されたReview IDとProposal IDを確認し、
+`Decision結果を再照合`を押してください。AcceptedやProposal directoryを直接編集したり、
+同じDecisionをAPIへ再送したりしないでください。
 
 ## 11. Privacyと安全性
 
@@ -390,11 +434,14 @@ Accepted manifestとのずれを検出すると、Proposal、Decision、export�
 - fake providerは外部AIへcontextを送信しません。
 - OpenAI adapterは確認Dialogに表示した選択contextを外部へ送信します。
 - API keyはserver側だけで使います。Projectやexportへ保存しません。
+- Reviewのprivate rationaleはDecision request内でだけ扱い、raw textやdigestを
+  Project、Synapse record、log、export、publicationへ永続化しません。
 - 静的exportにprompt、credential、Target、Studio/SynapseGit内部dataを混ぜません。
 - AIの生成結果と自動検査を、人によるsecurity、legal、accessibility、内容確認の
   代わりにしません。
 
-Loopback、sandbox、redactionはリスクを減らしますが、現在はhardening完了前です。
+Loopback、sandbox、redactionはリスクを減らしますが、local evaluationの境界を
+production security保証へ拡張するものではありません。
 信頼できないLPをproduction dataと同じ環境で開かないでください。
 
 ## 12. 現在の主な制限
@@ -405,13 +452,19 @@ Loopback、sandbox、redactionはリスクを減らしますが、現在はharde
   まだありません。
 - 対応実績はChromium系browserとLinux x86-64 GNU/WSL評価環境に限られます。
 - Active PreviewはChromiumのNavigation APIへ依存します。
-- 同じ起動process内で1つのProjectに作れるProposalは1件です。
-- pending ProposalとDecisionのrestart-safe recoveryはありません。
-- Review画面にはAdoptだけがあり、Reject/Defer UIはまだありません。
+- 1つのProjectで同時に扱えるactive Proposalは1件で、複数ready Proposalの並列比較は
+  ありません。
 - redactionを含むsite fileからのChangeSet生成はできません。
 - 部分採用、Proposalの直接編集、一般的なvisual editor、共同編集はありません。
 - OpenAIのlive network/billing testは通常CIで実行していません。
-- 自動deployやGitHub publicationは行いません。
+- publication draftはローカル生成だけで、自動deployやGitHub remote writeは行いません。
+- migration、read-only recovery、manual retentionとDecision durable boundaryの
+  returned-fault/実process-kill matrixは自動検証済みです。
+- 500 files / 50 MiB / 10,000 DOM nodesのsynthetic検査に加え、packaged production
+  Appの実Preview bridge/overlay 72条件、表示名autosave、10 files / 2 MiB ChangeSetを
+  測定します。性能値は記録した評価環境にのみ適用し、一般的なproduction性能保証では
+  ありません。
+- 自動browser smokeは完全なaccessibility、WCAG、Creator UX、screen reader確認を証明しません。
 
 開発状況と根拠は[Implementation status](implementation-status.md)、製品全体の方向は
 [Current specification](current-specification.md)、AI/ChangeSet境界の判断は

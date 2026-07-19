@@ -1,6 +1,6 @@
 # ADR-0005: Crash-safe Decision and Accepted-pointer journal
 
-Status: accepted for M1 implementation
+Status: accepted and implemented for the automated local baseline
 
 Date: 2026-07-19
 
@@ -39,8 +39,9 @@ Decision Ref conflict, or second disposition fails closed.
 - Browser requests contain only opaque IDs, disposition, expected revision,
   bounded rationale, and idempotency key.
 - SynapseGit commit `7ddb58b` supplies a checked re-registration primitive and
-  separate local review journal, but does not compose this LP saga. C7 must
-  bind them to LP Accepted state and reconcile live Core state after restart.
+  separate local review journal, but does not compose this LP saga. The C7
+  local sidecar binds them to LP Accepted state and reconciles live Core state
+  after restart without presenting the Studio journal as Synapse authority.
 - A `review_id` or journal row is never Human authority. The LP server must
   reauthenticate the user and issue a project/review/intent-bound one-shot
   approval before invoking a Decision.

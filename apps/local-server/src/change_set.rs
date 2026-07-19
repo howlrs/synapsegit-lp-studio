@@ -165,6 +165,7 @@ pub(super) struct AppliedFileChange {
 #[serde(rename_all = "snake_case")]
 pub(super) enum StaticCheckStatus {
     Passed,
+    AdvisoryWarning,
     BlockingWarning,
 }
 
@@ -265,15 +266,39 @@ pub(super) fn parse_and_apply_change_set(
 
     let (files, changes) = apply_to_clone(&change_set.operations, accepted)?;
     validate_final_case_collisions(&files)?;
-    validate_static_syntax(&files)?;
+    let html_recovery_warning_count = validate_static_syntax(&files)?;
     if !files.contains_key("index.html") {
         return Err(ChangeSetError::MissingEntryPoint);
     }
-    validate_local_references(&files)?;
+    let incomplete_reference_sources = validate_local_references(&files)?;
     validate_export_deny_list(&files)?;
 
-    let blocking_warnings = active_behavior_warnings(accepted, &files);
-    let checks = ordered_checks(&blocking_warnings);
+    let removes_existing_path = accepted.keys().any(|path| !files.contains_key(path));
+    let introduced_incomplete_reference_sources = incomplete_reference_sources
+        .into_iter()
+        .filter(|path| removes_existing_path || accepted.get(path) != files.get(path))
+        .collect::<BTreeSet<_>>();
+    let blocking_warnings = active_behavior_warnings(accepted, &files)
+        .into_iter()
+        .chain(
+            introduced_incomplete_reference_sources
+                .iter()
+                .map(|path| BlockingWarning {
+                    code: "static_reference_analysis_incomplete".to_owned(),
+                    path: path.clone(),
+                    destination: "bounded-static-reference-analysis".to_owned(),
+                    message: "The proposal introduces reference syntax that the bounded static analyzer cannot exhaustively classify.".to_owned(),
+                }),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let checks = ordered_checks(
+        &files,
+        html_recovery_warning_count,
+        &blocking_warnings,
+        &introduced_incomplete_reference_sources,
+    );
     let unified_diff = build_unified_diff(accepted, &files, &changes);
 
     Ok(AppliedChangeSet {
@@ -569,123 +594,21 @@ fn validate_final_case_collisions(files: &BTreeMap<String, Vec<u8>>) -> Result<(
     }
 }
 
-fn validate_static_syntax(files: &BTreeMap<String, Vec<u8>>) -> Result<(), ChangeSetError> {
-    for (path, bytes) in files {
-        let Some(media_type) = text_media_type_for_path(path) else {
-            continue;
-        };
-        let text = std::str::from_utf8(bytes).map_err(|_| ChangeSetError::InvalidSyntax)?;
-        if text.contains('\0') {
-            return Err(ChangeSetError::InvalidSyntax);
-        }
-        match media_type {
-            "application/json" | "application/manifest+json" => {
-                serde_json::from_str::<serde_json::Value>(text)
-                    .map_err(|_| ChangeSetError::InvalidSyntax)?;
-            }
-            "text/css" if !balanced_css(text) => return Err(ChangeSetError::InvalidSyntax),
-            "text/html" | "image/svg+xml" | "application/xml"
-                if !balanced_markup_boundaries(text) =>
-            {
-                return Err(ChangeSetError::InvalidSyntax);
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+fn validate_static_syntax(files: &BTreeMap<String, Vec<u8>>) -> Result<usize, ChangeSetError> {
+    super::static_syntax::validate_resulting_site(files).map_err(|_| ChangeSetError::InvalidSyntax)
 }
 
-fn balanced_markup_boundaries(text: &str) -> bool {
-    let mut in_comment = false;
-    let mut cursor = 0;
-    while cursor < text.len() {
-        let rest = &text[cursor..];
-        if in_comment {
-            let Some(end) = rest.find("-->") else {
-                return false;
-            };
-            cursor += end + 3;
-            in_comment = false;
-        } else if rest.starts_with("<!--") {
-            cursor += 4;
-            in_comment = true;
-        } else if rest.starts_with('<') {
-            let Some(end) = rest.find('>') else {
-                return false;
-            };
-            cursor += end + 1;
-        } else {
-            let step = rest.chars().next().map(char::len_utf8).unwrap_or(1);
-            cursor += step;
-        }
-    }
-    !in_comment
-}
-
-fn balanced_css(text: &str) -> bool {
-    let mut braces = 0_u32;
-    let mut quote = None;
-    let mut escaped = false;
-    let mut comment = false;
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if comment {
-            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                comment = false;
-                index += 2;
-                continue;
-            }
-        } else if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            comment = true;
-            index += 2;
-            continue;
-        } else if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-        } else if byte == b'{' {
-            braces = braces.saturating_add(1);
-        } else if byte == b'}' {
-            let Some(next) = braces.checked_sub(1) else {
-                return false;
-            };
-            braces = next;
-        }
-        index += 1;
-    }
-    braces == 0 && quote.is_none() && !comment
-}
-
-fn validate_local_references(files: &BTreeMap<String, Vec<u8>>) -> Result<(), ChangeSetError> {
+fn validate_local_references(
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<BTreeSet<String>, ChangeSetError> {
+    let mut incomplete_sources = BTreeSet::new();
     for (source_path, bytes) in files {
-        let Ok(text) = std::str::from_utf8(bytes) else {
-            continue;
-        };
-        let mut references = Vec::new();
-        match text_media_type_for_path(source_path) {
-            Some("text/html" | "image/svg+xml" | "application/xml") => {
-                for tag in scan_markup_tags(text) {
-                    for (name, value) in tag.attributes {
-                        if matches!(name.as_str(), "src" | "href" | "poster") {
-                            references.push(value);
-                        } else if name == "srcset" {
-                            references.extend(srcset_references(&value));
-                        }
-                    }
-                }
-            }
-            Some("text/css") => references.extend(css_references(text)),
-            _ => {}
+        let scan = super::static_export::scan_references(source_path, bytes)
+            .map_err(|_| ChangeSetError::InvalidLocalReference)?;
+        if scan.analysis_incomplete {
+            incomplete_sources.insert(source_path.clone());
         }
-        for reference in references {
+        for reference in scan.references {
             let Some(resolved) = resolve_local_reference(source_path, &reference)? else {
                 continue;
             };
@@ -696,7 +619,7 @@ fn validate_local_references(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Ch
             }
         }
     }
-    Ok(())
+    Ok(incomplete_sources)
 }
 
 fn validate_export_deny_list(files: &BTreeMap<String, Vec<u8>>) -> Result<(), ChangeSetError> {
@@ -708,7 +631,12 @@ fn validate_export_deny_list(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Ch
     Ok(())
 }
 
-fn ordered_checks(warnings: &[BlockingWarning]) -> Vec<StaticCheck> {
+fn ordered_checks(
+    files: &BTreeMap<String, Vec<u8>>,
+    html_recovery_warning_count: usize,
+    warnings: &[BlockingWarning],
+    introduced_incomplete_reference_sources: &BTreeSet<String>,
+) -> Vec<StaticCheck> {
     let passed = |id: &str, message: &str| StaticCheck {
         id: id.to_owned(),
         status: StaticCheckStatus::Passed,
@@ -735,20 +663,46 @@ fn ordered_checks(warnings: &[BlockingWarning]) -> Vec<StaticCheck> {
             "isolated-apply",
             "All operations were applied to an isolated in-memory clone.",
         ),
-        passed(
-            "static-syntax",
-            "Generated text passed the bounded static syntax checks.",
-        ),
+        StaticCheck {
+            id: "static-syntax".to_owned(),
+            status: if html_recovery_warning_count == 0 {
+                StaticCheckStatus::Passed
+            } else {
+                StaticCheckStatus::AdvisoryWarning
+            },
+            message: if html_recovery_warning_count == 0 {
+                "The resulting site passed strict JSON, CSS, JavaScript, XML, and SVG parser checks; HTML5 parsing required no recovery."
+                    .to_owned()
+            } else {
+                format!(
+                    "HTML5 parsing reported a bounded {html_recovery_warning_count} recoverable parse error(s); strict JSON, CSS, JavaScript, XML, and SVG parser checks still passed."
+                )
+            },
+        },
         passed("entry-point", "The resulting site retains index.html."),
-        passed(
-            "local-references",
-            "Bounded static local references resolve inside the site.",
-        ),
+        StaticCheck {
+            id: "local-references".to_owned(),
+            status: if introduced_incomplete_reference_sources.is_empty() {
+                StaticCheckStatus::Passed
+            } else {
+                StaticCheckStatus::BlockingWarning
+            },
+            message: if introduced_incomplete_reference_sources.is_empty() {
+                "Bounded static local references introduced or changed by this proposal resolve inside the site."
+                    .to_owned()
+            } else {
+                format!(
+                    "{} changed file(s) contain reference syntax that the bounded analyzer cannot exhaustively classify.",
+                    introduced_incomplete_reference_sources.len()
+                )
+            },
+        },
         passed(
             "export-deny-list",
             "The resulting manifest contains no reserved Studio path.",
         ),
     ];
+    checks.push(accessibility_smoke_check(files));
     checks.push(StaticCheck {
         id: "active-behavior".to_owned(),
         status: if warnings.is_empty() {
@@ -760,12 +714,123 @@ fn ordered_checks(warnings: &[BlockingWarning]) -> Vec<StaticCheck> {
             "No new active or externally connected behavior was detected.".to_owned()
         } else {
             format!(
-                "{} new active behavior item(s) require explicit Human review.",
+                "{} blocking review item(s) require explicit Human review.",
                 warnings.len()
             )
         },
     });
     checks
+}
+
+#[derive(Default)]
+struct AccessibilitySmokeSummary {
+    html_documents: usize,
+    documents_without_language: usize,
+    duplicate_ids: usize,
+    images_without_alt: usize,
+    form_controls_without_name: usize,
+}
+
+fn accessibility_smoke_check(files: &BTreeMap<String, Vec<u8>>) -> StaticCheck {
+    let mut summary = AccessibilitySmokeSummary::default();
+    for (path, bytes) in files {
+        if text_media_type_for_path(path) != Some("text/html") {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        summary.html_documents += 1;
+        let tags = scan_markup_tags(text, true);
+        let mut ids = BTreeMap::<String, usize>::new();
+        let mut labelled_ids = BTreeSet::<String>::new();
+        for tag in &tags {
+            if tag.closing {
+                continue;
+            }
+            let attributes = tag.attributes.iter().cloned().collect::<BTreeMap<_, _>>();
+            if let Some(id) = attributes.get("id").filter(|id| !id.trim().is_empty()) {
+                *ids.entry(id.clone()).or_default() += 1;
+            }
+            if tag.name == "label"
+                && let Some(labelled) = attributes
+                    .get("for")
+                    .filter(|labelled| !labelled.trim().is_empty())
+            {
+                labelled_ids.insert(labelled.clone());
+            }
+        }
+        summary.duplicate_ids += ids
+            .values()
+            .map(|count| count.saturating_sub(1))
+            .sum::<usize>();
+        let document_has_language = tags.iter().any(|tag| {
+            !tag.closing
+                && tag.name == "html"
+                && tag
+                    .attributes
+                    .iter()
+                    .any(|(name, value)| name == "lang" && !value.trim().is_empty())
+        });
+        if !document_has_language {
+            summary.documents_without_language += 1;
+        }
+        for tag in tags {
+            if tag.closing {
+                continue;
+            }
+            let attributes = tag.attributes.into_iter().collect::<BTreeMap<_, _>>();
+            if tag.name == "img" && !attributes.contains_key("alt") {
+                summary.images_without_alt += 1;
+            }
+            if matches!(tag.name.as_str(), "input" | "select" | "textarea") {
+                let hidden_input = tag.name == "input"
+                    && attributes
+                        .get("type")
+                        .is_some_and(|value| value.eq_ignore_ascii_case("hidden"));
+                let named_directly =
+                    ["aria-label", "aria-labelledby", "title"]
+                        .iter()
+                        .any(|name| {
+                            attributes
+                                .get(*name)
+                                .is_some_and(|value| !value.trim().is_empty())
+                        });
+                let named_by_label = attributes
+                    .get("id")
+                    .is_some_and(|id| labelled_ids.contains(id));
+                if !hidden_input && !named_directly && !named_by_label {
+                    summary.form_controls_without_name += 1;
+                }
+            }
+        }
+    }
+    let issue_count = summary.documents_without_language
+        + summary.duplicate_ids
+        + summary.images_without_alt
+        + summary.form_controls_without_name;
+    StaticCheck {
+        id: "accessibility-smoke".to_owned(),
+        status: if issue_count == 0 {
+            StaticCheckStatus::Passed
+        } else {
+            StaticCheckStatus::AdvisoryWarning
+        },
+        message: if issue_count == 0 {
+            format!(
+                "Bounded accessibility smoke found no missing language, duplicate id, image alt, or form-name issue across {} HTML document(s); this is not WCAG conformance.",
+                summary.html_documents
+            )
+        } else {
+            format!(
+                "Bounded accessibility smoke found {issue_count} issue(s): {} document language, {} duplicate id, {} image alt, {} form-name; this is not WCAG conformance.",
+                summary.documents_without_language,
+                summary.duplicate_ids,
+                summary.images_without_alt,
+                summary.form_controls_without_name
+            )
+        },
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -777,15 +842,6 @@ struct BehaviorFeature {
 }
 
 impl BehaviorFeature {
-    fn stable(code: &str, path: &str, destination: impl Into<String>) -> Self {
-        Self {
-            code: code.to_owned(),
-            path: path.to_owned(),
-            destination: destination.into(),
-            fingerprint: String::new(),
-        }
-    }
-
     fn witnessed(
         code: &str,
         path: &str,
@@ -826,7 +882,7 @@ fn behavior_message(code: &str) -> &'static str {
         "new_form_action" => "The proposal introduces a form submission destination.",
         "new_script" => "The proposal introduces executable script content.",
         "changed_script_content" => {
-            "The proposal changes executable content loaded by an existing script."
+            "The proposal creates or changes JavaScript content that may become executable."
         }
         "new_inline_event_handler" => {
             "The proposal introduces inline event-handler script behavior."
@@ -845,8 +901,40 @@ fn behavior_features(files: &BTreeMap<String, Vec<u8>>) -> BTreeSet<BehaviorFeat
         let Ok(text) = std::str::from_utf8(bytes) else {
             continue;
         };
+        let media_type = text_media_type_for_path(path);
+        if media_type == Some("application/javascript") {
+            features.insert(BehaviorFeature::witnessed(
+                "changed_script_content",
+                path,
+                path.clone(),
+                sha256(bytes),
+            ));
+        }
+        let mut raw_origin_occurrences = BTreeMap::<String, usize>::new();
         for origin in external_origins(text) {
-            features.insert(BehaviorFeature::stable("new_external_origin", path, origin));
+            let occurrence = next_occurrence(&mut raw_origin_occurrences, &origin);
+            features.insert(BehaviorFeature::witnessed(
+                "new_external_origin",
+                path,
+                origin,
+                format!("raw:{occurrence}"),
+            ));
+        }
+        let mut static_origin_occurrences = BTreeMap::<String, usize>::new();
+        if let Ok(scan) = super::static_export::scan_references(path, bytes) {
+            for origin in scan
+                .references
+                .iter()
+                .filter_map(|reference| external_reference_origin(reference))
+            {
+                let occurrence = next_occurrence(&mut static_origin_occurrences, &origin);
+                features.insert(BehaviorFeature::witnessed(
+                    "new_external_origin",
+                    path,
+                    origin,
+                    format!("static:{occurrence}"),
+                ));
+            }
         }
         let lower = text.to_ascii_lowercase();
         for marker in [
@@ -860,24 +948,37 @@ fn behavior_features(files: &BTreeMap<String, Vec<u8>>) -> BTreeSet<BehaviorFeat
             "matomo",
             "fbq(",
         ] {
-            if lower.contains(marker) {
-                features.insert(BehaviorFeature::stable("new_analytics", path, marker));
+            for occurrence in 1..=lower.matches(marker).count() {
+                features.insert(BehaviorFeature::witnessed(
+                    "new_analytics",
+                    path,
+                    marker,
+                    occurrence.to_string(),
+                ));
             }
         }
         for marker in ["document.cookie", "cookie="] {
-            if lower.contains(marker) {
-                features.insert(BehaviorFeature::stable("new_cookie_behavior", path, marker));
+            for occurrence in 1..=lower.matches(marker).count() {
+                features.insert(BehaviorFeature::witnessed(
+                    "new_cookie_behavior",
+                    path,
+                    marker,
+                    occurrence.to_string(),
+                ));
             }
         }
         if !matches!(
-            text_media_type_for_path(path),
+            media_type,
             Some("text/html" | "image/svg+xml" | "application/xml")
         ) {
             continue;
         }
         let mut script_occurrences = BTreeMap::<String, usize>::new();
         let mut event_occurrences = BTreeMap::<String, usize>::new();
-        for tag in scan_markup_tags(text) {
+        let mut form_occurrences = BTreeMap::<String, usize>::new();
+        let mut iframe_occurrences = BTreeMap::<String, usize>::new();
+        let mut download_occurrences = BTreeMap::<String, usize>::new();
+        for tag in scan_markup_tags(text, media_type == Some("text/html")) {
             if tag.closing {
                 continue;
             }
@@ -894,13 +995,16 @@ fn behavior_features(files: &BTreeMap<String, Vec<u8>>) -> BTreeSet<BehaviorFeat
                 }
             }
             let attributes = tag.attributes.iter().cloned().collect::<BTreeMap<_, _>>();
+            let attributes_sha256 = canonical_attributes_sha256(&tag.attributes);
             match tag.name.as_str() {
                 "form" => {
                     if let Some(action) = attributes.get("action") {
-                        features.insert(BehaviorFeature::stable(
+                        let occurrence = next_occurrence(&mut form_occurrences, action);
+                        features.insert(BehaviorFeature::witnessed(
                             "new_form_action",
                             path,
                             action.clone(),
+                            format!("{occurrence}:{attributes_sha256}"),
                         ));
                     }
                 }
@@ -912,11 +1016,11 @@ fn behavior_features(files: &BTreeMap<String, Vec<u8>>) -> BTreeSet<BehaviorFeat
                     let occurrence = next_occurrence(&mut script_occurrences, &destination);
                     let fingerprint = if destination == "inline-script" {
                         format!(
-                            "{occurrence}:{}",
+                            "{occurrence}:{attributes_sha256}:{}",
                             tag.body_sha256.as_deref().unwrap_or("missing-body")
                         )
                     } else {
-                        occurrence.to_string()
+                        format!("{occurrence}:{attributes_sha256}")
                     };
                     features.insert(BehaviorFeature::witnessed(
                         "new_script",
@@ -937,30 +1041,77 @@ fn behavior_features(files: &BTreeMap<String, Vec<u8>>) -> BTreeSet<BehaviorFeat
                     }
                 }
                 "iframe" => {
-                    features.insert(BehaviorFeature::stable(
+                    let destination = attributes
+                        .get("src")
+                        .cloned()
+                        .unwrap_or_else(|| "inline-frame".to_owned());
+                    let occurrence = next_occurrence(&mut iframe_occurrences, &destination);
+                    features.insert(BehaviorFeature::witnessed(
                         "new_iframe",
                         path,
-                        attributes
-                            .get("src")
-                            .cloned()
-                            .unwrap_or_else(|| "inline-frame".to_owned()),
+                        destination,
+                        format!("{occurrence}:{attributes_sha256}"),
                     ));
                 }
                 _ => {}
             }
             if attributes.contains_key("download") {
-                features.insert(BehaviorFeature::stable(
+                let destination = attributes
+                    .get("href")
+                    .cloned()
+                    .unwrap_or_else(|| "download-attribute".to_owned());
+                let occurrence = next_occurrence(&mut download_occurrences, &destination);
+                features.insert(BehaviorFeature::witnessed(
                     "new_download",
                     path,
-                    attributes
-                        .get("href")
-                        .cloned()
-                        .unwrap_or_else(|| "download-attribute".to_owned()),
+                    destination,
+                    format!("{occurrence}:{attributes_sha256}"),
                 ));
             }
         }
     }
     features
+}
+
+fn canonical_attributes_sha256(attributes: &[(String, String)]) -> String {
+    let mut attributes = attributes.to_vec();
+    attributes.sort();
+    let mut canonical = Vec::new();
+    for (name, value) in attributes {
+        canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(name.as_bytes());
+        canonical.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(value.as_bytes());
+    }
+    sha256(&canonical)
+}
+
+fn external_reference_origin(reference: &str) -> Option<String> {
+    let reference = reference.trim();
+    let protocol_relative = reference.starts_with("//");
+    let parse_value = if protocol_relative {
+        format!("https:{reference}")
+    } else if reference
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http:"))
+        || reference
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https:"))
+    {
+        reference.to_owned()
+    } else {
+        return None;
+    };
+    let url = Url::parse(&parse_value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    let origin = url.origin().ascii_serialization();
+    Some(if protocol_relative {
+        origin.strip_prefix("https:").unwrap_or(&origin).to_owned()
+    } else {
+        origin
+    })
 }
 
 fn next_occurrence(occurrences: &mut BTreeMap<String, usize>, key: &str) -> usize {
@@ -977,8 +1128,8 @@ fn is_inline_event_handler_attribute(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn external_origins(text: &str) -> BTreeSet<String> {
-    let mut origins = BTreeSet::new();
+fn external_origins(text: &str) -> Vec<String> {
+    let mut origins = Vec::new();
     let lower = text.to_ascii_lowercase();
     for scheme in ["http://", "https://"] {
         let mut offset = 0;
@@ -987,7 +1138,7 @@ fn external_origins(text: &str) -> BTreeSet<String> {
             let tail = &text[start..];
             let end = external_url_end(tail);
             if let Ok(url) = Url::parse(&tail[..end]) {
-                origins.insert(url.origin().ascii_serialization());
+                origins.push(url.origin().ascii_serialization());
             }
             offset = start + scheme.len();
         }
@@ -1005,7 +1156,7 @@ fn external_origins(text: &str) -> BTreeSet<String> {
             if let Ok(url) = Url::parse(&format!("https:{}", &tail[..end])) {
                 let origin = url.origin().ascii_serialization();
                 if let Some(protocol_relative) = origin.strip_prefix("https:") {
-                    origins.insert(protocol_relative.to_owned());
+                    origins.push(protocol_relative.to_owned());
                 }
             }
         }
@@ -1031,7 +1182,7 @@ struct MarkupTag {
     body_sha256: Option<String>,
 }
 
-fn scan_markup_tags(text: &str) -> Vec<MarkupTag> {
+fn scan_markup_tags(text: &str, html_mode: bool) -> Vec<MarkupTag> {
     let bytes = text.as_bytes();
     let mut tags = Vec::new();
     let mut cursor = 0;
@@ -1047,24 +1198,32 @@ fn scan_markup_tags(text: &str) -> Vec<MarkupTag> {
                 .unwrap_or(text.len());
             continue;
         }
-        let Some(relative_end) = text[start..].find('>') else {
+        let Some(end) = markup_tag_end(text, start + 1) else {
             break;
         };
-        let end = start + relative_end;
         let body = text[start + 1..end].trim();
         if let Some(mut tag) = parse_tag_body(body) {
-            let skip_script_body = !tag.closing && tag.name == "script";
-            if skip_script_body {
+            if !tag.closing && html_mode && tag.name == "plaintext" {
+                tags.push(tag);
+                cursor = text.len();
+                continue;
+            }
+            if !tag.closing && behavior_raw_text_element(&tag.name, html_mode) {
                 let body_start = end + 1;
-                let lower_tail = text[body_start..].to_ascii_lowercase();
-                if let Some(close) = lower_tail.find("</script") {
-                    let body_end = body_start + close;
-                    tag.body_sha256 = Some(sha256(&text.as_bytes()[body_start..body_end]));
+                if let Some((body_end, next_cursor)) =
+                    raw_text_element_bounds(text, body_start, &tag.name)
+                {
+                    if tag.name == "script" {
+                        tag.body_sha256 = Some(sha256(&text.as_bytes()[body_start..body_end]));
+                    }
                     tags.push(tag);
-                    cursor = body_end;
+                    cursor = next_cursor;
                     continue;
                 }
-                tag.body_sha256 = Some(sha256(&text.as_bytes()[body_start..]));
+                if tag.name == "script" {
+                    let body_end = text.len();
+                    tag.body_sha256 = Some(sha256(&text.as_bytes()[body_start..body_end]));
+                }
                 tags.push(tag);
                 cursor = text.len();
                 continue;
@@ -1076,6 +1235,66 @@ fn scan_markup_tags(text: &str) -> Vec<MarkupTag> {
     tags
 }
 
+fn behavior_raw_text_element(name: &str, html_mode: bool) -> bool {
+    matches!(name, "style" | "script")
+        || (html_mode
+            && matches!(
+                name,
+                "title" | "textarea" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript"
+            ))
+}
+
+fn raw_text_element_bounds(
+    text: &str,
+    body_start: usize,
+    tag_name: &str,
+) -> Option<(usize, usize)> {
+    let closing_prefix = format!("</{tag_name}");
+    let lower_tail = text[body_start..].to_ascii_lowercase();
+    let mut search_start = 0;
+    while let Some(relative_start) = lower_tail[search_start..].find(&closing_prefix) {
+        let close_start = body_start + search_start + relative_start;
+        let prefix_end = close_start + closing_prefix.len();
+        let boundary = text.as_bytes().get(prefix_end).copied();
+        if !boundary.is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')) {
+            search_start += relative_start + closing_prefix.len();
+            continue;
+        }
+        let close_end = markup_tag_end(text, close_start + 1)?;
+        let close_body = text[close_start + 1..close_end].trim();
+        let closing_body_prefix = &closing_prefix[1..];
+        if !close_body
+            .get(..closing_body_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(closing_body_prefix))
+        {
+            return None;
+        }
+        let trailing = close_body
+            .get(closing_body_prefix.len()..)
+            .unwrap_or_default()
+            .trim();
+        if !trailing.is_empty() && trailing != "/" {
+            return None;
+        }
+        return Some((close_start, close_end + 1));
+    }
+    None
+}
+
+fn markup_tag_end(text: &str, body_start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (relative, character) in text[body_start..].char_indices() {
+        match quote {
+            Some(expected) if character == expected => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character == '>' => return Some(body_start + relative),
+            None => {}
+        }
+    }
+    None
+}
+
 pub(super) fn count_matching_start_tags(
     html: &str,
     tag_name: &str,
@@ -1083,7 +1302,7 @@ pub(super) fn count_matching_start_tags(
 ) -> (usize, usize) {
     let mut identifier_count = 0;
     let mut matching_tag_count = 0;
-    for tag in scan_markup_tags(html) {
+    for tag in scan_markup_tags(html, true) {
         let has_identifier = !tag.closing
             && tag.attributes.iter().any(|(name, value)| {
                 matches!(name.as_str(), "id" | "data-lp-id" | "data-studio-block")
@@ -1177,48 +1396,6 @@ fn parse_attributes(mut input: &str) -> Vec<(String, String)> {
         attributes.push((name, value));
     }
     attributes
-}
-
-fn srcset_references(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .filter_map(|candidate| candidate.split_whitespace().next())
-        .filter(|candidate| !candidate.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn css_references(text: &str) -> Vec<String> {
-    let mut references = Vec::new();
-    let lower = text.to_ascii_lowercase();
-    let mut cursor = 0;
-    while let Some(relative) = lower[cursor..].find("url(") {
-        let start = cursor + relative + 4;
-        let Some(end_relative) = text[start..].find(')') else {
-            break;
-        };
-        let end = start + end_relative;
-        let value = text[start..end].trim().trim_matches(['\'', '"']).trim();
-        if !value.is_empty() {
-            references.push(value.to_owned());
-        }
-        cursor = end + 1;
-    }
-    cursor = 0;
-    while let Some(relative) = lower[cursor..].find("@import") {
-        let start = cursor + relative + "@import".len();
-        let tail = text[start..].trim_start();
-        if let Some(quote) = tail
-            .chars()
-            .next()
-            .filter(|value| matches!(value, '\'' | '"'))
-            && let Some(end) = tail[quote.len_utf8()..].find(quote)
-        {
-            references.push(tail[quote.len_utf8()..quote.len_utf8() + end].to_owned());
-        }
-        cursor = start;
-    }
-    references
 }
 
 fn resolve_local_reference(
@@ -1469,7 +1646,7 @@ fn text_media_type_for_path(path: &str) -> Option<&'static str> {
         Some("text/html")
     } else if extension.eq_ignore_ascii_case("css") {
         Some("text/css")
-    } else if matches_ignore_ascii_case(extension, &["js", "mjs"]) {
+    } else if matches_ignore_ascii_case(extension, &["js", "mjs", "cjs"]) {
         Some("application/javascript")
     } else if matches_ignore_ascii_case(extension, &["json", "map"]) {
         Some("application/json")
@@ -1538,7 +1715,7 @@ mod tests {
         BTreeMap::from([
             (
                 "index.html".to_owned(),
-                br#"<!doctype html><html><head><link rel="stylesheet" href="styles/base.css"></head><body><h1>Before</h1></body></html>"#
+                br#"<!doctype html><html lang="en"><head><link rel="stylesheet" href="styles/base.css"></head><body><h1>Before</h1></body></html>"#
                     .to_vec(),
             ),
             ("styles/base.css".to_owned(), b"h1 { color: navy; }\n".to_vec()),
@@ -1558,7 +1735,7 @@ mod tests {
                     "index.html",
                     sha256(&accepted["index.html"]),
                     "text/html",
-                    r#"<!doctype html><html><head><link rel="stylesheet" href="styles/base.css"></head><body><h1>After</h1></body></html>"#,
+                    r#"<!doctype html><html lang="en"><head><link rel="stylesheet" href="styles/base.css"></head><body><h1>After</h1></body></html>"#,
                 ),
                 ChangeOperationV1::rename(
                     "rename.txt",
@@ -1628,9 +1805,53 @@ mod tests {
                 "entry-point",
                 "local-references",
                 "export-deny-list",
+                "accessibility-smoke",
                 "active-behavior"
             ]
         );
+    }
+
+    #[test]
+    fn accessibility_smoke_is_visible_bounded_and_non_blocking() {
+        let files = BTreeMap::from([(
+            "index.html".to_owned(),
+            br#"<!doctype html><html><body><img src="hero.png"><label for="named">Named</label><input id="named"><input id="duplicate"><textarea id="duplicate"></textarea></body></html>"#
+                .to_vec(),
+        )]);
+        let check = accessibility_smoke_check(&files);
+        assert_eq!(check.id, "accessibility-smoke");
+        assert_eq!(check.status, StaticCheckStatus::AdvisoryWarning);
+        assert!(check.message.contains("5 issue(s)"));
+        assert!(check.message.contains("not WCAG conformance"));
+    }
+
+    #[test]
+    fn html5_recovery_is_reported_as_a_redacted_advisory() {
+        let accepted = accepted_fixture();
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "HTML5 recovery advisory",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r#"<!doctype html><html lang="en"><head><title>LP</title></head><body><main><strong>recover-me-secret</main></strong></body></html>"#,
+            )],
+        );
+
+        let applied = apply(&change_set).unwrap();
+        let check = applied
+            .checks
+            .iter()
+            .find(|check| check.id == "static-syntax")
+            .unwrap();
+        assert_eq!(check.status, StaticCheckStatus::AdvisoryWarning);
+        assert!(check.message.contains("HTML5"));
+        assert!(check.message.contains("bounded"));
+        assert!(!check.message.contains("index.html"));
+        assert!(!check.message.contains("recover-me-secret"));
+        assert!(applied.blocking_warnings.is_empty());
+        assert_eq!(accepted, accepted_fixture());
     }
 
     #[test]
@@ -1987,6 +2208,109 @@ mod tests {
     }
 
     #[test]
+    fn inline_css_and_quote_aware_local_references_fail_closed() {
+        let accepted = accepted_fixture();
+        for (html, expected) in [
+            (
+                r#"<html><body><div style="background:url('assets/missing.png')"></div></body></html>"#,
+                ChangeSetError::InvalidLocalReference,
+            ),
+            (
+                r#"<html><head><style>body{background:url('assets/missing.png')}</style></head></html>"#,
+                ChangeSetError::InvalidLocalReference,
+            ),
+            (
+                r#"<html><body><img alt="1 > 0" src="assets/missing.png"></body></html>"#,
+                ChangeSetError::InvalidLocalReference,
+            ),
+            (
+                r#"<html><head><style>body{color:red}</head></html>"#,
+                ChangeSetError::InvalidSyntax,
+            ),
+        ] {
+            let change_set = ChangeSetV1::new(
+                BASE,
+                "strict inline references",
+                vec![ChangeOperationV1::replace_text(
+                    "index.html",
+                    sha256(&accepted["index.html"]),
+                    "text/html",
+                    html,
+                )],
+            );
+            assert_eq!(
+                parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted),
+                Err(expected),
+                "validation accepted {html}"
+            );
+        }
+
+        let ambiguous = ChangeSetV1::new(
+            BASE,
+            "ambiguous inline CSS",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r#"<html><head><style>body{background:u\72l('assets/missing.png')}</style></head><body></body></html>"#,
+            )],
+        );
+        let applied =
+            parse_and_apply_change_set(&ambiguous.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(applied.blocking_warnings.iter().any(|warning| {
+            warning.code == "static_reference_analysis_incomplete" && warning.path == "index.html"
+        }));
+        assert_eq!(
+            applied
+                .checks
+                .iter()
+                .find(|check| check.id == "local-references")
+                .unwrap()
+                .status,
+            StaticCheckStatus::BlockingWarning
+        );
+    }
+
+    #[test]
+    fn removing_any_path_blocks_when_an_unchanged_reference_source_is_opaque() {
+        let mut accepted = accepted_fixture();
+        accepted.insert(
+            "index.html".to_owned(),
+            br#"<html><head><style>body{background:u\72l('hero.png')}</style></head></html>"#
+                .to_vec(),
+        );
+        accepted.insert("hero.png".to_owned(), vec![0x89, b'P', b'N', b'G']);
+
+        let operations = [
+            ChangeOperationV1::delete("hero.png", sha256(&accepted["hero.png"])),
+            ChangeOperationV1::rename(
+                "hero.png",
+                "renamed-hero.png",
+                sha256(&accepted["hero.png"]),
+            ),
+        ];
+        for operation in operations {
+            let change_set = ChangeSetV1::new(BASE, "opaque reference", vec![operation]);
+            let applied =
+                parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted)
+                    .unwrap();
+            assert!(applied.blocking_warnings.iter().any(|warning| {
+                warning.code == "static_reference_analysis_incomplete"
+                    && warning.path == "index.html"
+            }));
+            assert_eq!(
+                applied
+                    .checks
+                    .iter()
+                    .find(|check| check.id == "local-references")
+                    .unwrap()
+                    .status,
+                StaticCheckStatus::BlockingWarning
+            );
+        }
+    }
+
+    #[test]
     fn new_active_behavior_is_returned_as_deterministic_blocking_metadata() {
         let accepted = accepted_fixture();
         let active = ChangeSetV1::new(
@@ -2066,6 +2390,281 @@ mod tests {
     }
 
     #[test]
+    fn quoted_greater_than_cannot_hide_active_behavior_attributes() {
+        let accepted = accepted_fixture();
+        let active = ChangeSetV1::new(
+            BASE,
+            "quote-aware active behavior",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r#"<!doctype html><html><body><button title="1 > 0" onclick="location.hash='changed'">Send</button><form title='2 > 1' action="https://forms.example.test/submit"></form><a title="3 > 2" href="https://files.example.test/a.zip" download>Download</a></body></html>"#,
+            )],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&active.to_json().unwrap(), BASE, &accepted).unwrap();
+        let codes = applied
+            .blocking_warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "new_download",
+            "new_external_origin",
+            "new_form_action",
+            "new_inline_event_handler",
+        ] {
+            assert!(codes.contains(expected), "missing warning {expected}");
+        }
+    }
+
+    #[test]
+    fn raw_text_false_tags_cannot_hide_later_event_handlers() {
+        let cases = [
+            (
+                r#"<!doctype html><script>const a="</scriptx>"; const b="<foo title='";</script>' >"#,
+                r#"<!doctype html><script>const a="</scriptx>"; const b="<foo title='";</script><button onclick="location.hash='script'">X</button>' >"#,
+            ),
+            (
+                r#"<!doctype html><style>.x{content:"<foo title='"}</style>' >"#,
+                r#"<!doctype html><style>.x{content:"<foo title='"}</style><button onclick="location.hash='style'">X</button>' >"#,
+            ),
+        ];
+
+        for (before, after) in cases {
+            let mut accepted = accepted_fixture();
+            accepted.insert("index.html".to_owned(), before.as_bytes().to_vec());
+            let change_set = ChangeSetV1::new(
+                BASE,
+                "raw text boundary",
+                vec![ChangeOperationV1::replace_text(
+                    "index.html",
+                    sha256(&accepted["index.html"]),
+                    "text/html",
+                    after,
+                )],
+            );
+
+            let applied =
+                parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted)
+                    .unwrap();
+            assert!(applied.blocking_warnings.iter().any(|warning| {
+                warning.code == "new_inline_event_handler"
+                    && warning.destination == "button[onclick]"
+            }));
+        }
+    }
+
+    #[test]
+    fn tokenizer_specific_html_boundaries_are_blocking_when_changed() {
+        let accepted = accepted_fixture();
+        for html in [
+            r#"<!doctype html><script><!-- legacy escaped script marker --></script>"#,
+            r#"<!doctype html><?bounded-processing "quoted > text"?><main>Ready</main>"#,
+            r#"<!doctype html><![CDATA[html-context text]]><main>Ready</main>"#,
+        ] {
+            let change_set = ChangeSetV1::new(
+                BASE,
+                "tokenizer boundary",
+                vec![ChangeOperationV1::replace_text(
+                    "index.html",
+                    sha256(&accepted["index.html"]),
+                    "text/html",
+                    html,
+                )],
+            );
+            let applied =
+                parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted)
+                    .unwrap();
+            assert!(applied.blocking_warnings.iter().any(|warning| {
+                warning.code == "static_reference_analysis_incomplete"
+                    && warning.path == "index.html"
+            }));
+        }
+    }
+
+    #[test]
+    fn duplicate_active_destinations_remain_distinct_review_evidence() {
+        let mut accepted = accepted_fixture();
+        accepted.insert(
+            "frame.html".to_owned(),
+            b"<!doctype html><p>frame</p>".to_vec(),
+        );
+        accepted.insert(
+            "index.html".to_owned(),
+            br#"<!doctype html><html><body><iframe src="frame.html"></iframe><form action="https://forms.example.test/submit"></form><a href="https://files.example.test/a.zip" download>Download</a><img alt="pixel" src="https://tracker.example.test/pixel.png"></body></html>"#
+                .to_vec(),
+        );
+        let proposed = r#"<!doctype html><html><body><iframe src="frame.html"></iframe><iframe src="frame.html"></iframe><form action="https://forms.example.test/submit"></form><form action="https://forms.example.test/submit"></form><a href="https://files.example.test/a.zip" download>Download</a><a href="https://files.example.test/a.zip" download>Download again</a><img alt="pixel" src="https://tracker.example.test/pixel.png"><img alt="pixel 2" src="https://tracker.example.test/pixel.png"></body></html>"#;
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "duplicate active destinations",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                proposed,
+            )],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        let codes = applied
+            .blocking_warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "new_download",
+            "new_external_origin",
+            "new_form_action",
+            "new_iframe",
+        ] {
+            assert!(codes.contains(expected), "missing warning {expected}");
+        }
+    }
+
+    #[test]
+    fn inert_url_text_cannot_mask_a_new_active_external_reference() {
+        let mut accepted = accepted_fixture();
+        accepted.insert(
+            "index.html".to_owned(),
+            br#"<!doctype html><html><body><p>Documentation: https://tracker.example.test</p></body></html>"#
+                .to_vec(),
+        );
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "activate documented origin",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r#"<!doctype html><html><body><p>Documentation: https://tracker.example.test</p><img alt="pixel" src="https://tracker.example.test/pixel.png"></body></html>"#,
+            )],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(applied.blocking_warnings.iter().any(|warning| {
+            warning.code == "new_external_origin"
+                && warning.destination == "https://tracker.example.test"
+        }));
+    }
+
+    #[test]
+    fn html_character_reference_cannot_bypass_external_review_with_a_dummy_path() {
+        let accepted = accepted_fixture();
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "encoded external reference",
+            vec![
+                ChangeOperationV1::create_text(
+                    "https&colon;/evil.example.test/theme.css",
+                    "text/css",
+                    "body { color: red; }",
+                ),
+                ChangeOperationV1::replace_text(
+                    "index.html",
+                    sha256(&accepted["index.html"]),
+                    "text/html",
+                    r#"<!doctype html><link rel="stylesheet" href="https&colon;//evil.example.test/theme.css">"#,
+                ),
+            ],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(applied.blocking_warnings.iter().any(|warning| {
+            warning.code == "static_reference_analysis_incomplete" && warning.path == "index.html"
+        }));
+        assert_eq!(
+            applied
+                .checks
+                .iter()
+                .find(|check| check.id == "local-references")
+                .unwrap()
+                .status,
+            StaticCheckStatus::BlockingWarning
+        );
+    }
+
+    #[test]
+    fn ping_image_srcset_and_image_set_are_not_silent_fetch_surfaces() {
+        let accepted = accepted_fixture();
+        let markup = ChangeSetV1::new(
+            BASE,
+            "additional fetch attributes",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r##"<!doctype html><link rel="preload" imagesrcset="https://images.example.test/a.png 1x"><a href="#ready" ping="https://audit.example.test/p">Ready</a>"##,
+            )],
+        );
+        let applied =
+            parse_and_apply_change_set(&markup.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(
+            applied
+                .blocking_warnings
+                .iter()
+                .any(|warning| warning.code == "new_external_origin")
+        );
+
+        let image_set = ChangeSetV1::new(
+            BASE,
+            "quoted image set",
+            vec![ChangeOperationV1::replace_text(
+                "styles/base.css",
+                sha256(&accepted["styles/base.css"]),
+                "text/css",
+                r#".hero { background: image-set("https://images.example.test/a.png" 1x); }"#,
+            )],
+        );
+        let applied =
+            parse_and_apply_change_set(&image_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(applied.blocking_warnings.iter().any(|warning| {
+            warning.code == "static_reference_analysis_incomplete"
+                && warning.path == "styles/base.css"
+        }));
+    }
+
+    #[test]
+    fn script_execution_and_iframe_permission_transitions_are_blocking() {
+        let mut accepted = accepted_fixture();
+        accepted.insert(
+            "frame.html".to_owned(),
+            b"<!doctype html><p>frame</p>".to_vec(),
+        );
+        accepted.insert(
+            "index.html".to_owned(),
+            br#"<!doctype html><html><body><script type="application/json">window.example = 1;</script><iframe src="frame.html" sandbox></iframe></body></html>"#
+                .to_vec(),
+        );
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "activate script and widen frame",
+            vec![ChangeOperationV1::replace_text(
+                "index.html",
+                sha256(&accepted["index.html"]),
+                "text/html",
+                r#"<!doctype html><html><body><script>window.example = 1;</script><iframe src="frame.html"></iframe></body></html>"#,
+            )],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        let codes = applied
+            .blocking_warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("new_script"));
+        assert!(codes.contains("new_iframe"));
+    }
+
+    #[test]
     fn changing_javascript_behind_an_existing_script_src_is_blocking() {
         let mut accepted = accepted_fixture();
         accepted.insert(
@@ -2098,6 +2697,41 @@ mod tests {
                 .iter()
                 .any(|warning| warning.code == "new_script")
         );
+    }
+
+    #[test]
+    fn changing_a_transitively_imported_module_is_conservatively_blocking() {
+        let mut accepted = accepted_fixture();
+        accepted.insert(
+            "index.html".to_owned(),
+            br#"<!doctype html><script type="module" src="app.js"></script>"#.to_vec(),
+        );
+        accepted.insert(
+            "app.js".to_owned(),
+            b"import './module.js';\nconsole.log('app');\n".to_vec(),
+        );
+        accepted.insert(
+            "module.js".to_owned(),
+            b"export const value = 'before';\n".to_vec(),
+        );
+        let change_set = ChangeSetV1::new(
+            BASE,
+            "change nested module",
+            vec![ChangeOperationV1::replace_text(
+                "module.js",
+                sha256(&accepted["module.js"]),
+                "application/javascript",
+                "export const value = 'after';\n",
+            )],
+        );
+
+        let applied =
+            parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
+        assert!(applied.blocking_warnings.iter().any(|warning| {
+            warning.code == "changed_script_content"
+                && warning.path == "module.js"
+                && warning.destination == "module.js"
+        }));
     }
 
     #[test]

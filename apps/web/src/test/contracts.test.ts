@@ -20,6 +20,7 @@ import {
   isPreviewDiagnosticMessage,
   isPreviewScopeBaseOrigin,
   isPreviewSelectionMessage,
+  isProjectDisplayName,
   isProjectResponse,
   isProjectsResponse,
   isProposalResponse,
@@ -27,6 +28,7 @@ import {
   isTargetResolverResultV1,
   isTargetResponse,
   isTargetV1,
+  isUpdateProjectMetadataRequest,
   type TargetResolverCandidateV1,
   type TargetResolverResultV1,
   type TargetV1,
@@ -811,6 +813,17 @@ const extraFieldCases: ReadonlyArray<
     },
   ],
   [
+    "error detail",
+    isApiErrorResponse,
+    {
+      ...apiErrorResponseFixture,
+      error: {
+        ...apiErrorResponseFixture.error,
+        detail: { ...apiErrorResponseFixture.error.detail, extra: true },
+      },
+    },
+  ],
+  [
     "preview selection root",
     isPreviewSelectionMessage,
     { ...previewSelection, extra: true },
@@ -840,6 +853,13 @@ describe("canonical API v1 schema", () => {
     schemaType: "number",
     validate: (limit: number, value: string) =>
       new TextEncoder().encode(value).byteLength <= limit,
+  });
+  ajv.addKeyword({
+    keyword: "x-normalization",
+    type: "string",
+    schemaType: "string",
+    validate: (form: string, value: string) =>
+      form === "NFC" && value.normalize("NFC") === value,
   });
   const validate = ajv.compile(apiSchema);
 
@@ -880,6 +900,36 @@ describe("canonical API v1 schema", () => {
 
   it("rejects an unversioned public DTO", () => {
     expect(validate({ ...project, schemaVersion: "2" })).toBe(false);
+  });
+
+  it("enforces the exact versioned Project metadata update boundary", () => {
+    const valid = {
+      schemaVersion: "1",
+      expectedDisplayName: "Untitled landing page",
+      displayName: "キャンペーンLP 🚀",
+    };
+    expect(validate(valid)).toBe(true);
+    expect(isUpdateProjectMetadataRequest(valid)).toBe(true);
+    expect(isProjectDisplayName(valid.displayName)).toBe(true);
+
+    for (const displayName of [
+      "   ",
+      "line\nbreak",
+      "/home/private/project",
+      "C:\\private\\project",
+      "e\u0301",
+      "x".repeat(257),
+      "🚀".repeat(257),
+    ]) {
+      const candidate = { ...valid, displayName };
+      expect(validate(candidate)).toBe(false);
+      expect(isUpdateProjectMetadataRequest(candidate)).toBe(false);
+      expect(isProjectDisplayName(displayName)).toBe(false);
+    }
+    expect(validate({ ...valid, extra: true })).toBe(false);
+    expect(isUpdateProjectMetadataRequest({ ...valid, extra: true })).toBe(
+      false,
+    );
   });
 
   it("binds proposal-captured targets to exactly one source proposal", () => {

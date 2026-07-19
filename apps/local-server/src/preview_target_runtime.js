@@ -28,8 +28,12 @@
   const getComputedStyle = window.getComputedStyle.bind(window);
   const elementFromPoint = document.elementFromPoint.bind(document);
   const elementsFromPoint = document.elementsFromPoint.bind(document);
+  const createTreeWalker = document.createTreeWalker.bind(document);
+  const elementMatches = Function.call.bind(Element.prototype.matches);
   const randomUuid = crypto.randomUUID.bind(crypto);
   const postToEditor = parent.postMessage.bind(parent);
+  const requestFrame = window.requestAnimationFrame.bind(window);
+  const cancelFrame = window.cancelAnimationFrame.bind(window);
   const minimum = Math.min.bind(Math);
   const maximum = Math.max.bind(Math);
   const round = Math.round.bind(Math);
@@ -37,6 +41,7 @@
   const encoder = new TextEncoder();
   const blockSelector =
     "header,nav,main,section,article,aside,footer,[role='banner'],[role='navigation'],[role='main'],[role='region'],[role='complementary'],[role='contentinfo']";
+  const maximumScannedElements = 10_000;
   const handles = new WeakMap();
   const nodesByHandle = new Map();
   const blockElements = new Set();
@@ -55,6 +60,10 @@
   let layoutEpoch = 0;
   let drag = null;
   let overlay = null;
+  let pendingRegion = null;
+  let overlayFrame = null;
+  let overlayElement = null;
+  let overlayDocumentRect = null;
 
   const boundedText = (raw, maxBytes = 240) => {
     const normalized = String(raw ?? "")
@@ -105,6 +114,23 @@
     return handle;
   };
   const directChildren = (element) => Array.from(element.children);
+  const boundedMatches = (selector, maximumMatches) => {
+    const root = document.body || document.documentElement;
+    if (!(root instanceof Element)) return [];
+    const matches = [];
+    const walker = createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let current = walker.currentNode;
+    let visited = 0;
+    while (current && visited < maximumScannedElements) {
+      visited += 1;
+      if (current instanceof Element && elementMatches(current, selector)) {
+        matches.push(current);
+        if (matches.length >= maximumMatches) break;
+      }
+      current = walker.nextNode();
+    }
+    return matches;
+  };
   const labelFor = (element) => {
     const explicit =
       getAttribute(element, "data-lp-label") ||
@@ -265,7 +291,7 @@
     return "heuristic";
   };
   const collectBlocks = () => {
-    const candidates = new Set(document.querySelectorAll(blockSelector));
+    const candidates = new Set(boundedMatches(blockSelector, 512));
     for (const root of [document.body, document.querySelector("main")]) {
       if (!root) continue;
       for (const child of directChildren(root)) candidates.add(child);
@@ -356,6 +382,11 @@
   };
 
   const clearOverlay = () => {
+    if (overlayFrame !== null) cancelFrame(overlayFrame);
+    overlayFrame = null;
+    pendingRegion = null;
+    overlayElement = null;
+    overlayDocumentRect = null;
     overlay?.remove();
     overlay = null;
     drag = null;
@@ -372,6 +403,55 @@
     overlay.style.top = rect.y + "px";
     overlay.style.width = rect.width + "px";
     overlay.style.height = rect.height + "px";
+  };
+  const rememberOverlay = (rect, element = null) => {
+    overlayElement = element instanceof Element ? element : null;
+    overlayDocumentRect =
+      overlayElement === null
+        ? {
+            x: rect.x + window.scrollX,
+            y: rect.y + window.scrollY,
+            width: rect.width,
+            height: rect.height,
+          }
+        : null;
+    showOverlay(rect);
+  };
+  const refreshRememberedOverlay = () => {
+    if (!overlay || drag) return;
+    if (overlayElement?.isConnected) {
+      const rect = getBoundingClientRect(overlayElement);
+      showOverlay({
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      });
+    } else if (overlayDocumentRect) {
+      showOverlay({
+        x: overlayDocumentRect.x - window.scrollX,
+        y: overlayDocumentRect.y - window.scrollY,
+        width: overlayDocumentRect.width,
+        height: overlayDocumentRect.height,
+      });
+    }
+  };
+  const scheduleRememberedOverlay = () => {
+    if (!overlay || drag || overlayFrame !== null) return;
+    overlayFrame = requestFrame(() => {
+      overlayFrame = null;
+      refreshRememberedOverlay();
+    });
+  };
+  const scheduleRegionOverlay = (rect) => {
+    pendingRegion = rect;
+    if (overlayFrame !== null) return;
+    overlayFrame = requestFrame(() => {
+      overlayFrame = null;
+      const next = pendingRegion;
+      pendingRegion = null;
+      if (next && drag) showOverlay(next);
+    });
   };
   const postTarget = (target) => {
     post("synapsegit-lp.target-draft", { target });
@@ -398,12 +478,15 @@
           }
         : {}),
     };
-    showOverlay({
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    });
+    rememberOverlay(
+      {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      },
+      element,
+    );
     postTarget(target);
   };
   const captureTextRange = (range, element) => {
@@ -432,7 +515,7 @@
       if (prefix) anchor.prefix = prefix;
       if (suffix) anchor.suffix = suffix;
     }
-    showOverlay({
+    rememberOverlay({
       x: rawRect.x,
       y: rawRect.y,
       width: rawRect.width,
@@ -468,7 +551,7 @@
   const capturePoint = (rawX, rawY) => {
     const x = clamp(rawX, 0, maximum(0, window.innerWidth - 1));
     const y = clamp(rawY, 0, maximum(0, window.innerHeight - 1));
-    showOverlay({ x: x - 5, y: y - 5, width: 10, height: 10 });
+    rememberOverlay({ x: x - 5, y: y - 5, width: 10, height: 10 });
     postTarget({
       ...commonTarget("point", "空白を含む座標"),
       point: {
@@ -505,7 +588,7 @@
     const rect = normalizedRegion(startX, startY, endX, endY);
     const centerX = rect.x + rect.width / 2;
     const centerY = rect.y + rect.height / 2;
-    showOverlay(rect);
+    rememberOverlay(rect);
     postTarget({
       ...commonTarget("region", "選択した領域"),
       geometry: rectGeometry(rect),
@@ -533,9 +616,7 @@
       if (nodes.length >= 200) break;
     }
     const emittedHandles = new Set(nodes.map((node) => node.runtimeNodeHandle));
-    for (const element of Array.from(
-      document.querySelectorAll("h1,h2,h3,p,a,button,img"),
-    )) {
+    for (const element of boundedMatches("h1,h2,h3,p,a,button,img", 512)) {
       if (!isVisible(element) || nodes.length >= 200) continue;
       const handle = handleFor(element);
       if (emittedHandles.has(handle)) continue;
@@ -650,7 +731,7 @@
     (event) => {
       if (!drag) return;
       preventDefault(event);
-      showOverlay(
+      scheduleRegionOverlay(
         normalizedRegion(drag.x, drag.y, event.clientX, event.clientY),
       );
     },
@@ -664,6 +745,9 @@
       stopPropagation(event);
       const start = drag;
       drag = null;
+      if (overlayFrame !== null) cancelFrame(overlayFrame);
+      overlayFrame = null;
+      pendingRegion = null;
       captureRegion(start.x, start.y, event.clientX, event.clientY);
     },
     true,
@@ -698,13 +782,22 @@
     },
     true,
   );
+  addEventListener("scroll", scheduleRememberedOverlay, {
+    capture: true,
+    passive: true,
+  });
+  addEventListener("resize", scheduleRememberedOverlay, { passive: true });
 
   try {
     new ResizeObserver(() => {
       layoutEpoch += 1;
+      scheduleRememberedOverlay();
     }).observe(document.documentElement);
-    new MutationObserver(() => {
+    new MutationObserver((records) => {
       layoutEpoch += 1;
+      if (records.some((record) => record.target !== overlay)) {
+        scheduleRememberedOverlay();
+      }
     }).observe(document.documentElement, {
       attributes: true,
       childList: true,

@@ -1,16 +1,24 @@
 #![forbid(unsafe_code)]
 
+mod ai_attempt;
 mod ai_provider;
+pub mod application_performance;
 mod change_set;
+mod fault_injection;
+mod publication;
+mod static_export;
+mod static_syntax;
 mod storage;
+mod synapse_sidecar;
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Extension, MatchedPath, Path, Request, State};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HOST, ORIGIN,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,15 +29,13 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use synapse_artifact::{
-    ArtifactDecisionOptions, ArtifactDisposition, ArtifactLimits, ArtifactManifestEntry,
-    ArtifactSourceAttribution, PendingArtifactProposal, RegularFileManifest,
-    TrustedArtifactProjectConfig, artifact_manifest_sha256, begin_artifact_proposal,
-    decide_artifact_proposal, review_context_sha256,
+    ArtifactDisposition, ArtifactLimits, ArtifactManifestEntry, ArtifactSourceAttribution,
+    RegularFileManifest, artifact_manifest_sha256, review_context_sha256,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -37,8 +43,12 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, DateTime, ZipWriter};
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
+use ai_attempt::{
+    AiAttempts, AttemptGeneration, AttemptStatus, CancelResult, Cancellation, ClaimError,
+    CompleteResult,
+};
 use ai_provider::{
     OpenAiConfig, ProviderAttribution, ProviderBinding, ProviderDescriptor, ProviderError,
     ProviderRequest, ProviderSelectionError, bind_provider, execute_provider, provider_descriptors,
@@ -47,13 +57,28 @@ use change_set::{
     AppliedChangeKind, AppliedChangeSet, ChangeSetError, ChangeSetV1, StaticCheck,
     StaticCheckStatus, count_matching_start_tags, parse_and_apply_change_set,
 };
+use fault_injection::{Failpoint, check as check_failpoint};
+use publication::{
+    IncompleteReason, PublicAcceptedBindingInput, PublicDisposition, PublicProjectInput,
+    PublicProposalAttributionInput, PublicSessionInput, PublicationInput, generate_publication,
+};
+use static_export::{
+    ExportArchiveIdentityV1, ExportFileManifestV1, ExportOptionsV1, ExportValidationReportV1,
+    StaticExportError, StaticExportInput, generate_static_export,
+};
 use storage::{
     ImportExcluded, ImportIncluded, MAX_DEPTH as STORAGE_MAX_DEPTH,
     MAX_FILE_BYTES as STORAGE_MAX_FILE_BYTES, MAX_FILES as STORAGE_MAX_FILES,
     MAX_PATH_BYTES as STORAGE_MAX_PATH_BYTES,
     MAX_TARGET_METADATA_BYTES as STORAGE_MAX_TARGET_METADATA_BYTES,
-    MAX_TOTAL_BYTES as STORAGE_MAX_TOTAL_BYTES, ManagedStorage, StorageError, scan_import,
-    validate_canonical_path,
+    MAX_TOTAL_BYTES as STORAGE_MAX_TOTAL_BYTES, ManagedStorage, PersistedExport, PersistedProposal,
+    PersistedPublication, ProjectMetadataUpdate, RecoveryPointKind, RecoveryPointSummary,
+    RecoveryReader, StorageError, scan_import, validate_canonical_path,
+    validate_project_display_name,
+};
+use synapse_sidecar::{
+    ProposalInput as SidecarProposalInput, ReviewOutcome, SidecarConfig, SidecarDecisionReceipt,
+    SidecarError, SynapseSidecar,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -78,14 +103,21 @@ const MAX_TARGETS_PER_PROJECT: usize = 32;
 const MAX_CONTEXTS_PER_PROJECT: usize = 32;
 const MAX_PENDING_APPROVALS: usize = 32;
 const MAX_EXPORTS: usize = 16;
+const MAX_PUBLICATIONS: usize = 16;
 const MAX_RETAINED_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONTEXT_FILES: usize = 10;
 const MAX_CONTEXT_FILE_BYTES: usize = 512 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const SYNAPSE_GRANT_EXPIRES_AT: &str = "2100-01-01T00:00:00.000000000Z";
 
 const BLANK_INDEX: &str = include_str!("../../../templates/blank/index.html");
 const BLANK_STYLES: &str = include_str!("../../../templates/blank/styles.css");
 const PREVIEW_TARGET_RUNTIME: &str = include_str!("preview_target_runtime.js");
+const PREVIEW_NON_HTML_CSP: &str = "sandbox; default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self'; script-src 'none'; script-src-elem 'none'; script-src-attr 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; connect-src 'none'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; navigate-to 'none'; frame-ancestors 'none'";
+
+tokio::task_local! {
+    static REQUEST_OPERATION_ID: String;
+}
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -138,7 +170,8 @@ struct InnerState {
     config: ServerConfig,
     preview_port: u16,
     preview_secret: [u8; 32],
-    storage: ManagedStorage,
+    storage: Option<ManagedStorage>,
+    recovery: Option<RecoveryReader>,
     store: Mutex<Store>,
 }
 
@@ -165,6 +198,8 @@ impl StudioState {
         }
         let mut store = Store::default();
         for persisted in persisted {
+            let persisted_exports = persisted.exports;
+            let persisted_publications = persisted.publications;
             let calculated_artifact_manifest_sha256 =
                 manifest_digest(&persisted.files).map_err(|_| {
                     std::io::Error::new(
@@ -202,31 +237,131 @@ impl StudioState {
                     ));
                 }
             }
-            store.projects.insert(
-                persisted.id.clone(),
-                Project {
-                    id: persisted.id,
-                    display_name: persisted.display_name,
-                    revision_id: persisted.revision_id,
-                    accepted_files: persisted.files,
-                    accepted_manifest_sha256: persisted.artifact_manifest_sha256,
-                    targets,
-                    contexts: HashMap::new(),
-                    proposal: None,
-                },
-            );
+            let project_id = persisted.id.clone();
+            let mut project = Project {
+                id: persisted.id,
+                display_name: persisted.display_name,
+                revision_id: persisted.revision_id,
+                accepted_files: persisted.files,
+                accepted_manifest_sha256: persisted.artifact_manifest_sha256,
+                targets,
+                contexts: HashMap::new(),
+                proposal: None,
+                history: Vec::new(),
+            };
+            let recovered_reviews =
+                recover_persisted_proposals(&storage, &mut project, persisted.proposals)?;
+            for review_id in recovered_reviews {
+                if store
+                    .reviews
+                    .insert(review_id, project_id.clone())
+                    .is_some()
+                {
+                    return Err(invalid_persisted_state(
+                        "persisted review identifiers are not unique",
+                    ));
+                }
+            }
+            for persisted_export in persisted_exports {
+                let (export_id, artifact) =
+                    recover_persisted_export(&storage, &project_id, persisted_export)?;
+                let retained_bytes = store
+                    .exports
+                    .values()
+                    .try_fold(0_usize, |total, existing: &ExportArtifact| {
+                        total.checked_add(existing.bytes.len())
+                    });
+                if store.exports.len() >= MAX_EXPORTS
+                    || retained_bytes
+                        .and_then(|total| total.checked_add(artifact.bytes.len()))
+                        .is_none_or(|total| total > MAX_RETAINED_EXPORT_BYTES)
+                    || store.exports.insert(export_id, artifact).is_some()
+                {
+                    return Err(invalid_persisted_state(
+                        "persisted export retention limits do not validate",
+                    ));
+                }
+            }
+            for persisted_publication in persisted_publications {
+                let (publication_id, artifact) =
+                    recover_persisted_publication(&storage, &project_id, persisted_publication)?;
+                let retained_bytes = store
+                    .publications
+                    .values()
+                    .try_fold(0_usize, |total, existing: &PublicationArtifact| {
+                        total.checked_add(existing.bytes.len())
+                    });
+                if store.publications.len() >= MAX_PUBLICATIONS
+                    || retained_bytes
+                        .and_then(|total| total.checked_add(artifact.bytes.len()))
+                        .is_none_or(|total| total > MAX_RETAINED_EXPORT_BYTES)
+                    || store
+                        .publications
+                        .insert(publication_id, artifact)
+                        .is_some()
+                {
+                    return Err(invalid_persisted_state(
+                        "persisted publication retention limits do not validate",
+                    ));
+                }
+            }
+            store.projects.insert(project_id, project);
+        }
+        let recovery = ManagedStorage::open_recovery(&config.state_root)
+            .map_err(storage_initialization_error)?;
+        Ok(Self(Arc::new(InnerState {
+            config,
+            preview_port,
+            preview_secret,
+            storage: Some(storage),
+            recovery: Some(recovery),
+            store: Mutex::new(store),
+        })))
+    }
+
+    pub fn new_recovery(config: ServerConfig) -> std::io::Result<Self> {
+        let preview_port = validate_preview_scope_origin(&config.preview_origin)?;
+        let mut preview_secret = [0_u8; 32];
+        getrandom::fill(&mut preview_secret)
+            .map_err(|_| std::io::Error::other("could not initialize preview isolation"))?;
+        let recovery = ManagedStorage::open_recovery(&config.state_root)
+            .map_err(storage_initialization_error)?;
+        let points = recovery
+            .list_points()
+            .map_err(storage_initialization_error)?;
+        if !points.iter().any(|point| point.diagnostic.verified) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed storage has no verified read-only recovery point",
+            ));
         }
         Ok(Self(Arc::new(InnerState {
             config,
             preview_port,
             preview_secret,
-            storage,
-            store: Mutex::new(store),
+            storage: None,
+            recovery: Some(recovery),
+            store: Mutex::new(Store::default()),
         })))
     }
 
     fn store(&self) -> Result<MutexGuard<'_, Store>, ApiError> {
         self.0.store.lock().map_err(|_| ApiError::internal())
+    }
+
+    fn storage(&self) -> Result<&ManagedStorage, ApiError> {
+        self.0.storage.as_ref().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::LOCKED,
+                "read_only_recovery",
+                "Managed storage is in read-only recovery mode.",
+                false,
+            )
+        })
+    }
+
+    fn recovery(&self) -> Option<&RecoveryReader> {
+        self.0.recovery.as_ref()
     }
 }
 
@@ -237,8 +372,9 @@ struct Store {
     reviews: HashMap<String, String>,
     approvals: HashMap<[u8; 32], ApprovalGrant>,
     exports: HashMap<String, ExportArtifact>,
+    publications: HashMap<String, PublicationArtifact>,
     import_previews: HashMap<String, ImportPreviewRecord>,
-    active_attempts: HashMap<String, String>,
+    ai_attempts: AiAttempts,
 }
 
 struct ImportPreviewRecord {
@@ -261,6 +397,7 @@ struct Project {
     targets: HashMap<String, TargetRecord>,
     contexts: HashMap<String, ContextRecord>,
     proposal: Option<ProposalRecord>,
+    history: Vec<HistoryRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -513,12 +650,15 @@ struct UntrustedSiteContent {
     quoted_untrusted_data: bool,
 }
 
+#[derive(Clone)]
 struct ProposalRecord {
     id: String,
     review_id: String,
     base_revision_id: String,
+    base_artifact_manifest_sha256: String,
     artifact_manifest_sha256: String,
     review_context_sha256: String,
+    review_context_json: String,
     provider_context_sha256: String,
     change_set_sha256: String,
     change_set: ChangeSetV1,
@@ -528,14 +668,952 @@ struct ProposalRecord {
     unified_diff: String,
     validation: ProposalValidationDto,
     proposed_files: BTreeMap<String, Vec<u8>>,
-    pending: PendingArtifactProposal,
     status: ProposalStatus,
+    review_outcome: ProposalReviewOutcome,
+    target: TargetRecord,
+    instruction: String,
+    recorded_at: String,
+    grant_expires_at: String,
+    planned_revision_id: String,
+    derived_from_proposal_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProposalStatus {
+    PendingReview,
+    Adopted,
+    Rejected,
+    Deferred,
+    Stale,
+    Failed,
+    Incomplete,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProposalStatus {
+enum ProposalReviewOutcome {
     PendingReview,
-    Committed,
+    RetryableFailure,
+    OutcomeUnknown,
+    TerminalDenial,
+}
+
+#[derive(Clone)]
+struct HistoryRecord {
+    proposal_id: String,
+    review_id: String,
+    base_revision_id: String,
+    base_artifact_manifest_sha256: String,
+    resulting_revision_id: String,
+    artifact_manifest_sha256: String,
+    resulting_accepted_manifest_sha256: String,
+    provider_id: String,
+    reported_model: String,
+    disposition: DispositionDto,
+    decision_receipt_sha256: String,
+    recorded_at: String,
+    public_note: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedProposalMetadata {
+    schema_version: String,
+    id: String,
+    base_revision_id: String,
+    base_artifact_manifest_sha256: String,
+    planned_revision_id: String,
+    artifact_manifest_sha256: String,
+    review_context_sha256: String,
+    review_context_json: String,
+    provider_context_sha256: String,
+    change_set_sha256: String,
+    change_set: ChangeSetV1,
+    attribution: ProviderAttribution,
+    summary: String,
+    changes: Vec<ProposalChangeDto>,
+    unified_diff: String,
+    validation: ProposalValidationDto,
+    target: TargetRecord,
+    instruction: String,
+    recorded_at: String,
+    grant_expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    derived_from_proposal_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedProposalBinding {
+    schema_version: String,
+    contract: String,
+    contract_version: u32,
+    proposal_id: String,
+    review_id: String,
+    base_artifact_manifest_sha256: String,
+    artifact_manifest_sha256: String,
+    review_context_sha256: String,
+    source_attribution: String,
+    execution_verified: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedDecisionMetadata {
+    schema_version: String,
+    proposal_id: String,
+    review_id: String,
+    base_revision_id: String,
+    base_artifact_manifest_sha256: String,
+    resulting_revision_id: String,
+    disposition: DispositionDto,
+    reviewed_artifact_manifest_sha256: String,
+    decision_receipt_sha256: String,
+    recorded_at: String,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedDecisionCompletion {
+    schema_version: String,
+    proposal_id: String,
+    review_id: String,
+    disposition: DispositionDto,
+    resulting_revision_id: String,
+    resulting_accepted_manifest_sha256: String,
+    decision_receipt_sha256: String,
+}
+
+struct RecoveredProposalDisk {
+    metadata: PersistedProposalMetadata,
+    binding: Option<PersistedProposalBinding>,
+    decision: Option<PersistedDecisionMetadata>,
+    completion: Option<PersistedDecisionCompletion>,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+type AdoptRecovery = (String, String, String, String, BTreeMap<String, Vec<u8>>);
+
+fn invalid_persisted_state(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+fn persisted_result<T>(value: Result<T, impl fmt::Debug>) -> std::io::Result<T> {
+    value.map_err(|_| invalid_persisted_state("persisted Proposal state does not validate"))
+}
+
+fn recover_persisted_export(
+    storage: &ManagedStorage,
+    expected_project_id: &str,
+    persisted: PersistedExport,
+) -> std::io::Result<(String, ExportArtifact)> {
+    if persisted.project_id != expected_project_id
+        || raw_sha256(&persisted.archive_zip) != persisted.archive_sha256
+    {
+        return Err(invalid_persisted_state(
+            "persisted export binding does not validate",
+        ));
+    }
+    let receipt: static_export::ExportReceiptV1 =
+        serde_json::from_slice(&persisted.receipt_json)
+            .map_err(|_| invalid_persisted_state("persisted export receipt does not validate"))?;
+    let mut canonical_receipt = serde_json::to_vec(&receipt)
+        .map_err(|_| invalid_persisted_state("persisted export receipt does not validate"))?;
+    canonical_receipt.push(b'\n');
+    if canonical_receipt != persisted.receipt_json
+        || receipt.source_revision_id != persisted.revision_id
+        || receipt.archive.sha256 != persisted.archive_sha256
+        || receipt.archive.byte_length != persisted.archive_zip.len()
+    {
+        return Err(invalid_persisted_state(
+            "persisted export receipt binding does not validate",
+        ));
+    }
+    storage
+        .verify_retained_revision(
+            expected_project_id,
+            &persisted.revision_id,
+            &receipt.source_manifest_sha256,
+        )
+        .map_err(|_| {
+            invalid_persisted_state("persisted export revision binding does not validate")
+        })?;
+    let files = persisted_archive_files(&persisted.archive_zip)?;
+    let regenerated = generate_static_export(&StaticExportInput {
+        source_revision_id: &receipt.source_revision_id,
+        source_manifest_sha256: &receipt.source_manifest_sha256,
+        generated_at_utc: &receipt.generated_at_utc,
+        entry_point: &receipt.options.entry_point,
+        files: &files,
+    })
+    .map_err(|_| invalid_persisted_state("persisted export cannot be reproduced"))?;
+    if regenerated.receipt != receipt
+        || regenerated.receipt_json != persisted.receipt_json
+        || regenerated.zip_bytes != persisted.archive_zip
+    {
+        return Err(invalid_persisted_state(
+            "persisted export bytes are not reproducible",
+        ));
+    }
+    let id = persisted.id;
+    Ok((
+        id,
+        ExportArtifact {
+            project_id: persisted.project_id,
+            revision_id: persisted.revision_id,
+            sha256: persisted.archive_sha256,
+            bytes: persisted.archive_zip,
+        },
+    ))
+}
+
+fn recover_persisted_publication(
+    storage: &ManagedStorage,
+    expected_project_id: &str,
+    persisted: PersistedPublication,
+) -> std::io::Result<(String, PublicationArtifact)> {
+    if persisted.project_id != expected_project_id
+        || raw_sha256(&persisted.archive_zip) != persisted.archive_sha256
+    {
+        return Err(invalid_persisted_state(
+            "persisted publication binding does not validate",
+        ));
+    }
+    let metadata: PersistedPublicationBundleMetadata =
+        serde_json::from_slice(&persisted.bundle_metadata_json).map_err(|_| {
+            invalid_persisted_state("persisted publication metadata does not validate")
+        })?;
+    let mut canonical_metadata = serde_json::to_vec(&metadata)
+        .map_err(|_| invalid_persisted_state("persisted publication metadata does not validate"))?;
+    canonical_metadata.push(b'\n');
+    if canonical_metadata != persisted.bundle_metadata_json
+        || metadata.schema_version != SCHEMA_VERSION
+        || metadata.publication_id != persisted.id
+        || metadata.project_id != persisted.project_id
+        || metadata.revision_id != persisted.revision_id
+        || metadata.archive_sha256 != persisted.archive_sha256
+        || metadata.archive_byte_length != persisted.archive_zip.len()
+        || metadata.network_writes
+        || metadata.remote_publication != "separate_human_action"
+    {
+        return Err(invalid_persisted_state(
+            "persisted publication metadata binding does not validate",
+        ));
+    }
+    storage
+        .verify_retained_revision(
+            expected_project_id,
+            &persisted.revision_id,
+            &metadata.accepted_manifest_sha256,
+        )
+        .map_err(|_| {
+            invalid_persisted_state("persisted publication revision binding does not validate")
+        })?;
+
+    let mut files = BTreeMap::new();
+    let mut previous_path: Option<&str> = None;
+    let mut total_bytes = 0_usize;
+    for file in &metadata.files {
+        if previous_path.is_some_and(|previous| previous >= file.path.as_str())
+            || validate_canonical_path(&file.path).is_err()
+            || file.media_type
+                != mime_guess::from_path(&file.path)
+                    .first_or_octet_stream()
+                    .essence_str()
+            || file.sha256 != raw_sha256(file.utf8.as_bytes())
+            || file.byte_length != file.utf8.len()
+        {
+            return Err(invalid_persisted_state(
+                "persisted publication file metadata does not validate",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(file.byte_length).ok_or_else(|| {
+            invalid_persisted_state("persisted publication file metadata does not validate")
+        })?;
+        if total_bytes > STORAGE_MAX_TOTAL_BYTES
+            || files
+                .insert(file.path.clone(), file.utf8.as_bytes().to_vec())
+                .is_some()
+        {
+            return Err(invalid_persisted_state(
+                "persisted publication file metadata does not validate",
+            ));
+        }
+        previous_path = Some(file.path.as_str());
+    }
+    if files.is_empty() || files.len() > STORAGE_MAX_FILES {
+        return Err(invalid_persisted_state(
+            "persisted publication file metadata does not validate",
+        ));
+    }
+    let regenerated = deterministic_zip(&files)
+        .map_err(|_| invalid_persisted_state("persisted publication cannot be reproduced"))?;
+    if regenerated != persisted.archive_zip {
+        return Err(invalid_persisted_state(
+            "persisted publication bytes are not reproducible",
+        ));
+    }
+    let id = persisted.id;
+    Ok((
+        id,
+        PublicationArtifact {
+            project_id: persisted.project_id,
+            revision_id: persisted.revision_id,
+            sha256: persisted.archive_sha256,
+            bytes: persisted.archive_zip,
+        },
+    ))
+}
+
+fn persisted_archive_files(bytes: &[u8]) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|_| invalid_persisted_state("persisted ZIP does not validate"))?;
+    if archive.is_empty() || archive.len() > STORAGE_MAX_FILES {
+        return Err(invalid_persisted_state("persisted ZIP does not validate"));
+    }
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_usize;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|_| invalid_persisted_state("persisted ZIP does not validate"))?;
+        let path = file.name().to_owned();
+        if file.is_dir()
+            || file.compression() != CompressionMethod::Stored
+            || validate_canonical_path(&path).is_err()
+            || file.size() > STORAGE_MAX_FILE_BYTES as u64
+        {
+            return Err(invalid_persisted_state("persisted ZIP does not validate"));
+        }
+        let mut contents = Vec::new();
+        (&mut file)
+            .take(STORAGE_MAX_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut contents)
+            .map_err(|_| invalid_persisted_state("persisted ZIP does not validate"))?;
+        if contents.len() != file.size() as usize {
+            return Err(invalid_persisted_state("persisted ZIP does not validate"));
+        }
+        total_bytes = total_bytes
+            .checked_add(contents.len())
+            .ok_or_else(|| invalid_persisted_state("persisted ZIP does not validate"))?;
+        if total_bytes > STORAGE_MAX_TOTAL_BYTES || files.insert(path, contents).is_some() {
+            return Err(invalid_persisted_state("persisted ZIP does not validate"));
+        }
+    }
+    Ok(files)
+}
+
+fn recover_persisted_proposals(
+    storage: &ManagedStorage,
+    project: &mut Project,
+    persisted: Vec<PersistedProposal>,
+) -> std::io::Result<Vec<String>> {
+    storage
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(|_| invalid_persisted_state("persisted Accepted state does not validate"))?;
+    let mut recovered = Vec::new();
+    for proposal in persisted {
+        let Some(metadata_bytes) = proposal.metadata else {
+            if proposal.binding.is_some()
+                || proposal.decision.is_some()
+                || proposal.completion.is_some()
+                || !proposal.files.is_empty()
+            {
+                return Err(invalid_persisted_state(
+                    "an incomplete Proposal staging record escaped recovery",
+                ));
+            }
+            continue;
+        };
+        let metadata: PersistedProposalMetadata =
+            persisted_result(serde_json::from_slice(&metadata_bytes))?;
+        let change_set_json = persisted_result(metadata.change_set.to_json())?;
+        if persisted_result(serde_json::to_vec(&metadata))? != metadata_bytes
+            || metadata.schema_version != SCHEMA_VERSION
+            || metadata.id != proposal.id
+            || !is_opaque_identifier(&metadata.id, "pro_")
+            || !is_opaque_identifier(&metadata.base_revision_id, "rev_")
+            || !is_opaque_identifier(&metadata.planned_revision_id, "rev_")
+            || !is_sha256(&metadata.base_artifact_manifest_sha256)
+            || !is_sha256(&metadata.artifact_manifest_sha256)
+            || !is_sha256(&metadata.review_context_sha256)
+            || !is_sha256(&metadata.provider_context_sha256)
+            || !is_sha256(&metadata.change_set_sha256)
+            || metadata.grant_expires_at != SYNAPSE_GRANT_EXPIRES_AT
+            || !is_canonical_server_timestamp(&metadata.recorded_at)
+            || metadata.summary.trim().is_empty()
+            || metadata.instruction.trim().is_empty()
+            || metadata.change_set.base_revision_id != metadata.base_revision_id
+            || metadata.change_set.summary != metadata.summary
+            || metadata.target.capture_revision_id != metadata.base_revision_id
+            || metadata.attribution.provider_id.is_empty()
+            || metadata.attribution.reported_model.is_empty()
+            || metadata
+                .derived_from_proposal_id
+                .as_deref()
+                .is_some_and(|id| !is_opaque_identifier(id, "pro_"))
+            || validate_target_shape(&metadata.target).is_err()
+            || raw_sha256(change_set_json.as_bytes()) != metadata.change_set_sha256
+            || persisted_result(review_context_sha256(
+                metadata.review_context_json.as_bytes(),
+            ))? != metadata.review_context_sha256
+            || persisted_result(manifest_digest(&proposal.files))?
+                != metadata.artifact_manifest_sha256
+            || !review_context_matches_metadata(&metadata)
+        {
+            return Err(invalid_persisted_state(
+                "persisted Proposal metadata is not canonical or bound",
+            ));
+        }
+        let binding = match proposal.binding {
+            Some(bytes) => {
+                let binding: PersistedProposalBinding =
+                    persisted_result(serde_json::from_slice(&bytes))?;
+                if persisted_result(serde_json::to_vec(&binding))? != bytes {
+                    return Err(invalid_persisted_state(
+                        "persisted Proposal binding is not canonical",
+                    ));
+                }
+                Some(binding)
+            }
+            None => None,
+        };
+        let decision = match proposal.decision {
+            Some(bytes) => {
+                let decision: PersistedDecisionMetadata =
+                    persisted_result(serde_json::from_slice(&bytes))?;
+                if persisted_result(serde_json::to_vec(&decision))? != bytes {
+                    return Err(invalid_persisted_state(
+                        "persisted Decision metadata is not canonical",
+                    ));
+                }
+                Some(decision)
+            }
+            None => None,
+        };
+        let completion = match proposal.completion {
+            Some(bytes) => {
+                let completion: PersistedDecisionCompletion =
+                    persisted_result(serde_json::from_slice(&bytes))?;
+                if persisted_result(serde_json::to_vec(&completion))? != bytes {
+                    return Err(invalid_persisted_state(
+                        "persisted Decision completion is not canonical",
+                    ));
+                }
+                Some(completion)
+            }
+            None => None,
+        };
+        recovered.push(RecoveredProposalDisk {
+            metadata,
+            binding,
+            decision,
+            completion,
+            files: proposal.files,
+        });
+    }
+    recovered.sort_by(|left, right| {
+        left.metadata
+            .recorded_at
+            .cmp(&right.metadata.recorded_at)
+            .then_with(|| left.metadata.id.cmp(&right.metadata.id))
+    });
+    if recovered.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut logical_revision = recovered[0].metadata.base_revision_id.clone();
+    let mut logical_manifest = recovered[0].metadata.base_artifact_manifest_sha256.clone();
+    let mut review_ids = Vec::new();
+    let mut active: Option<ProposalRecord> = None;
+    let mut last_adopt_recovery: Option<AdoptRecovery> = None;
+    let mut completion_records = Vec::new();
+    let recovered_length = recovered.len();
+
+    for (index, disk) in recovered.into_iter().enumerate() {
+        if disk.metadata.base_revision_id != logical_revision
+            || disk.metadata.base_artifact_manifest_sha256 != logical_manifest
+        {
+            return Err(invalid_persisted_state(
+                "persisted Proposal lineage is not sequential",
+            ));
+        }
+        let sidecar = open_recovery_sidecar(storage, &project.id, &disk.metadata)?;
+        let binding = match disk.binding {
+            Some(binding) => binding,
+            None => {
+                if project.revision_id != disk.metadata.base_revision_id
+                    || project.accepted_manifest_sha256
+                        != disk.metadata.base_artifact_manifest_sha256
+                {
+                    return Err(invalid_persisted_state(
+                        "an unbound Proposal no longer matches Accepted",
+                    ));
+                }
+                let accepted = persisted_result(manifest(&project.accepted_files))?;
+                let proposed = persisted_result(manifest(&disk.files))?;
+                let receipt = persisted_result(sidecar.begin_proposal(SidecarProposalInput {
+                    operation_key: &disk.metadata.id,
+                    accepted: &accepted,
+                    proposed: &proposed,
+                    review_context_json: disk.metadata.review_context_json.as_bytes(),
+                }))?;
+                let binding = proposal_binding_from_receipt(&disk.metadata.id, &receipt);
+                validate_recovered_binding(&disk.metadata, &binding)?;
+                let bytes = persisted_result(serde_json::to_vec(&binding))?;
+                storage
+                    .persist_proposal_binding(&project.id, &disk.metadata.id, &bytes)
+                    .map_err(|_| {
+                        invalid_persisted_state("recovered Proposal binding could not be persisted")
+                    })?;
+                binding
+            }
+        };
+        validate_recovered_binding(&disk.metadata, &binding)?;
+        let inspected = persisted_result(sidecar.inspect_proposal(&binding.review_id))?;
+        let inspected_binding = proposal_binding_from_receipt(&disk.metadata.id, &inspected);
+        validate_recovered_binding(&disk.metadata, &inspected_binding)?;
+        if inspected_binding.review_id != binding.review_id {
+            return Err(invalid_persisted_state(
+                "persisted review locator does not match SynapseGit",
+            ));
+        }
+        let outcome = persisted_result(sidecar.resume(&binding.review_id))?;
+        let (decision, receipt) = match (disk.decision, outcome) {
+            (Some(decision), ReviewOutcome::DecisionCommitted(receipt)) => {
+                validate_recovered_decision(&disk.metadata, &binding, &decision, &receipt)?;
+                (decision, receipt)
+            }
+            (Some(_), _) => {
+                return Err(invalid_persisted_state(
+                    "local Decision metadata is not committed in SynapseGit",
+                ));
+            }
+            (None, ReviewOutcome::DecisionCommitted(receipt)) => {
+                let disposition = DispositionDto::from_artifact(receipt.disposition);
+                let resulting_revision_id = match disposition {
+                    DispositionDto::AdoptedUnchanged => disk.metadata.planned_revision_id.clone(),
+                    DispositionDto::Rejected | DispositionDto::Deferred => {
+                        disk.metadata.base_revision_id.clone()
+                    }
+                };
+                let decision = PersistedDecisionMetadata {
+                    schema_version: SCHEMA_VERSION.to_owned(),
+                    proposal_id: disk.metadata.id.clone(),
+                    review_id: binding.review_id.clone(),
+                    base_revision_id: disk.metadata.base_revision_id.clone(),
+                    base_artifact_manifest_sha256: disk
+                        .metadata
+                        .base_artifact_manifest_sha256
+                        .clone(),
+                    resulting_revision_id,
+                    disposition,
+                    reviewed_artifact_manifest_sha256: receipt
+                        .reviewed_artifact_manifest_sha256
+                        .clone(),
+                    decision_receipt_sha256: persisted_result(durable_decision_receipt_sha256(
+                        &receipt,
+                        disposition,
+                    ))?,
+                    recorded_at: disk.metadata.recorded_at.clone(),
+                };
+                validate_recovered_decision(&disk.metadata, &binding, &decision, &receipt)?;
+                let bytes = persisted_result(serde_json::to_vec(&decision))?;
+                storage
+                    .persist_decision_metadata(&project.id, &disk.metadata.id, &bytes)
+                    .map_err(|_| {
+                        invalid_persisted_state("recovered Decision receipt could not be persisted")
+                    })?;
+                (decision, receipt)
+            }
+            (None, pending) => {
+                if index + 1 != recovered_length || active.is_some() {
+                    return Err(invalid_persisted_state(
+                        "a non-terminal Proposal is not the latest operation",
+                    ));
+                }
+                let (review_outcome, status) = match pending {
+                    ReviewOutcome::PendingReview => (
+                        ProposalReviewOutcome::PendingReview,
+                        ProposalStatus::PendingReview,
+                    ),
+                    ReviewOutcome::RetryableFailure => (
+                        ProposalReviewOutcome::RetryableFailure,
+                        ProposalStatus::PendingReview,
+                    ),
+                    ReviewOutcome::OutcomeUnknown => (
+                        ProposalReviewOutcome::OutcomeUnknown,
+                        ProposalStatus::PendingReview,
+                    ),
+                    ReviewOutcome::TerminalDenial => (
+                        ProposalReviewOutcome::TerminalDenial,
+                        ProposalStatus::Failed,
+                    ),
+                    ReviewOutcome::DecisionCommitted(_) => {
+                        return Err(invalid_persisted_state(
+                            "Decision recovery entered an invalid state",
+                        ));
+                    }
+                };
+                validate_active_proposal_projection(project, &disk.metadata, &disk.files)?;
+                active = Some(proposal_record_from_disk(
+                    disk.metadata,
+                    binding.clone(),
+                    disk.files,
+                    status,
+                    review_outcome,
+                ));
+                review_ids.push(binding.review_id.clone());
+                continue;
+            }
+        };
+        let expected_completion = expected_decision_completion(&disk.metadata, &binding, &decision);
+        let completion_missing = match disk.completion {
+            Some(completion) if completion == expected_completion => false,
+            Some(_) => {
+                return Err(invalid_persisted_state(
+                    "persisted Decision completion does not match its receipt",
+                ));
+            }
+            None => true,
+        };
+        completion_records.push((
+            disk.metadata.id.clone(),
+            expected_completion,
+            completion_missing,
+        ));
+        if decision.disposition == DispositionDto::AdoptedUnchanged {
+            last_adopt_recovery = Some((
+                disk.metadata.base_revision_id.clone(),
+                disk.metadata.base_artifact_manifest_sha256.clone(),
+                decision.resulting_revision_id.clone(),
+                disk.metadata.artifact_manifest_sha256.clone(),
+                disk.files.clone(),
+            ));
+            logical_revision = decision.resulting_revision_id.clone();
+            logical_manifest = disk.metadata.artifact_manifest_sha256.clone();
+        }
+        project.history.push(HistoryRecord {
+            proposal_id: disk.metadata.id,
+            review_id: binding.review_id.clone(),
+            base_revision_id: disk.metadata.base_revision_id,
+            base_artifact_manifest_sha256: disk.metadata.base_artifact_manifest_sha256,
+            resulting_revision_id: decision.resulting_revision_id,
+            artifact_manifest_sha256: disk.metadata.artifact_manifest_sha256,
+            resulting_accepted_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+            provider_id: disk.metadata.attribution.provider_id,
+            reported_model: disk.metadata.attribution.reported_model,
+            disposition: decision.disposition,
+            decision_receipt_sha256: decision.decision_receipt_sha256,
+            recorded_at: decision.recorded_at,
+            public_note: None,
+        });
+        review_ids.push(binding.review_id);
+        debug_assert_eq!(
+            receipt.disposition,
+            project
+                .history
+                .last()
+                .expect("history exists")
+                .disposition
+                .artifact()
+        );
+    }
+
+    if project.revision_id != logical_revision
+        || project.accepted_manifest_sha256 != logical_manifest
+    {
+        let Some((base_revision, base_manifest, revision, manifest_sha256, files)) =
+            last_adopt_recovery
+        else {
+            return Err(invalid_persisted_state(
+                "Accepted does not match the durable Decision lineage",
+            ));
+        };
+        if project.revision_id != base_revision
+            || project.accepted_manifest_sha256 != base_manifest
+            || revision != logical_revision
+            || manifest_sha256 != logical_manifest
+        {
+            return Err(invalid_persisted_state(
+                "Accepted recovery precondition does not match",
+            ));
+        }
+        storage
+            .commit_revision(&project.id, &revision, &manifest_sha256, &files)
+            .map_err(|_| invalid_persisted_state("Accepted recovery could not be completed"))?;
+        project.revision_id = revision;
+        project.accepted_manifest_sha256 = manifest_sha256;
+        project.accepted_files = files;
+    }
+    for (proposal_id, completion, missing) in completion_records {
+        storage
+            .verify_retained_revision(
+                &project.id,
+                &completion.resulting_revision_id,
+                &completion.resulting_accepted_manifest_sha256,
+            )
+            .map_err(|_| {
+                invalid_persisted_state(
+                    "Decision completion does not bind a retained Accepted revision",
+                )
+            })?;
+        if missing {
+            let bytes = persisted_result(serde_json::to_vec(&completion))?;
+            storage
+                .persist_decision_completion(&project.id, &proposal_id, &bytes)
+                .map_err(|_| {
+                    invalid_persisted_state("Decision completion could not be persisted")
+                })?;
+        }
+    }
+    project.proposal = active;
+    Ok(review_ids)
+}
+
+fn proposal_binding_from_receipt(
+    proposal_id: &str,
+    receipt: &synapse_sidecar::SidecarProposalReceipt,
+) -> PersistedProposalBinding {
+    PersistedProposalBinding {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        contract: receipt.contract().to_owned(),
+        contract_version: receipt.contract_version(),
+        proposal_id: proposal_id.to_owned(),
+        review_id: receipt.review_id.clone(),
+        base_artifact_manifest_sha256: receipt.base_artifact_manifest_sha256.clone(),
+        artifact_manifest_sha256: receipt.artifact_manifest_sha256.clone(),
+        review_context_sha256: receipt.review_context_sha256.clone(),
+        source_attribution: "caller_supplied_ai_attributed".to_owned(),
+        execution_verified: receipt.execution_verified,
+    }
+}
+
+fn validate_recovered_binding(
+    metadata: &PersistedProposalMetadata,
+    binding: &PersistedProposalBinding,
+) -> std::io::Result<()> {
+    if binding.schema_version != SCHEMA_VERSION
+        || binding.contract != "synapsegit.generic-artifact"
+        || binding.contract_version != 1
+        || binding.proposal_id != metadata.id
+        || binding.review_id.is_empty()
+        || binding.base_artifact_manifest_sha256 != metadata.base_artifact_manifest_sha256
+        || binding.artifact_manifest_sha256 != metadata.artifact_manifest_sha256
+        || binding.review_context_sha256 != metadata.review_context_sha256
+        || binding.source_attribution != "caller_supplied_ai_attributed"
+        || binding.execution_verified
+    {
+        Err(invalid_persisted_state(
+            "persisted Proposal binding does not match its immutable workspace",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_recovered_decision(
+    metadata: &PersistedProposalMetadata,
+    binding: &PersistedProposalBinding,
+    decision: &PersistedDecisionMetadata,
+    receipt: &SidecarDecisionReceipt,
+) -> std::io::Result<()> {
+    let expected_revision = match decision.disposition {
+        DispositionDto::AdoptedUnchanged => metadata.planned_revision_id.as_str(),
+        DispositionDto::Rejected | DispositionDto::Deferred => metadata.base_revision_id.as_str(),
+    };
+    let expected_manifest = match decision.disposition {
+        DispositionDto::AdoptedUnchanged => metadata.artifact_manifest_sha256.as_str(),
+        DispositionDto::Rejected | DispositionDto::Deferred => {
+            metadata.base_artifact_manifest_sha256.as_str()
+        }
+    };
+    if decision.schema_version != SCHEMA_VERSION
+        || decision.proposal_id != metadata.id
+        || decision.review_id != binding.review_id
+        || decision.base_revision_id != metadata.base_revision_id
+        || decision.base_artifact_manifest_sha256 != metadata.base_artifact_manifest_sha256
+        || decision.resulting_revision_id != expected_revision
+        || decision.reviewed_artifact_manifest_sha256 != expected_manifest
+        || decision.disposition.artifact() != receipt.disposition
+        || decision.reviewed_artifact_manifest_sha256 != receipt.reviewed_artifact_manifest_sha256
+        || decision.decision_receipt_sha256
+            != persisted_result(durable_decision_receipt_sha256(
+                receipt,
+                decision.disposition,
+            ))?
+        || decision.recorded_at != metadata.recorded_at
+    {
+        Err(invalid_persisted_state(
+            "persisted Decision receipt does not match SynapseGit",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn expected_decision_completion(
+    metadata: &PersistedProposalMetadata,
+    binding: &PersistedProposalBinding,
+    decision: &PersistedDecisionMetadata,
+) -> PersistedDecisionCompletion {
+    PersistedDecisionCompletion {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        proposal_id: metadata.id.clone(),
+        review_id: binding.review_id.clone(),
+        disposition: decision.disposition,
+        resulting_revision_id: decision.resulting_revision_id.clone(),
+        resulting_accepted_manifest_sha256: decision.reviewed_artifact_manifest_sha256.clone(),
+        decision_receipt_sha256: decision.decision_receipt_sha256.clone(),
+    }
+}
+
+fn open_recovery_sidecar(
+    storage: &ManagedStorage,
+    project_id: &str,
+    metadata: &PersistedProposalMetadata,
+) -> std::io::Result<SynapseSidecar> {
+    let (repository, journal) = storage
+        .synapse_paths(project_id)
+        .map_err(|_| invalid_persisted_state("SynapseGit storage could not be opened"))?;
+    SynapseSidecar::open(SidecarConfig::new(
+        repository,
+        journal,
+        project_id,
+        "Local creator",
+        if metadata.attribution.external {
+            "External AI provider"
+        } else {
+            "Deterministic fake AI"
+        },
+        metadata.recorded_at.clone(),
+        metadata.grant_expires_at.clone(),
+        artifact_limits(),
+    ))
+    .map_err(|_| invalid_persisted_state("SynapseGit durable state does not validate"))
+}
+
+fn proposal_record_from_disk(
+    metadata: PersistedProposalMetadata,
+    binding: PersistedProposalBinding,
+    files: BTreeMap<String, Vec<u8>>,
+    status: ProposalStatus,
+    review_outcome: ProposalReviewOutcome,
+) -> ProposalRecord {
+    ProposalRecord {
+        id: metadata.id,
+        review_id: binding.review_id,
+        base_revision_id: metadata.base_revision_id,
+        base_artifact_manifest_sha256: metadata.base_artifact_manifest_sha256,
+        artifact_manifest_sha256: metadata.artifact_manifest_sha256,
+        review_context_sha256: metadata.review_context_sha256,
+        review_context_json: metadata.review_context_json,
+        provider_context_sha256: metadata.provider_context_sha256,
+        change_set_sha256: metadata.change_set_sha256,
+        change_set: metadata.change_set,
+        attribution: metadata.attribution,
+        summary: metadata.summary,
+        changes: metadata.changes,
+        unified_diff: metadata.unified_diff,
+        validation: metadata.validation,
+        proposed_files: files,
+        status,
+        review_outcome,
+        target: metadata.target,
+        instruction: metadata.instruction,
+        recorded_at: metadata.recorded_at,
+        grant_expires_at: metadata.grant_expires_at,
+        planned_revision_id: metadata.planned_revision_id,
+        derived_from_proposal_id: metadata.derived_from_proposal_id,
+    }
+}
+
+fn review_context_matches_metadata(metadata: &PersistedProposalMetadata) -> bool {
+    let Ok(context) = serde_json::from_str::<Value>(&metadata.review_context_json) else {
+        return false;
+    };
+    let target_digest = serde_json::to_vec(&metadata.target)
+        .ok()
+        .map(|bytes| raw_sha256(&bytes));
+    let provider = context.get("provider");
+    context.get("schema").and_then(Value::as_str)
+        == Some("org.synapsegit-lp-studio.synapse-review-context")
+        && context.get("version").and_then(Value::as_u64) == Some(1)
+        && context.get("baseRevisionId").and_then(Value::as_str)
+            == Some(metadata.base_revision_id.as_str())
+        && context.get("changeSetSha256").and_then(Value::as_str)
+            == Some(metadata.change_set_sha256.as_str())
+        && context.get("providerContextSha256").and_then(Value::as_str)
+            == Some(metadata.provider_context_sha256.as_str())
+        && context.get("targetDigest").and_then(Value::as_str) == target_digest.as_deref()
+        && context.get("sourceAttribution").and_then(Value::as_str)
+            == Some("caller_supplied_ai_attributed")
+        && context.get("executionVerified").and_then(Value::as_bool) == Some(false)
+        && provider
+            .and_then(|value| value.get("providerId"))
+            .and_then(Value::as_str)
+            == Some(metadata.attribution.provider_id.as_str())
+        && provider
+            .and_then(|value| value.get("providerRequestId"))
+            .and_then(Value::as_str)
+            == Some(metadata.attribution.provider_request_id.as_str())
+        && provider
+            .and_then(|value| value.get("adapterVersion"))
+            .and_then(Value::as_str)
+            == Some(metadata.attribution.adapter_version.as_str())
+        && provider
+            .and_then(|value| value.get("requestedModel"))
+            .and_then(Value::as_str)
+            == Some(metadata.attribution.requested_model.as_str())
+        && provider
+            .and_then(|value| value.get("reportedModel"))
+            .and_then(Value::as_str)
+            == Some(metadata.attribution.reported_model.as_str())
+}
+
+fn validate_active_proposal_projection(
+    project: &Project,
+    metadata: &PersistedProposalMetadata,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> std::io::Result<()> {
+    if project.revision_id != metadata.base_revision_id
+        || project.accepted_manifest_sha256 != metadata.base_artifact_manifest_sha256
+    {
+        return Err(invalid_persisted_state(
+            "active Proposal base no longer matches Accepted",
+        ));
+    }
+    let change_set_json = persisted_result(metadata.change_set.to_json())?;
+    let mut applied = persisted_result(parse_and_apply_change_set(
+        &change_set_json,
+        &metadata.base_revision_id,
+        &project.accepted_files,
+    ))?;
+    applied
+        .checks
+        .push(persisted_result(proposal_target_reresolution_check(
+            &metadata.target,
+            &applied.files,
+            &metadata.base_revision_id,
+        ))?);
+    let (changes, validation) = proposal_review_details(&applied);
+    if applied.files != *files
+        || applied.change_set != metadata.change_set
+        || applied.unified_diff != metadata.unified_diff
+        || persisted_result(serde_json::to_vec(&changes))?
+            != persisted_result(serde_json::to_vec(&metadata.changes))?
+        || persisted_result(serde_json::to_vec(&validation))?
+            != persisted_result(serde_json::to_vec(&metadata.validation))?
+    {
+        return Err(invalid_persisted_state(
+            "active Proposal review projection is not reproducible",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -560,6 +1638,28 @@ struct ExportArtifact {
     revision_id: String,
     sha256: String,
     bytes: Vec<u8>,
+}
+
+struct PublicationArtifact {
+    project_id: String,
+    revision_id: String,
+    sha256: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedPublicationBundleMetadata {
+    schema_version: String,
+    publication_id: String,
+    project_id: String,
+    revision_id: String,
+    accepted_manifest_sha256: String,
+    archive_sha256: String,
+    archive_byte_length: usize,
+    files: Vec<PublicationFileDto>,
+    network_writes: bool,
+    remote_publication: String,
 }
 
 #[derive(Serialize)]
@@ -607,6 +1707,8 @@ struct SessionDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapabilitiesDto {
+    operating_mode: &'static str,
+    recovery_point_count: usize,
     target_kinds: [&'static str; 6],
     dispositions: [&'static str; 3],
     single_proposal_per_project: bool,
@@ -635,6 +1737,33 @@ struct ProjectDto {
     preview_url: String,
     accepted_manifest_sha256: String,
     files: Vec<ProjectFileDto>,
+    active_review: Option<ActiveReviewDto>,
+    history: Vec<ProjectHistoryEntryDto>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ActiveReviewDto {
+    review_id: String,
+    proposal_id: String,
+    base_revision_id: String,
+    status: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ProjectHistoryEntryDto {
+    review_id: String,
+    proposal_id: String,
+    base_revision_id: String,
+    base_artifact_manifest_sha256: String,
+    resulting_revision_id: String,
+    disposition: DispositionDto,
+    artifact_manifest_sha256: String,
+    resulting_accepted_manifest_sha256: String,
+    decision_receipt_sha256: String,
+    recorded_at: String,
+    public_note: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -659,6 +1788,14 @@ struct ProjectsPayload {
 struct CreateProjectRequest {
     schema_version: String,
     template: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateProjectMetadataRequest {
+    schema_version: String,
+    expected_display_name: String,
+    display_name: String,
 }
 
 #[derive(Deserialize)]
@@ -751,6 +1888,20 @@ struct CreateProposalRequest {
     context_sha256: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CancelAiAttemptRequest {
+    schema_version: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiAttemptStatusDto {
+    schema_version: &'static str,
+    attempt_id: String,
+    status: &'static str,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProposalDto {
@@ -771,29 +1922,34 @@ struct ProposalDto {
     changes: Vec<ProposalChangeDto>,
     unified_diff: String,
     validation: ProposalValidationDto,
+    target: TargetRecord,
+    target_resolution: TargetResolution,
+    instruction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    derived_from_proposal_id: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProposalChangeDto {
     path: String,
-    kind: &'static str,
+    kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     from_path: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ProposalValidationDto {
-    status: &'static str,
+    status: String,
     checks: Vec<ProposalValidationCheckDto>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProposalValidationCheckDto {
     id: String,
     label: String,
-    status: &'static str,
+    status: String,
     message: String,
     blocking: bool,
     destinations: Vec<String>,
@@ -804,7 +1960,7 @@ struct ProposalPayload {
     proposal: ProposalDto,
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DispositionDto {
     AdoptedUnchanged,
@@ -818,6 +1974,14 @@ impl DispositionDto {
             Self::AdoptedUnchanged => ArtifactDisposition::AdoptedUnchanged,
             Self::Rejected => ArtifactDisposition::Rejected,
             Self::Deferred => ArtifactDisposition::Deferred,
+        }
+    }
+
+    fn from_artifact(disposition: ArtifactDisposition) -> Self {
+        match disposition {
+            ArtifactDisposition::AdoptedUnchanged => Self::AdoptedUnchanged,
+            ArtifactDisposition::Rejected => Self::Rejected,
+            ArtifactDisposition::Deferred => Self::Deferred,
         }
     }
 }
@@ -874,6 +2038,38 @@ struct DecisionPayload {
     project: ProjectDto,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewDto {
+    review_id: String,
+    project_id: String,
+    proposal_id: String,
+    status: &'static str,
+    reconciliation_required: bool,
+    proposal: Option<ProposalDto>,
+    decision: Option<ReviewDecisionDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewDecisionDto {
+    proposal_id: String,
+    disposition: DispositionDto,
+    revision_id: String,
+    artifact_manifest_sha256: String,
+}
+
+#[derive(Serialize)]
+struct ReviewPayload {
+    review: ReviewDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileReviewRequest {
+    schema_version: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateExportRequest {
@@ -889,12 +2085,196 @@ struct ExportDto {
     sha256: String,
     byte_length: usize,
     download_url: String,
+    receipt_sha256: String,
+    source_manifest_sha256: String,
+    generated_at_utc: String,
+    options: ExportOptionsV1,
+    file_manifest: ExportFileManifestV1,
+    validation: ExportValidationReportV1,
+    archive: ExportArchiveIdentityV1,
 }
 
 #[derive(Serialize)]
 struct ExportPayload {
     #[serde(rename = "export")]
     receipt: ExportDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreatePublicationRequest {
+    schema_version: String,
+    revision_id: String,
+    public_label: String,
+    title: String,
+    summary: String,
+    public_decision_note: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicationFileDto {
+    path: String,
+    media_type: String,
+    sha256: String,
+    byte_length: usize,
+    utf8: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicationDto {
+    id: String,
+    revision_id: String,
+    sha256: String,
+    byte_length: usize,
+    files: Vec<PublicationFileDto>,
+    download_url: String,
+    network_writes: bool,
+    remote_publication: &'static str,
+}
+
+#[derive(Serialize)]
+struct PublicationPayload {
+    publication: PublicationDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetainedArtifactSummaryDto {
+    kind: &'static str,
+    id: String,
+    project_id: String,
+    revision_id: String,
+    sha256: String,
+    payload_byte_length: usize,
+    cleanup_impact: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FailedProposalRetentionSummaryDto {
+    proposal_id: String,
+    review_id: String,
+    status: &'static str,
+    payload_byte_length: usize,
+    cleanup_impact: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectRetentionSummaryDto {
+    project_id: String,
+    display_name: String,
+    revision_id: String,
+    accepted_manifest_sha256: String,
+    accepted_file_byte_length: usize,
+    target_count: usize,
+    conversation_context_count: usize,
+    conversation_persistence: &'static str,
+    failed_proposal: Option<FailedProposalRetentionSummaryDto>,
+    terminal_decision_count: usize,
+    artifacts: Vec<RetainedArtifactSummaryDto>,
+    project_deletion_impact: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionInventoryDto {
+    automatic_gc: bool,
+    telemetry: &'static str,
+    cleanup_requires_explicit_confirmation: bool,
+    projects: Vec<ProjectRetentionSummaryDto>,
+}
+
+#[derive(Serialize)]
+struct RetentionPayload {
+    retention: RetentionInventoryDto,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "scope",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum CleanupRetentionRequest {
+    ConversationContext {
+        schema_version: String,
+        project_id: String,
+        confirmation: String,
+    },
+    FailedProposal {
+        schema_version: String,
+        project_id: String,
+        proposal_id: String,
+        review_id: String,
+        confirmation: String,
+    },
+    StaticExport {
+        schema_version: String,
+        project_id: String,
+        artifact_id: String,
+        expected_sha256: String,
+        confirmation: String,
+    },
+    PublicationDraft {
+        schema_version: String,
+        project_id: String,
+        artifact_id: String,
+        expected_sha256: String,
+        confirmation: String,
+    },
+    Project {
+        schema_version: String,
+        project_id: String,
+        expected_revision_id: String,
+        expected_manifest_sha256: String,
+        confirmation: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionRemovalDto {
+    scope: &'static str,
+    id: String,
+    payload_byte_length: usize,
+}
+
+#[derive(Serialize)]
+struct RetentionCleanupPayload {
+    removed: RetentionRemovalDto,
+    retention: RetentionInventoryDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryDiagnosticDto {
+    verified: bool,
+    code: &'static str,
+    manifest_sha256: Option<String>,
+    file_count: usize,
+    total_bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryPointDto {
+    id: String,
+    kind: &'static str,
+    project_id: Option<String>,
+    revision_id: Option<String>,
+    artifact_manifest_sha256: Option<String>,
+    diagnostic: RecoveryDiagnosticDto,
+    export_url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryPayload {
+    recovery_points: Vec<RecoveryPointDto>,
 }
 
 #[derive(Serialize)]
@@ -910,7 +2290,16 @@ struct ErrorDto {
     code: &'static str,
     message: &'static str,
     request_id: String,
+    operation_id: String,
     retryable: bool,
+    detail: ErrorDetailDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ErrorDetailDto {
+    accepted_state: &'static str,
+    recovery_action: &'static str,
 }
 
 struct ApiError {
@@ -997,6 +2386,37 @@ impl ApiError {
             false,
         )
     }
+
+    fn detail(&self) -> ErrorDetailDto {
+        if matches!(
+            self.code,
+            "decision_outcome_unknown" | "decision_reconciliation_required"
+        ) {
+            return ErrorDetailDto {
+                accepted_state: "reconciliation_required",
+                recovery_action: "reconcile",
+            };
+        }
+        if self.code == "internal_error" {
+            return ErrorDetailDto {
+                accepted_state: "reconciliation_required",
+                recovery_action: "refresh",
+            };
+        }
+        let recovery_action = if self.code == "read_only_recovery" {
+            "manual_recovery"
+        } else if self.retryable {
+            "retry"
+        } else if self.status == StatusCode::CONFLICT || self.status == StatusCode::NOT_FOUND {
+            "refresh"
+        } else {
+            "correct_request"
+        };
+        ErrorDetailDto {
+            accepted_state: "unchanged",
+            recovery_action,
+        }
+    }
 }
 
 impl fmt::Debug for ApiError {
@@ -1012,18 +2432,97 @@ impl fmt::Debug for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let request_id = opaque_id("req");
+        let operation_id = REQUEST_OPERATION_ID
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| opaque_id("op"));
+        let detail = self.detail();
         let body = ErrorEnvelope {
             schema_version: SCHEMA_VERSION,
             error: ErrorDto {
                 code: self.code,
                 message: self.message,
-                request_id: opaque_id("req"),
+                request_id: request_id.clone(),
+                operation_id: operation_id.clone(),
                 retryable: self.retryable,
+                detail,
             },
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if let Ok(value) = HeaderValue::from_str(&request_id) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("x-request-id"), value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&operation_id) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("x-operation-id"), value);
+        }
+        response.headers_mut().insert(
+            HeaderName::from_static("x-error-code"),
+            HeaderValue::from_static(self.code),
+        );
+        response
     }
 }
+
+async fn observe_request(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let operation_id = opaque_id("op");
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(OperationContext(operation_id.clone()));
+    let method = request.method().as_str().to_owned();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+    let mut response = REQUEST_OPERATION_ID
+        .scope(operation_id.clone(), next.run(request))
+        .await;
+    let correlation_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| operation_id.clone());
+    if !response.headers().contains_key("x-request-id")
+        && let Ok(value) = HeaderValue::from_str(&correlation_id)
+    {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&operation_id) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-operation-id"), value);
+    }
+    let error_code = response
+        .headers()
+        .get("x-error-code")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none");
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        operation_id,
+        correlation_id,
+        method,
+        route,
+        status = response.status().as_u16(),
+        error_code,
+        duration_ms,
+        version = env!("CARGO_PKG_VERSION"),
+        "local request completed"
+    );
+    response
+}
+
+#[derive(Clone)]
+struct OperationContext(String);
 
 enum PreviewError {
     NotFound,
@@ -1273,6 +2772,84 @@ fn change_set_api_error(error: ChangeSetError) -> ApiError {
     )
 }
 
+fn sidecar_api_error(error: SidecarError) -> ApiError {
+    match error {
+        SidecarError::StaleBase => ApiError::conflict("stale_proposal"),
+        SidecarError::ActiveReview => ApiError::conflict("active_review"),
+        SidecarError::IdempotencyConflict => ApiError::conflict("idempotency_conflict"),
+        SidecarError::DecisionIntentExists => ApiError::conflict("decision_intent_exists"),
+        SidecarError::ReviewNotFound => ApiError::not_found(),
+        SidecarError::TerminalState => ApiError::conflict("review_terminal"),
+        SidecarError::Storage => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "synapsegit_storage_unavailable",
+            "The durable SynapseGit operation store is temporarily unavailable.",
+            true,
+        ),
+        SidecarError::InvalidArgument | SidecarError::Integrity => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "synapsegit_integrity_error",
+            "The durable SynapseGit binding could not be validated.",
+            false,
+        ),
+    }
+}
+
+fn decision_failpoint(failpoint: Failpoint) -> Result<(), ApiError> {
+    check_failpoint(failpoint).map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "injected_test_fault",
+            "A test-only durability fault interrupted the Decision operation.",
+            true,
+        )
+    })
+}
+
+const fn decision_reconciliation_required_error() -> ApiError {
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "decision_reconciliation_required",
+        "The Decision was not confirmed. Reconcile its durable operation before trying again.",
+        true,
+    )
+}
+
+fn decision_completion_result<T, E>(
+    proposal: &mut ProposalRecord,
+    result: Result<T, E>,
+) -> Result<T, ApiError> {
+    result.map_err(|_| {
+        proposal.review_outcome = ProposalReviewOutcome::OutcomeUnknown;
+        decision_reconciliation_required_error()
+    })
+}
+
+fn static_export_api_error(error: StaticExportError) -> ApiError {
+    match error {
+        StaticExportError::ArchiveGeneration | StaticExportError::Serialization => {
+            ApiError::internal()
+        }
+        StaticExportError::EmptyAcceptedSite
+        | StaticExportError::InvalidSourceRevisionId
+        | StaticExportError::InvalidSourceManifest
+        | StaticExportError::InvalidGeneratedAt
+        | StaticExportError::InvalidEntryPoint
+        | StaticExportError::InvalidFilePath(_)
+        | StaticExportError::FilePathCollision
+        | StaticExportError::InvalidTextEncoding(_)
+        | StaticExportError::MalformedMarkup(_)
+        | StaticExportError::UnsupportedBaseElement(_)
+        | StaticExportError::UnsafeReference(_)
+        | StaticExportError::MissingLocalReference { .. } => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "static_export_validation_failed",
+            "The Accepted site does not satisfy the bounded static export profile.",
+            false,
+        ),
+    }
+}
+
 pub fn editor_router(state: StudioState) -> Router {
     let web_dist = state.0.config.web_dist.clone();
     let editor_csp = HeaderValue::from_str(&format!(
@@ -1285,7 +2862,10 @@ pub fn editor_router(state: StudioState) -> Router {
     let api = Router::new()
         .route("/bootstrap", get(bootstrap))
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/{project_id}", get(get_project))
+        .route(
+            "/projects/{project_id}",
+            get(get_project).patch(update_project_metadata),
+        )
         .route("/imports/previews", post(create_import_preview))
         .route(
             "/imports/{preview_id}/confirm",
@@ -1294,10 +2874,35 @@ pub fn editor_router(state: StudioState) -> Router {
         .route("/projects/{project_id}/targets", post(create_target))
         .route("/projects/{project_id}/contexts", post(create_context))
         .route("/projects/{project_id}/proposals", post(create_proposal))
+        .route(
+            "/projects/{project_id}/ai-attempts/{attempt_id}",
+            get(get_ai_attempt_status),
+        )
+        .route(
+            "/projects/{project_id}/ai-attempts/{attempt_id}/cancel",
+            post(cancel_ai_attempt),
+        )
+        .route("/reviews/{review_id}", get(get_review))
         .route("/reviews/{review_id}/approvals", post(create_approval))
         .route("/reviews/{review_id}/decisions", post(create_decision))
+        .route(
+            "/operations/reviews/{review_id}/reconcile",
+            post(reconcile_review),
+        )
         .route("/projects/{project_id}/exports", post(create_export))
         .route("/exports/{export_id}/download", get(download_export))
+        .route(
+            "/projects/{project_id}/publications",
+            post(create_publication),
+        )
+        .route(
+            "/publications/{publication_id}/download",
+            get(download_publication),
+        )
+        .route("/retention", get(get_retention))
+        .route("/retention/cleanup", post(cleanup_retention))
+        .route("/recovery", get(get_recovery_points))
+        .route("/recovery/{point_id}/export", get(download_recovery_export))
         .fallback(api_not_found);
 
     Router::new()
@@ -1313,10 +2918,23 @@ pub fn editor_router(state: StudioState) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-dns-prefetch-control"),
+            HeaderValue::from_static("off"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             editor_csp,
         ))
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::from_fn(observe_request))
         .with_state(state)
 }
 
@@ -1329,6 +2947,10 @@ pub fn preview_router(state: StudioState) -> Router {
             get(preview_file),
         )
         .fallback(preview_not_found)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(PREVIEW_NON_HTML_CSP),
+        ))
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
@@ -1355,6 +2977,7 @@ pub fn preview_router(state: StudioState) -> Router {
                 "accelerometer=(), attribution-reporting=(), autoplay=(), bluetooth=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), storage-access=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()",
             ),
         ))
+        .layer(middleware::from_fn(observe_request))
         .with_state(state)
 }
 
@@ -1389,6 +3012,12 @@ async fn bootstrap(
     sweep_expired_sessions(&mut store, now_unix());
     ensure_capacity(store.sessions.len(), MAX_SESSIONS)?;
     store.sessions.insert(token_hash(&token), session);
+    let recovery_point_count = state
+        .recovery()
+        .map(|reader| reader.list_points())
+        .transpose()
+        .map_err(storage_api_error)?
+        .map_or(0, |points| points.len());
     Ok(Json(Versioned::new(BootstrapPayload {
         api_version: API_VERSION,
         session: SessionDto {
@@ -1398,10 +3027,16 @@ async fn bootstrap(
         editor_origin: state.0.config.editor_origin.clone(),
         preview_origin: state.0.config.preview_origin.clone(),
         capabilities: CapabilitiesDto {
+            operating_mode: if state.0.storage.is_some() {
+                "normal"
+            } else {
+                "read_only_recovery"
+            },
+            recovery_point_count,
             target_kinds: ["page", "block", "element", "text", "point", "region"],
             dispositions: ["adopted_unchanged", "rejected", "deferred"],
             single_proposal_per_project: true,
-            import_available: state.0.config.import_root.is_some(),
+            import_available: state.0.storage.is_some() && state.0.config.import_root.is_some(),
             ai_providers: provider_descriptors(state.0.config.openai.as_ref()),
             limits: StorageLimitsDto {
                 max_files: STORAGE_MAX_FILES,
@@ -1438,12 +3073,12 @@ async fn create_project(
         targets: HashMap::new(),
         contexts: HashMap::new(),
         proposal: None,
+        history: Vec::new(),
     };
     let mut store = state.store()?;
     ensure_capacity(store.projects.len(), MAX_PROJECTS)?;
     state
-        .0
-        .storage
+        .storage()?
         .create_project(
             &project.id,
             &project.display_name,
@@ -1601,6 +3236,7 @@ async fn confirm_import_preview(
         targets: HashMap::new(),
         contexts: HashMap::new(),
         proposal: None,
+        history: Vec::new(),
     };
     let mut store = state.store()?;
     ensure_capacity(store.projects.len(), MAX_PROJECTS)?;
@@ -1616,8 +3252,7 @@ async fn confirm_import_preview(
         return Err(ApiError::conflict("import_preview_expired"));
     }
     state
-        .0
-        .storage
+        .storage()?
         .create_project(
             &project.id,
             &project.display_name,
@@ -1651,6 +3286,58 @@ async fn get_project(
     })))
 }
 
+async fn update_project_metadata(
+    State(state): State<StudioState>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateProjectMetadataRequest>, JsonRejection>,
+) -> Result<Json<Versioned<ProjectPayload>>, ApiError> {
+    let session_id = authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    validate_project_display_name(&request.expected_display_name)
+        .map_err(|_| ApiError::invalid())?;
+    validate_project_display_name(&request.display_name).map_err(|_| ApiError::invalid())?;
+
+    let mut store = state.store()?;
+    let project = store
+        .projects
+        .get_mut(&project_id)
+        .ok_or_else(ApiError::not_found)?;
+    if project.display_name != request.expected_display_name
+        && project.display_name != request.display_name
+    {
+        return Err(ApiError::conflict("project_display_name_changed"));
+    }
+    state
+        .storage()?
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
+    match state
+        .storage()?
+        .update_project_display_name(
+            &project.id,
+            &request.expected_display_name,
+            &request.display_name,
+        )
+        .map_err(storage_api_error)?
+    {
+        ProjectMetadataUpdate::Updated | ProjectMetadataUpdate::Idempotent => {
+            project.display_name = request.display_name;
+        }
+        ProjectMetadataUpdate::Stale => {
+            return Err(ApiError::conflict("project_display_name_changed"));
+        }
+    }
+    Ok(Json(Versioned::new(ProjectPayload {
+        project: project_dto(&state, &session_id, project),
+    })))
+}
+
 async fn create_target(
     State(state): State<StudioState>,
     Path(project_id): Path<String>,
@@ -1669,8 +3356,7 @@ async fn create_target(
         .ok_or_else(ApiError::not_found)?;
     require_revision(project, &target.capture_revision_id)?;
     state
-        .0
-        .storage
+        .storage()?
         .verify_project(
             &project.id,
             &project.revision_id,
@@ -1686,7 +3372,7 @@ async fn create_target(
     if canonical_target.len() > STORAGE_MAX_TARGET_METADATA_BYTES {
         return Err(ApiError::invalid());
     }
-    if project.targets.len() >= MAX_TARGETS_PER_PROJECT {
+    let replaced_existing = if project.targets.len() >= MAX_TARGETS_PER_PROJECT {
         let recyclable_id = recyclable_target_id(project).ok_or_else(ApiError::capacity)?;
         let recyclable_target = project
             .targets
@@ -1695,18 +3381,27 @@ async fn create_target(
         let expected_bytes =
             serde_json::to_vec(recyclable_target).map_err(|_| ApiError::internal())?;
         state
-            .0
-            .storage
-            .remove_target(&project.id, &recyclable_id, &expected_bytes)
+            .storage()?
+            .replace_target(
+                &project.id,
+                &recyclable_id,
+                &expected_bytes,
+                &target.target_id,
+                &canonical_target,
+            )
             .map_err(storage_api_error)?;
         project.targets.remove(&recyclable_id);
-    }
+        true
+    } else {
+        false
+    };
     ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
-    state
-        .0
-        .storage
-        .persist_target(&project.id, &target.target_id, &canonical_target)
-        .map_err(storage_api_error)?;
+    if !replaced_existing {
+        state
+            .storage()?
+            .persist_target(&project.id, &target.target_id, &canonical_target)
+            .map_err(storage_api_error)?;
+    }
     project
         .targets
         .insert(target.target_id.clone(), target.clone());
@@ -1738,14 +3433,17 @@ async fn create_context(
     )
     .map_err(provider_selection_api_error)?;
     let mut store = state.store()?;
-    let project = store
-        .projects
+    let Store {
+        projects,
+        ai_attempts,
+        ..
+    } = &mut *store;
+    let project = projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
     require_revision(project, &request.revision_id)?;
     state
-        .0
-        .storage
+        .storage()?
         .verify_project(
             &project.id,
             &project.revision_id,
@@ -1812,6 +3510,9 @@ async fn create_context(
         canonical_json: context.canonical_json.clone(),
         sha256: context.sha256.clone(),
     };
+    ai_attempts
+        .queue(&project_id, &context.attempt_id)
+        .map_err(|_| ApiError::conflict("ai_attempt_already_finished"))?;
     project.contexts.insert(context.id.clone(), context);
     Ok((
         StatusCode::CREATED,
@@ -1819,51 +3520,132 @@ async fn create_context(
     ))
 }
 
+async fn get_ai_attempt_status(
+    State(state): State<StudioState>,
+    Path((project_id, attempt_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<AiAttemptStatusDto>, ApiError> {
+    authorize_read(&state, &headers)?;
+    validate_ai_attempt_path(&project_id, &attempt_id)?;
+    let store = state.store()?;
+    if !store.projects.contains_key(&project_id) {
+        return Err(ApiError::not_found());
+    }
+    let status = store
+        .ai_attempts
+        .status(&project_id, &attempt_id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(Json(ai_attempt_status_dto(attempt_id, status)))
+}
+
+async fn cancel_ai_attempt(
+    State(state): State<StudioState>,
+    Path((project_id, attempt_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    payload: Result<Json<CancelAiAttemptRequest>, JsonRejection>,
+) -> Result<Json<AiAttemptStatusDto>, ApiError> {
+    authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    validate_ai_attempt_path(&project_id, &attempt_id)?;
+    let mut store = state.store()?;
+    if !store.projects.contains_key(&project_id) {
+        return Err(ApiError::not_found());
+    }
+    match store.ai_attempts.status(&project_id, &attempt_id) {
+        None => return Err(ApiError::not_found()),
+        Some(AttemptStatus::Cancelled) => {}
+        Some(AttemptStatus::Queued | AttemptStatus::Running) => {
+            if store.ai_attempts.cancel(&project_id, &attempt_id) != CancelResult::Cancelled {
+                return Err(ApiError::conflict("ai_attempt_not_cancellable"));
+            }
+        }
+        Some(_) => return Err(ApiError::conflict("ai_attempt_not_cancellable")),
+    }
+    Ok(Json(ai_attempt_status_dto(
+        attempt_id,
+        AttemptStatus::Cancelled,
+    )))
+}
+
+fn ai_attempt_status_dto(attempt_id: String, status: AttemptStatus) -> AiAttemptStatusDto {
+    AiAttemptStatusDto {
+        schema_version: SCHEMA_VERSION,
+        attempt_id,
+        status: status.as_str(),
+    }
+}
+
+fn validate_ai_attempt_path(project_id: &str, attempt_id: &str) -> Result<(), ApiError> {
+    if !is_opaque_identifier(project_id, "prj_") {
+        return Err(ApiError::invalid());
+    }
+    validate_intent(attempt_id)
+}
+
 fn claim_ai_attempt(
-    active_attempts: &mut HashMap<String, String>,
+    ai_attempts: &mut AiAttempts,
     project_id: &str,
     attempt_id: &str,
-) -> Result<(), ApiError> {
-    match active_attempts.entry(project_id.to_owned()) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(attempt_id.to_owned());
-            Ok(())
+) -> Result<Cancellation, ApiError> {
+    match ai_attempts.claim(project_id, attempt_id) {
+        Ok(cancellation) => Ok(cancellation),
+        Err(ClaimError::ProjectBusy) => Err(ApiError::conflict("ai_attempt_in_progress")),
+        Err(ClaimError::AttemptAlreadyFinished) => {
+            Err(ApiError::conflict("ai_attempt_already_finished"))
         }
-        std::collections::hash_map::Entry::Occupied(_) => {
-            Err(ApiError::conflict("ai_attempt_in_progress"))
-        }
+        Err(ClaimError::GenerationExhausted) => Err(ApiError::internal()),
     }
 }
 
 /// Clears an in-flight marker even when the request future is cancelled (for
 /// example, because the browser disconnects during a provider call). Keeping
 /// this synchronous makes `Drop` safe with the process-local `std::sync`
-/// store. The compare-before-remove rule prevents an old guard from releasing
-/// a later attempt.
+/// store. The exact generation match prevents an old guard from releasing a
+/// later reuse of the same public attempt ID.
 struct ActiveAttemptGuard {
     state: StudioState,
     project_id: String,
     attempt_id: String,
+    generation: AttemptGeneration,
     armed: bool,
+    terminal_on_drop: Option<AttemptStatus>,
 }
 
 impl ActiveAttemptGuard {
-    fn new(state: StudioState, project_id: &str, attempt_id: &str) -> Self {
+    fn new(
+        state: StudioState,
+        project_id: &str,
+        attempt_id: &str,
+        generation: AttemptGeneration,
+    ) -> Self {
         Self {
             state,
             project_id: project_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
+            generation,
             armed: true,
+            terminal_on_drop: None,
         }
     }
 
-    fn release(&mut self, store: &mut Store) -> Result<(), ApiError> {
-        if store.active_attempts.get(&self.project_id) != Some(&self.attempt_id) {
-            return Err(ApiError::conflict("ai_attempt_not_active"));
-        }
-        store.active_attempts.remove(&self.project_id);
+    fn terminal_on_drop(&mut self, status: AttemptStatus) {
+        self.terminal_on_drop = Some(status);
+    }
+
+    fn complete(
+        &mut self,
+        ai_attempts: &mut AiAttempts,
+        status: AttemptStatus,
+    ) -> Result<(), ApiError> {
+        let result =
+            ai_attempts.complete(&self.project_id, &self.attempt_id, self.generation, status);
         self.armed = false;
-        Ok(())
+        match result {
+            CompleteResult::Recorded => Ok(()),
+            CompleteResult::Cancelled => Err(ai_attempt_cancelled_error()),
+            CompleteResult::NotActive => Err(ApiError::conflict("ai_attempt_not_active")),
+        }
     }
 }
 
@@ -1872,16 +3654,35 @@ impl Drop for ActiveAttemptGuard {
         if !self.armed {
             return;
         }
-        if let Ok(mut store) = self.state.0.store.lock()
-            && store.active_attempts.get(&self.project_id) == Some(&self.attempt_id)
-        {
-            store.active_attempts.remove(&self.project_id);
+        if let Ok(mut store) = self.state.0.store.lock() {
+            if let Some(status) = self.terminal_on_drop {
+                let _ = store.ai_attempts.complete(
+                    &self.project_id,
+                    &self.attempt_id,
+                    self.generation,
+                    status,
+                );
+            } else {
+                store
+                    .ai_attempts
+                    .release(&self.project_id, &self.attempt_id, self.generation);
+            }
         }
     }
 }
 
+const fn ai_attempt_cancelled_error() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "ai_attempt_cancelled",
+        "The AI attempt was explicitly cancelled.",
+        false,
+    )
+}
+
 async fn create_proposal(
     State(state): State<StudioState>,
+    Extension(OperationContext(operation_id)): Extension<OperationContext>,
     Path(project_id): Path<String>,
     headers: HeaderMap,
     payload: Result<Json<CreateProposalRequest>, JsonRejection>,
@@ -1889,15 +3690,14 @@ async fn create_proposal(
     let session_id = authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
-    let provider_request = {
+    let (provider_request, mut cancellation) = {
         let mut store = state.store()?;
         let project = store
             .projects
             .get(&project_id)
             .ok_or_else(ApiError::not_found)?;
         state
-            .0
-            .storage
+            .storage()?
             .verify_project(
                 &project.id,
                 &project.revision_id,
@@ -1934,30 +3734,67 @@ async fn create_proposal(
             canonical_context_json: context.canonical_json.clone(),
             binding: context.provider.clone(),
         };
-        claim_ai_attempt(
-            &mut store.active_attempts,
+        let cancellation = claim_ai_attempt(
+            &mut store.ai_attempts,
             &project_id,
             &provider_request.attempt_id,
         )?;
-        provider_request
+        (provider_request, cancellation)
     };
 
-    let mut attempt_guard =
-        ActiveAttemptGuard::new(state.clone(), &project_id, &provider_request.attempt_id);
+    let mut attempt_guard = ActiveAttemptGuard::new(
+        state.clone(),
+        &project_id,
+        &provider_request.attempt_id,
+        cancellation.generation(),
+    );
 
-    let provider_result = execute_provider(state.0.config.openai.as_ref(), &provider_request)
-        .await
-        .map_err(provider_api_error)?;
+    let provider_execution = execute_provider(state.0.config.openai.as_ref(), &provider_request);
+    tokio::pin!(provider_execution);
+    let provider_result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(ai_attempt_cancelled_error()),
+        result = &mut provider_execution => result,
+    };
+    if cancellation.is_cancelled() {
+        return Err(ai_attempt_cancelled_error());
+    }
+    let provider_result = match provider_result {
+        Ok(result) => result,
+        Err(error) => {
+            let status = if error.code() == "provider_timeout" {
+                AttemptStatus::TimedOut
+            } else {
+                AttemptStatus::ProviderFailed
+            };
+            attempt_guard.terminal_on_drop(status);
+            return Err(provider_api_error(error));
+        }
+    };
+    attempt_guard.terminal_on_drop(AttemptStatus::ValidationFailed);
 
     let mut store = state.store()?;
-    attempt_guard.release(&mut store)?;
-    let project = store
-        .projects
+    if cancellation.is_cancelled() {
+        return Err(ai_attempt_cancelled_error());
+    }
+    if !store.ai_attempts.is_active_generation(
+        &project_id,
+        &provider_request.attempt_id,
+        cancellation.generation(),
+    ) {
+        return Err(ApiError::conflict("ai_attempt_not_active"));
+    }
+    let Store {
+        projects,
+        reviews,
+        ai_attempts,
+        ..
+    } = &mut *store;
+    let project = projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
     state
-        .0
-        .storage
+        .storage()?
         .verify_project(
             &project.id,
             &project.revision_id,
@@ -2006,62 +3843,29 @@ async fn create_proposal(
     let accepted_manifest = manifest(&project.accepted_files)?;
     let proposed_manifest = manifest(&applied.files)?;
     let proposal_id = opaque_id("pro");
-    let repository_path = state
-        .0
-        .storage
-        .proposal_repository(&project.id, &proposal_id)
-        .map_err(storage_api_error)?;
-    state
-        .0
-        .storage
-        .persist_proposal_workspace(&project.id, &proposal_id, &applied.files)
-        .map_err(storage_api_error)?;
     let recorded_at = now_rfc3339()?;
-    let grant_expires_at =
-        canonical_timestamp(OffsetDateTime::now_utc().saturating_add(time::Duration::hours(1)));
-    let trusted = TrustedArtifactProjectConfig::new(
-        repository_path,
-        project.id.trim_start_matches("prj_"),
-        "Local creator",
-        if provider_result.attribution.external {
-            "External AI provider"
-        } else {
-            "Deterministic fake AI"
-        },
-        recorded_at,
-        grant_expires_at,
-    );
-    let pending = begin_artifact_proposal(
-        &trusted,
-        &accepted_manifest,
-        &proposed_manifest,
-        synapse_review_context.as_bytes(),
-        ArtifactSourceAttribution::CallerSuppliedAiAttributed,
-    )
-    .map_err(|_| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "synapsegit_proposal_failed",
-            "SynapseGit could not record the proposal.",
-            true,
-        )
-    })?;
-    let receipt = pending.receipt();
-    if receipt.review_context_sha256() != synapse_review_context_sha256
-        || receipt.artifact_manifest_sha256() != artifact_manifest_sha256(&proposed_manifest)
-        || receipt.execution_verified()
-    {
-        return Err(ApiError::internal());
-    }
-    let review_id = opaque_id("revw");
+    let grant_expires_at = SYNAPSE_GRANT_EXPIRES_AT.to_owned();
+    let planned_revision_id = opaque_id("rev");
+    let derived_from_proposal_id = project
+        .history
+        .last()
+        .filter(|entry| entry.disposition == DispositionDto::Deferred)
+        .map(|entry| entry.proposal_id.clone());
     let (changes, validation) = proposal_review_details(&applied);
     let summary = applied.change_set.summary.clone();
-    let proposal = ProposalRecord {
+    let agent_display_name = if provider_result.attribution.external {
+        "External AI provider"
+    } else {
+        "Deterministic fake AI"
+    };
+    let mut proposal = ProposalRecord {
         id: proposal_id.clone(),
-        review_id: review_id.clone(),
+        review_id: String::new(),
         base_revision_id: project.revision_id.clone(),
-        artifact_manifest_sha256: receipt.artifact_manifest_sha256().to_owned(),
-        review_context_sha256: receipt.review_context_sha256().to_owned(),
+        base_artifact_manifest_sha256: project.accepted_manifest_sha256.clone(),
+        artifact_manifest_sha256: artifact_manifest_sha256(&proposed_manifest),
+        review_context_sha256: synapse_review_context_sha256.clone(),
+        review_context_json: synapse_review_context.clone(),
         provider_context_sha256: context.sha256.clone(),
         change_set_sha256,
         change_set: applied.change_set,
@@ -2071,16 +3875,194 @@ async fn create_proposal(
         unified_diff: applied.unified_diff,
         validation,
         proposed_files: applied.files,
-        pending,
-        status: ProposalStatus::PendingReview,
+        status: ProposalStatus::Incomplete,
+        review_outcome: ProposalReviewOutcome::PendingReview,
+        target: target.clone(),
+        instruction: context.instruction.clone(),
+        recorded_at,
+        grant_expires_at,
+        planned_revision_id,
+        derived_from_proposal_id,
     };
-    let dto = proposal_dto(&state, &session_id, project, &proposal);
+    let proposal_metadata = serde_json::to_vec(&persisted_proposal_metadata(&proposal))
+        .map_err(|_| ApiError::internal())?;
+    state
+        .storage()?
+        .prepare_proposal(
+            &project.id,
+            &proposal.id,
+            &proposal.proposed_files,
+            &proposal_metadata,
+        )
+        .map_err(storage_api_error)?;
+    let managed_storage = state.storage()?;
+    let (synapse_repository, synapse_journal) = managed_storage
+        .synapse_paths(&project.id)
+        .map_err(storage_api_error)?;
+    let sidecar = SynapseSidecar::open(SidecarConfig::new(
+        synapse_repository,
+        synapse_journal,
+        project.id.clone(),
+        "Local creator",
+        agent_display_name,
+        proposal.recorded_at.clone(),
+        proposal.grant_expires_at.clone(),
+        artifact_limits(),
+    ))
+    .map_err(sidecar_api_error)?;
+    tracing::info!(
+        operation_id,
+        component = "synapsegit-adapter",
+        phase = "proposal.publish.begin",
+        "SynapseGit Proposal call started"
+    );
+    let receipt = match sidecar.begin_proposal(SidecarProposalInput {
+        operation_key: &proposal_id,
+        accepted: &accepted_manifest,
+        proposed: &proposed_manifest,
+        review_context_json: proposal.review_context_json.as_bytes(),
+    }) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let api_error = sidecar_api_error(error);
+            tracing::warn!(
+                operation_id,
+                component = "synapsegit-adapter",
+                phase = "proposal.publish.error",
+                error_code = api_error.code,
+                "SynapseGit Proposal call failed"
+            );
+            return Err(api_error);
+        }
+    };
+    tracing::info!(
+        operation_id,
+        component = "synapsegit-adapter",
+        phase = "proposal.publish.observed",
+        "SynapseGit Proposal receipt observed"
+    );
+    if receipt.base_artifact_manifest_sha256 != artifact_manifest_sha256(&accepted_manifest)
+        || receipt.review_context_sha256 != synapse_review_context_sha256
+        || receipt.artifact_manifest_sha256 != artifact_manifest_sha256(&proposed_manifest)
+        || receipt.source_attribution != ArtifactSourceAttribution::CallerSuppliedAiAttributed
+        || receipt.execution_verified
+    {
+        return Err(ApiError::internal());
+    }
+    proposal.review_id = receipt.review_id.clone();
+    proposal.status = ProposalStatus::PendingReview;
+    let binding = serde_json::to_vec(&PersistedProposalBinding {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        contract: receipt.contract().to_owned(),
+        contract_version: receipt.contract_version(),
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        base_artifact_manifest_sha256: receipt.base_artifact_manifest_sha256,
+        artifact_manifest_sha256: receipt.artifact_manifest_sha256,
+        review_context_sha256: receipt.review_context_sha256,
+        source_attribution: "caller_supplied_ai_attributed".to_owned(),
+        execution_verified: receipt.execution_verified,
+    })
+    .map_err(|_| ApiError::internal())?;
+    state
+        .storage()?
+        .persist_proposal_binding(&project.id, &proposal.id, &binding)
+        .map_err(storage_api_error)?;
+    let dto = proposal_dto(&state, &session_id, project, &proposal)?;
+    let review_id = proposal.review_id.clone();
+    attempt_guard.complete(ai_attempts, AttemptStatus::ProposalReady)?;
     project.proposal = Some(proposal);
-    store.reviews.insert(review_id, project_id);
+    reviews.insert(review_id, project_id);
     Ok((
         StatusCode::CREATED,
         Json(Versioned::new(ProposalPayload { proposal: dto })),
     ))
+}
+
+async fn get_review(
+    State(state): State<StudioState>,
+    Path(review_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Versioned<ReviewPayload>>, ApiError> {
+    let session_id = authorize_read(&state, &headers)?;
+    let store = state.store()?;
+    let project_id = store
+        .reviews
+        .get(&review_id)
+        .ok_or_else(ApiError::not_found)?;
+    let project = store
+        .projects
+        .get(project_id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(Json(Versioned::new(ReviewPayload {
+        review: review_dto(&state, &session_id, project, &review_id)?,
+    })))
+}
+
+async fn reconcile_review(
+    State(state): State<StudioState>,
+    Path(review_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<ReconcileReviewRequest>, JsonRejection>,
+) -> Result<Json<Versioned<ReviewPayload>>, ApiError> {
+    let session_id = authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    let mut store = state.store()?;
+    let project_id = store
+        .reviews
+        .get(&review_id)
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    let project = store
+        .projects
+        .get_mut(&project_id)
+        .ok_or_else(ApiError::not_found)?;
+    let Some(proposal) = project.proposal.as_ref() else {
+        return Ok(Json(Versioned::new(ReviewPayload {
+            review: review_dto(&state, &session_id, project, &review_id)?,
+        })));
+    };
+    if proposal.review_id != review_id {
+        return Err(ApiError::not_found());
+    }
+    state
+        .storage()?
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
+    let sidecar = open_runtime_sidecar(&state, project, proposal)?;
+    match sidecar.resume(&review_id).map_err(sidecar_api_error)? {
+        ReviewOutcome::DecisionCommitted(receipt) => {
+            finalize_reconciled_decision(&state, project, &review_id, receipt)?;
+        }
+        ReviewOutcome::PendingReview => {
+            let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
+            proposal.status = ProposalStatus::PendingReview;
+            proposal.review_outcome = ProposalReviewOutcome::PendingReview;
+        }
+        ReviewOutcome::RetryableFailure => {
+            let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
+            proposal.status = ProposalStatus::PendingReview;
+            proposal.review_outcome = ProposalReviewOutcome::RetryableFailure;
+        }
+        ReviewOutcome::OutcomeUnknown => {
+            let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
+            proposal.status = ProposalStatus::PendingReview;
+            proposal.review_outcome = ProposalReviewOutcome::OutcomeUnknown;
+        }
+        ReviewOutcome::TerminalDenial => {
+            let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
+            proposal.status = ProposalStatus::Failed;
+            proposal.review_outcome = ProposalReviewOutcome::TerminalDenial;
+        }
+    }
+    Ok(Json(Versioned::new(ReviewPayload {
+        review: review_dto(&state, &session_id, project, &review_id)?,
+    })))
 }
 
 async fn create_approval(
@@ -2115,8 +4097,7 @@ async fn create_approval(
         })
         .ok_or_else(ApiError::not_found)?;
     state
-        .0
-        .storage
+        .storage()?
         .verify_project(
             &verified_project_id,
             &verified_revision_id,
@@ -2127,8 +4108,19 @@ async fn create_approval(
         .projects
         .get(&project_id)
         .ok_or_else(ApiError::not_found)?;
-    let proposal = project.proposal.as_ref().ok_or_else(ApiError::not_found)?;
+    let proposal = match project.proposal.as_ref() {
+        Some(proposal) => proposal,
+        None if project
+            .history
+            .iter()
+            .any(|entry| entry.review_id == review_id) =>
+        {
+            return Err(ApiError::conflict("review_terminal"));
+        }
+        None => return Err(ApiError::not_found()),
+    };
     if proposal.status != ProposalStatus::PendingReview
+        || proposal.review_outcome != ProposalReviewOutcome::PendingReview
         || proposal.id != request.proposal_id
         || proposal.base_revision_id != request.expected_revision_id
         || project.revision_id != request.expected_revision_id
@@ -2175,6 +4167,7 @@ async fn create_approval(
 
 async fn create_decision(
     State(state): State<StudioState>,
+    Extension(OperationContext(decision_operation_id)): Extension<OperationContext>,
     Path(review_id): Path<String>,
     headers: HeaderMap,
     payload: Result<Json<DecisionRequest>, JsonRejection>,
@@ -2192,12 +4185,31 @@ async fn create_decision(
         .get(&review_id)
         .cloned()
         .ok_or_else(ApiError::not_found)?;
-    let proposal_digest = store
-        .projects
-        .get(&project_id)
-        .and_then(|project| project.proposal.as_ref())
-        .map(|proposal| proposal.artifact_manifest_sha256.clone())
-        .ok_or_else(ApiError::not_found)?;
+    if request.approval_token.is_empty()
+        || request.approval_token.len() > 128
+        || !store
+            .approvals
+            .contains_key(&token_hash(&request.approval_token))
+    {
+        return Err(ApiError::conflict("approval_invalid_or_consumed"));
+    }
+    let proposal_digest = {
+        let project = store
+            .projects
+            .get(&project_id)
+            .ok_or_else(ApiError::not_found)?;
+        match project.proposal.as_ref() {
+            Some(proposal) => proposal.artifact_manifest_sha256.clone(),
+            None if project
+                .history
+                .iter()
+                .any(|entry| entry.review_id == review_id) =>
+            {
+                return Err(ApiError::conflict("review_terminal"));
+            }
+            None => return Err(ApiError::not_found()),
+        }
+    };
     let expected_binding = ApprovalBinding {
         session_id: session_id.clone(),
         project_id: project_id.clone(),
@@ -2224,6 +4236,7 @@ async fn create_decision(
         }
         let proposal = project.proposal.as_ref().ok_or_else(ApiError::not_found)?;
         if proposal.status != ProposalStatus::PendingReview
+            || proposal.review_outcome != ProposalReviewOutcome::PendingReview
             || proposal.id != request.proposal_id
             || proposal.review_id != review_id
         {
@@ -2236,23 +4249,28 @@ async fn create_decision(
         )
     };
     state
-        .0
-        .storage
+        .storage()?
         .verify_project(
             &verified_project_id,
             &verified_revision_id,
             &verified_manifest_sha256,
         )
         .map_err(storage_api_error)?;
-    consume_approval(
-        &mut store.approvals,
-        &request.approval_token,
-        &expected_binding,
-        now_unix(),
-    )?;
+    let decision_started = Instant::now();
+    tracing::info!(
+        operation_id = %decision_operation_id,
+        component = "lp-studio",
+        phase = "decision.started",
+        version = env!("CARGO_PKG_VERSION"),
+        "durable Decision started"
+    );
 
-    let project = store
-        .projects
+    let Store {
+        projects,
+        approvals,
+        ..
+    } = &mut *store;
+    let project = projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
     let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
@@ -2260,52 +4278,190 @@ async fn create_decision(
     debug_assert_eq!(proposal.status, ProposalStatus::PendingReview);
     debug_assert_eq!(proposal.id, request.proposal_id);
     debug_assert_eq!(proposal.review_id, review_id);
-    let receipt = decide_artifact_proposal(
-        &mut proposal.pending,
-        &ArtifactDecisionOptions {
-            disposition: request.disposition.artifact(),
-            private_rationale: request.rationale,
+    let managed_storage = state.storage()?;
+    let (synapse_repository, synapse_journal) = managed_storage
+        .synapse_paths(&project.id)
+        .map_err(storage_api_error)?;
+    let sidecar = SynapseSidecar::open(SidecarConfig::new(
+        synapse_repository,
+        synapse_journal,
+        project.id.clone(),
+        "Local creator",
+        if proposal.attribution.external {
+            "External AI provider"
+        } else {
+            "Deterministic fake AI"
         },
-    )
-    .map_err(|_| {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "synapsegit_decision_failed",
-            "SynapseGit could not commit the decision.",
-            false,
-        )
-    })?;
-    if receipt.reviewed_artifact_manifest_sha256()
-        != match request.disposition {
-            DispositionDto::AdoptedUnchanged => proposal.artifact_manifest_sha256.as_str(),
-            DispositionDto::Rejected | DispositionDto::Deferred => {
-                project.accepted_manifest_sha256.as_str()
-            }
+        proposal.recorded_at.clone(),
+        proposal.grant_expires_at.clone(),
+        artifact_limits(),
+    ))
+    .map_err(sidecar_api_error)?;
+    consume_approval(
+        approvals,
+        &request.approval_token,
+        &expected_binding,
+        now_unix(),
+    )?;
+    tracing::info!(
+        operation_id = %decision_operation_id,
+        component = "synapsegit-adapter",
+        phase = "decision.publish.begin",
+        "SynapseGit Decision call started"
+    );
+    let sidecar_outcome = match sidecar.decide(
+        &review_id,
+        request.disposition.artifact(),
+        request.rationale.as_deref(),
+        request.intent_id.as_bytes(),
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            proposal.review_outcome = ProposalReviewOutcome::OutcomeUnknown;
+            let api_error = sidecar_api_error(error);
+            tracing::warn!(
+                operation_id = %decision_operation_id,
+                component = "synapsegit-adapter",
+                phase = "decision.publish.error",
+                error_code = api_error.code,
+                "SynapseGit Decision call did not return an authoritative receipt"
+            );
+            return Err(decision_reconciliation_required_error());
         }
+    };
+    tracing::info!(
+        operation_id = %decision_operation_id,
+        component = "synapsegit-adapter",
+        phase = "decision.publish.observed",
+        "SynapseGit Decision outcome observed"
+    );
+    let receipt = match sidecar_outcome {
+        ReviewOutcome::DecisionCommitted(receipt) => receipt,
+        ReviewOutcome::PendingReview => {
+            proposal.review_outcome = ProposalReviewOutcome::PendingReview;
+            return Err(ApiError::conflict("decision_not_committed"));
+        }
+        ReviewOutcome::RetryableFailure => {
+            proposal.review_outcome = ProposalReviewOutcome::RetryableFailure;
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "decision_reconciliation_required",
+                "The Decision was not confirmed. Reconcile its durable operation before trying again.",
+                true,
+            ));
+        }
+        ReviewOutcome::OutcomeUnknown => {
+            proposal.review_outcome = ProposalReviewOutcome::OutcomeUnknown;
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "decision_outcome_unknown",
+                "The Decision outcome is unknown. Reconciliation is required before another Decision.",
+                true,
+            ));
+        }
+        ReviewOutcome::TerminalDenial => {
+            proposal.review_outcome = ProposalReviewOutcome::TerminalDenial;
+            proposal.status = ProposalStatus::Failed;
+            return Err(ApiError::conflict("decision_terminal_denial"));
+        }
+    };
+    if receipt.disposition != request.disposition.artifact()
+        || receipt.reviewed_artifact_manifest_sha256
+            != match request.disposition {
+                DispositionDto::AdoptedUnchanged => proposal.artifact_manifest_sha256.as_str(),
+                DispositionDto::Rejected | DispositionDto::Deferred => {
+                    project.accepted_manifest_sha256.as_str()
+                }
+            }
     {
-        return Err(ApiError::internal());
+        proposal.review_outcome = ProposalReviewOutcome::OutcomeUnknown;
+        return Err(decision_reconciliation_required_error());
     }
+    let decision_receipt_sha256 = decision_completion_result(
+        proposal,
+        durable_decision_receipt_sha256(&receipt, request.disposition),
+    )?;
+    let resulting_revision_id = match request.disposition {
+        DispositionDto::AdoptedUnchanged => proposal.planned_revision_id.clone(),
+        DispositionDto::Rejected | DispositionDto::Deferred => project.revision_id.clone(),
+    };
+    let decision_metadata_result = serde_json::to_vec(&PersistedDecisionMetadata {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        base_revision_id: proposal.base_revision_id.clone(),
+        base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256.clone(),
+        resulting_revision_id: resulting_revision_id.clone(),
+        disposition: request.disposition,
+        reviewed_artifact_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+        decision_receipt_sha256: decision_receipt_sha256.clone(),
+        recorded_at: proposal.recorded_at.clone(),
+    });
+    let decision_metadata = decision_completion_result(proposal, decision_metadata_result)?;
+    let persist_metadata_result =
+        managed_storage.persist_decision_metadata(&project.id, &proposal.id, &decision_metadata);
+    decision_completion_result(proposal, persist_metadata_result)?;
     if request.disposition == DispositionDto::AdoptedUnchanged {
-        let revision_id = opaque_id("rev");
-        state
-            .0
-            .storage
-            .commit_revision(
-                &project.id,
-                &revision_id,
-                &proposal.artifact_manifest_sha256,
-                &proposal.proposed_files,
-            )
-            .map_err(storage_api_error)?;
+        let commit_result = managed_storage.commit_revision(
+            &project.id,
+            &resulting_revision_id,
+            &proposal.artifact_manifest_sha256,
+            &proposal.proposed_files,
+        );
+        decision_completion_result(proposal, commit_result)?;
         project.accepted_files = proposal.proposed_files.clone();
         project.accepted_manifest_sha256 = proposal.artifact_manifest_sha256.clone();
-        project.revision_id = revision_id;
+        project.revision_id = resulting_revision_id.clone();
     }
-    proposal.status = ProposalStatus::Committed;
+    let completion = PersistedDecisionCompletion {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        disposition: request.disposition,
+        resulting_revision_id: resulting_revision_id.clone(),
+        resulting_accepted_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+        decision_receipt_sha256: decision_receipt_sha256.clone(),
+    };
+    let completion_bytes_result = serde_json::to_vec(&completion);
+    let completion_bytes = decision_completion_result(proposal, completion_bytes_result)?;
+    let persist_completion_result =
+        managed_storage.persist_decision_completion(&project.id, &proposal.id, &completion_bytes);
+    decision_completion_result(proposal, persist_completion_result)?;
+    tracing::info!(
+        operation_id = %decision_operation_id,
+        component = "lp-studio",
+        phase = "decision.completed",
+        duration_ms = u64::try_from(decision_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "durable Decision completed"
+    );
+    proposal.status = match request.disposition {
+        DispositionDto::AdoptedUnchanged => ProposalStatus::Adopted,
+        DispositionDto::Rejected => ProposalStatus::Rejected,
+        DispositionDto::Deferred => ProposalStatus::Deferred,
+    };
+    let history = HistoryRecord {
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        base_revision_id: proposal.base_revision_id.clone(),
+        base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256.clone(),
+        resulting_revision_id,
+        artifact_manifest_sha256: proposal.artifact_manifest_sha256.clone(),
+        resulting_accepted_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+        provider_id: proposal.attribution.provider_id.clone(),
+        reported_model: proposal.attribution.reported_model.clone(),
+        disposition: request.disposition,
+        decision_receipt_sha256,
+        recorded_at: proposal.recorded_at.clone(),
+        public_note: None,
+    };
     let revision_id = project.revision_id.clone();
     let manifest_sha256 = project.accepted_manifest_sha256.clone();
+    project.history.push(history);
+    project.proposal = None;
+    decision_failpoint(Failpoint::DecisionResponseBefore)
+        .map_err(|_| decision_reconciliation_required_error())?;
     let project_dto = project_dto(&state, &session_id, project);
-    Ok(Json(Versioned::new(DecisionPayload {
+    let response = Json(Versioned::new(DecisionPayload {
         decision: DecisionDto {
             review_id,
             proposal_id: request.proposal_id,
@@ -2315,7 +4471,13 @@ async fn create_decision(
             artifact_manifest_sha256: manifest_sha256,
         },
         project: project_dto,
-    })))
+    }));
+    // This boundary means "response fully prepared". The transport write is
+    // exercised separately because an Axum handler cannot observe bytes after
+    // the socket has delivered them.
+    decision_failpoint(Failpoint::DecisionResponseAfter)
+        .map_err(|_| decision_reconciliation_required_error())?;
+    Ok(response)
 }
 
 async fn create_export(
@@ -2329,24 +4491,35 @@ async fn create_export(
     require_schema(&request.schema_version)?;
     let mut store = state.store()?;
     ensure_capacity(store.exports.len(), MAX_EXPORTS)?;
-    let (revision_id, accepted_files) = {
+    let (revision_id, source_manifest_sha256, accepted_files) = {
         let project = store
             .projects
             .get(&project_id)
             .ok_or_else(ApiError::not_found)?;
         require_revision(project, &request.revision_id)?;
         state
-            .0
-            .storage
+            .storage()?
             .verify_project(
                 &project.id,
                 &project.revision_id,
                 &project.accepted_manifest_sha256,
             )
             .map_err(storage_api_error)?;
-        (project.revision_id.clone(), project.accepted_files.clone())
+        (
+            project.revision_id.clone(),
+            project.accepted_manifest_sha256.clone(),
+            project.accepted_files.clone(),
+        )
     };
-    let zip = deterministic_zip(&accepted_files)?;
+    let generated_at_utc = now_rfc3339()?;
+    let artifact = generate_static_export(&StaticExportInput {
+        source_revision_id: &revision_id,
+        source_manifest_sha256: &source_manifest_sha256,
+        generated_at_utc: &generated_at_utc,
+        entry_point: "index.html",
+        files: &accepted_files,
+    })
+    .map_err(static_export_api_error)?;
     let retained_bytes = store
         .exports
         .values()
@@ -2354,15 +4527,37 @@ async fn create_export(
             total.checked_add(artifact.bytes.len())
         })
         .ok_or_else(ApiError::capacity)?;
-    ensure_byte_capacity(retained_bytes, zip.len(), MAX_RETAINED_EXPORT_BYTES)?;
-    let sha256 = raw_sha256(&zip);
+    ensure_byte_capacity(
+        retained_bytes,
+        artifact.zip_bytes.len(),
+        MAX_RETAINED_EXPORT_BYTES,
+    )?;
+    let receipt = artifact.receipt.clone();
+    let sha256 = receipt.archive.sha256.clone();
     let export_id = opaque_id("exp");
+    state
+        .storage()?
+        .persist_export(
+            &project_id,
+            &export_id,
+            &revision_id,
+            &artifact.zip_bytes,
+            &artifact.receipt_json,
+        )
+        .map_err(storage_api_error)?;
     let dto = ExportDto {
         id: export_id.clone(),
         revision_id,
         sha256: sha256.clone(),
-        byte_length: zip.len(),
+        byte_length: receipt.archive.byte_length,
         download_url: format!("/api/v1/exports/{export_id}/download"),
+        receipt_sha256: artifact.receipt_sha256.clone(),
+        source_manifest_sha256: receipt.source_manifest_sha256,
+        generated_at_utc: receipt.generated_at_utc,
+        options: receipt.options,
+        file_manifest: receipt.file_manifest,
+        validation: receipt.validation,
+        archive: receipt.archive,
     };
     store.exports.insert(
         export_id,
@@ -2370,7 +4565,7 @@ async fn create_export(
             project_id,
             revision_id: request.revision_id,
             sha256,
-            bytes: zip,
+            bytes: artifact.zip_bytes,
         },
     );
     Ok((
@@ -2413,6 +4608,683 @@ async fn download_export(
     response.headers_mut().insert(
         "x-revision-binding",
         HeaderValue::from_str(&raw_sha256(artifact.revision_id.as_bytes()))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok(response)
+}
+
+async fn create_publication(
+    State(state): State<StudioState>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CreatePublicationRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Versioned<PublicationPayload>>), ApiError> {
+    authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    validate_human_text(&request.public_label, 256)?;
+    validate_human_text(&request.title, 256)?;
+    validate_human_text(&request.summary, 4 * 1024)?;
+    if let Some(note) = request.public_decision_note.as_deref() {
+        validate_human_text(note, 2 * 1024)?;
+    }
+    let mut store = state.store()?;
+    ensure_capacity(store.publications.len(), MAX_PUBLICATIONS)?;
+    let input = {
+        let project = store
+            .projects
+            .get(&project_id)
+            .ok_or_else(ApiError::not_found)?;
+        require_revision(project, &request.revision_id)?;
+        state
+            .storage()?
+            .verify_project(
+                &project.id,
+                &project.revision_id,
+                &project.accepted_manifest_sha256,
+            )
+            .map_err(storage_api_error)?;
+        // A durable active Proposal is the current session, even when older
+        // terminal history exists. Selecting history first would publish a
+        // stale "complete" claim while a newer Decision is still pending or
+        // outcome-ambiguous.
+        let session = if let Some(proposal) = project.proposal.as_ref() {
+            if request.public_decision_note.is_some() {
+                return Err(ApiError::conflict(
+                    "publication_decision_note_without_decision",
+                ));
+            }
+            PublicSessionInput::Incomplete {
+                proposal_manifest_sha256: proposal.artifact_manifest_sha256.clone(),
+                attribution: PublicProposalAttributionInput {
+                    provider_label: proposal.attribution.provider_id.clone(),
+                    model_label: proposal.attribution.reported_model.clone(),
+                },
+                reason: match proposal.review_outcome {
+                    ProposalReviewOutcome::PendingReview => IncompleteReason::ProposalPending,
+                    ProposalReviewOutcome::RetryableFailure
+                    | ProposalReviewOutcome::OutcomeUnknown
+                    | ProposalReviewOutcome::TerminalDenial => {
+                        IncompleteReason::DecisionOutcomeUnknown
+                    }
+                },
+            }
+        } else if let Some(history) = project.history.last() {
+            PublicSessionInput::Complete {
+                proposal_manifest_sha256: history.artifact_manifest_sha256.clone(),
+                decision_receipt_sha256: history.decision_receipt_sha256.clone(),
+                attribution: PublicProposalAttributionInput {
+                    provider_label: history.provider_id.clone(),
+                    model_label: history.reported_model.clone(),
+                },
+                disposition: match history.disposition {
+                    DispositionDto::AdoptedUnchanged => PublicDisposition::AdoptedUnchanged,
+                    DispositionDto::Rejected => PublicDisposition::Rejected,
+                    DispositionDto::Deferred => PublicDisposition::Deferred,
+                },
+                public_decision_note: request.public_decision_note.clone(),
+            }
+        } else {
+            return Err(ApiError::conflict("publication_history_unavailable"));
+        };
+        PublicationInput {
+            project: PublicProjectInput {
+                label: request.public_label.clone(),
+                title: request.title.clone(),
+                summary: request.summary.clone(),
+            },
+            accepted: PublicAcceptedBindingInput {
+                revision_id: project.revision_id.clone(),
+                site_manifest_sha256: project.accepted_manifest_sha256.clone(),
+                synapse_artifact_manifest_sha256: Some(project.accepted_manifest_sha256.clone()),
+            },
+            session,
+        }
+    };
+    let bundle = generate_publication(&input).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "publication_input_invalid",
+            "The local publication draft could not be generated from the reviewed public fields.",
+            false,
+        )
+    })?;
+    let files = bundle
+        .files
+        .iter()
+        .map(|(path, bytes)| {
+            Ok(PublicationFileDto {
+                path: path.clone(),
+                media_type: mime_guess::from_path(path)
+                    .first_or_octet_stream()
+                    .essence_str()
+                    .to_owned(),
+                sha256: raw_sha256(bytes),
+                byte_length: bytes.len(),
+                utf8: String::from_utf8(bytes.clone()).map_err(|_| ApiError::internal())?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let zip = deterministic_zip(&bundle.files)?;
+    let retained_bytes = store
+        .publications
+        .values()
+        .try_fold(0_usize, |total, artifact| {
+            total.checked_add(artifact.bytes.len())
+        })
+        .ok_or_else(ApiError::capacity)?;
+    ensure_byte_capacity(retained_bytes, zip.len(), MAX_RETAINED_EXPORT_BYTES)?;
+    let publication_id = opaque_id("pub");
+    let sha256 = raw_sha256(&zip);
+    let bundle_metadata = PersistedPublicationBundleMetadata {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        publication_id: publication_id.clone(),
+        project_id: project_id.clone(),
+        revision_id: request.revision_id.clone(),
+        accepted_manifest_sha256: input.accepted.site_manifest_sha256.clone(),
+        archive_sha256: sha256.clone(),
+        archive_byte_length: zip.len(),
+        files: files.clone(),
+        network_writes: false,
+        remote_publication: "separate_human_action".to_owned(),
+    };
+    let mut bundle_metadata_json =
+        serde_json::to_vec(&bundle_metadata).map_err(|_| ApiError::internal())?;
+    bundle_metadata_json.push(b'\n');
+    state
+        .storage()?
+        .persist_publication(
+            &project_id,
+            &publication_id,
+            &request.revision_id,
+            &zip,
+            &bundle_metadata_json,
+        )
+        .map_err(storage_api_error)?;
+    let dto = PublicationDto {
+        id: publication_id.clone(),
+        revision_id: request.revision_id.clone(),
+        sha256: sha256.clone(),
+        byte_length: zip.len(),
+        files,
+        download_url: format!("/api/v1/publications/{publication_id}/download"),
+        network_writes: false,
+        remote_publication: "separate_human_action",
+    };
+    store.publications.insert(
+        publication_id,
+        PublicationArtifact {
+            project_id,
+            revision_id: request.revision_id,
+            sha256,
+            bytes: zip,
+        },
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(Versioned::new(PublicationPayload { publication: dto })),
+    ))
+}
+
+async fn download_publication(
+    State(state): State<StudioState>,
+    Path(publication_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_read(&state, &headers)?;
+    let store = state.store()?;
+    let artifact = store
+        .publications
+        .get(&publication_id)
+        .ok_or_else(ApiError::not_found)?;
+    let mut response = Response::new(Body::from(artifact.bytes.clone()));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=lp-publication-draft.zip"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        "x-content-sha256",
+        HeaderValue::from_str(&artifact.sha256).map_err(|_| ApiError::internal())?,
+    );
+    response.headers_mut().insert(
+        "x-project-binding",
+        HeaderValue::from_str(&raw_sha256(artifact.project_id.as_bytes()))
+            .map_err(|_| ApiError::internal())?,
+    );
+    response.headers_mut().insert(
+        "x-revision-binding",
+        HeaderValue::from_str(&raw_sha256(artifact.revision_id.as_bytes()))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok(response)
+}
+
+fn checked_byte_total(lengths: impl IntoIterator<Item = usize>) -> Result<usize, ApiError> {
+    lengths
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(ApiError::capacity)
+}
+
+fn proposal_payload_byte_length(proposal: &ProposalRecord) -> Result<usize, ApiError> {
+    let metadata = serde_json::to_vec(&persisted_proposal_metadata(proposal))
+        .map_err(|_| ApiError::internal())?;
+    proposal
+        .proposed_files
+        .values()
+        .try_fold(metadata.len(), |total, bytes| {
+            total.checked_add(bytes.len())
+        })
+        .ok_or_else(ApiError::capacity)
+}
+
+fn retention_inventory(store: &Store) -> Result<RetentionInventoryDto, ApiError> {
+    let mut projects = store.projects.values().collect::<Vec<_>>();
+    projects.sort_by(|left, right| left.id.cmp(&right.id));
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            let accepted_file_byte_length = project
+                .accepted_files
+                .values()
+                .try_fold(0_usize, |total, bytes| total.checked_add(bytes.len()))
+                .ok_or_else(ApiError::capacity)?;
+            let failed_proposal = project
+                .proposal
+                .as_ref()
+                .filter(|proposal| {
+                    proposal.review_outcome == ProposalReviewOutcome::TerminalDenial
+                })
+                .map(|proposal| {
+                    Ok(FailedProposalRetentionSummaryDto {
+                        proposal_id: proposal.id.clone(),
+                        review_id: proposal.review_id.clone(),
+                        status: "failed",
+                        payload_byte_length: proposal_payload_byte_length(proposal)?,
+                        cleanup_impact: "Deletes the failed local Proposal projection and proposed site bytes. SynapseGit immutable records remain; Accepted is unchanged.",
+                    })
+                })
+                .transpose()?;
+            let mut artifacts = Vec::new();
+            artifacts.extend(
+                store
+                    .exports
+                    .iter()
+                    .filter(|(_, artifact)| artifact.project_id == project.id)
+                    .map(|(id, artifact)| RetainedArtifactSummaryDto {
+                    kind: "static_export",
+                    id: id.clone(),
+                    project_id: project.id.clone(),
+                    revision_id: artifact.revision_id.clone(),
+                    sha256: artifact.sha256.clone(),
+                    payload_byte_length: artifact.bytes.len(),
+                    cleanup_impact: "Deletes only this retained local export ZIP; Accepted revisions and SynapseGit records remain.",
+                    }),
+            );
+            artifacts.extend(
+                store
+                    .publications
+                    .iter()
+                    .filter(|(_, artifact)| artifact.project_id == project.id)
+                    .map(|(id, artifact)| RetainedArtifactSummaryDto {
+                    kind: "publication_draft",
+                    id: id.clone(),
+                    project_id: project.id.clone(),
+                    revision_id: artifact.revision_id.clone(),
+                    sha256: artifact.sha256.clone(),
+                    payload_byte_length: artifact.bytes.len(),
+                    cleanup_impact: "Deletes only this retained local publication draft ZIP; no remote publication is affected.",
+                    }),
+            );
+            artifacts.sort_by(|left, right| {
+                left.kind
+                    .cmp(right.kind)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            Ok(ProjectRetentionSummaryDto {
+                project_id: project.id.clone(),
+                display_name: project.display_name.clone(),
+                revision_id: project.revision_id.clone(),
+                accepted_manifest_sha256: project.accepted_manifest_sha256.clone(),
+                accepted_file_byte_length,
+                target_count: project.targets.len(),
+                conversation_context_count: project.contexts.len(),
+                conversation_persistence: "memory_only",
+                failed_proposal,
+                terminal_decision_count: project.history.len(),
+                artifacts,
+                project_deletion_impact: "Deletes this complete local managed project, including Accepted revisions, Targets, Proposal projections, local SynapseGit repository/journal, exports, publication drafts, and owned recovery backups. An independently exported Synapse Core archive is not deleted.",
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(RetentionInventoryDto {
+        automatic_gc: false,
+        telemetry: "absent",
+        cleanup_requires_explicit_confirmation: true,
+        projects,
+    })
+}
+
+async fn get_retention(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+) -> Result<Json<Versioned<RetentionPayload>>, ApiError> {
+    authorize_read(&state, &headers)?;
+    let store = state.store()?;
+    Ok(Json(Versioned::new(RetentionPayload {
+        retention: retention_inventory(&store)?,
+    })))
+}
+
+async fn cleanup_retention(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+    payload: Result<Json<CleanupRetentionRequest>, JsonRejection>,
+) -> Result<Json<Versioned<RetentionCleanupPayload>>, ApiError> {
+    authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    let mut store = state.store()?;
+    let removed = match request {
+        CleanupRetentionRequest::ConversationContext {
+            schema_version,
+            project_id,
+            confirmation,
+        } => {
+            require_schema(&schema_version)?;
+            if confirmation != project_id {
+                return Err(ApiError::conflict("cleanup_confirmation_mismatch"));
+            }
+            if store.ai_attempts.contains_project(&project_id) {
+                return Err(ApiError::conflict("ai_attempt_in_progress"));
+            }
+            store.ai_attempts.remove_queued_project(&project_id);
+            let project = store
+                .projects
+                .get_mut(&project_id)
+                .ok_or_else(ApiError::not_found)?;
+            let payload_byte_length = project
+                .contexts
+                .values()
+                .try_fold(0_usize, |total, context| {
+                    total.checked_add(context.canonical_json.len())
+                })
+                .ok_or_else(ApiError::capacity)?;
+            project.contexts.clear();
+            RetentionRemovalDto {
+                scope: "conversation_context",
+                id: project_id,
+                payload_byte_length,
+            }
+        }
+        CleanupRetentionRequest::FailedProposal {
+            schema_version,
+            project_id,
+            proposal_id,
+            review_id,
+            confirmation,
+        } => {
+            require_schema(&schema_version)?;
+            if confirmation != proposal_id {
+                return Err(ApiError::conflict("cleanup_confirmation_mismatch"));
+            }
+            let project = store
+                .projects
+                .get(&project_id)
+                .ok_or_else(ApiError::not_found)?;
+            let proposal = project
+                .proposal
+                .as_ref()
+                .filter(|proposal| {
+                    proposal.id == proposal_id
+                        && proposal.review_id == review_id
+                        && proposal.review_outcome == ProposalReviewOutcome::TerminalDenial
+                })
+                .ok_or_else(|| ApiError::conflict("failed_proposal_binding_mismatch"))?;
+            let payload_byte_length = proposal_payload_byte_length(proposal)?;
+            let metadata = serde_json::to_vec(&persisted_proposal_metadata(proposal))
+                .map_err(|_| ApiError::internal())?;
+            let binding = serde_json::to_vec(&PersistedProposalBinding {
+                schema_version: SCHEMA_VERSION.to_owned(),
+                contract: "synapsegit.generic-artifact".to_owned(),
+                contract_version: 1,
+                proposal_id: proposal.id.clone(),
+                review_id: proposal.review_id.clone(),
+                base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256.clone(),
+                artifact_manifest_sha256: proposal.artifact_manifest_sha256.clone(),
+                review_context_sha256: proposal.review_context_sha256.clone(),
+                source_attribution: "caller_supplied_ai_attributed".to_owned(),
+                execution_verified: false,
+            })
+            .map_err(|_| ApiError::internal())?;
+            let metadata_sha256 = raw_sha256(&metadata);
+            let binding_sha256 = raw_sha256(&binding);
+            state
+                .storage()?
+                .delete_proposal(
+                    &project_id,
+                    &proposal_id,
+                    &metadata_sha256,
+                    &metadata,
+                    Some((&binding_sha256, &binding)),
+                )
+                .map_err(storage_api_error)?;
+            let project = store
+                .projects
+                .get_mut(&project_id)
+                .ok_or_else(ApiError::not_found)?;
+            project.proposal = None;
+            store.reviews.remove(&review_id);
+            store.approvals.retain(|_, grant| {
+                grant.binding.project_id != project_id || grant.binding.proposal_id != proposal_id
+            });
+            RetentionRemovalDto {
+                scope: "failed_proposal",
+                id: proposal_id,
+                payload_byte_length,
+            }
+        }
+        CleanupRetentionRequest::StaticExport {
+            schema_version,
+            project_id,
+            artifact_id,
+            expected_sha256,
+            confirmation,
+        } => {
+            require_schema(&schema_version)?;
+            if confirmation != artifact_id {
+                return Err(ApiError::conflict("cleanup_confirmation_mismatch"));
+            }
+            let artifact = store
+                .exports
+                .get(&artifact_id)
+                .ok_or_else(ApiError::not_found)?;
+            if artifact.project_id != project_id || artifact.sha256 != expected_sha256 {
+                return Err(ApiError::conflict("cleanup_binding_mismatch"));
+            }
+            let payload_byte_length = artifact.bytes.len();
+            state
+                .storage()?
+                .delete_export(&project_id, &artifact_id, &expected_sha256, &artifact.bytes)
+                .map_err(storage_api_error)?;
+            store.exports.remove(&artifact_id);
+            RetentionRemovalDto {
+                scope: "static_export",
+                id: artifact_id,
+                payload_byte_length,
+            }
+        }
+        CleanupRetentionRequest::PublicationDraft {
+            schema_version,
+            project_id,
+            artifact_id,
+            expected_sha256,
+            confirmation,
+        } => {
+            require_schema(&schema_version)?;
+            if confirmation != artifact_id {
+                return Err(ApiError::conflict("cleanup_confirmation_mismatch"));
+            }
+            let artifact = store
+                .publications
+                .get(&artifact_id)
+                .ok_or_else(ApiError::not_found)?;
+            if artifact.project_id != project_id || artifact.sha256 != expected_sha256 {
+                return Err(ApiError::conflict("cleanup_binding_mismatch"));
+            }
+            let payload_byte_length = artifact.bytes.len();
+            state
+                .storage()?
+                .delete_publication(&project_id, &artifact_id, &expected_sha256, &artifact.bytes)
+                .map_err(storage_api_error)?;
+            store.publications.remove(&artifact_id);
+            RetentionRemovalDto {
+                scope: "publication_draft",
+                id: artifact_id,
+                payload_byte_length,
+            }
+        }
+        CleanupRetentionRequest::Project {
+            schema_version,
+            project_id,
+            expected_revision_id,
+            expected_manifest_sha256,
+            confirmation,
+        } => {
+            require_schema(&schema_version)?;
+            if confirmation != project_id {
+                return Err(ApiError::conflict("cleanup_confirmation_mismatch"));
+            }
+            if store.ai_attempts.contains_project(&project_id) {
+                return Err(ApiError::conflict("ai_attempt_in_progress"));
+            }
+            let project = store
+                .projects
+                .get(&project_id)
+                .ok_or_else(ApiError::not_found)?;
+            if project.revision_id != expected_revision_id
+                || project.accepted_manifest_sha256 != expected_manifest_sha256
+            {
+                return Err(ApiError::conflict("cleanup_binding_mismatch"));
+            }
+            let accepted_bytes = project
+                .accepted_files
+                .values()
+                .try_fold(0_usize, |total, bytes| total.checked_add(bytes.len()))
+                .ok_or_else(ApiError::capacity)?;
+            let context_bytes = project
+                .contexts
+                .values()
+                .try_fold(0_usize, |total, context| {
+                    total.checked_add(context.canonical_json.len())
+                })
+                .ok_or_else(ApiError::capacity)?;
+            let proposal_bytes = project
+                .proposal
+                .as_ref()
+                .map(proposal_payload_byte_length)
+                .transpose()?
+                .unwrap_or(0);
+            let artifact_lengths = store
+                .exports
+                .values()
+                .filter(|artifact| artifact.project_id == project_id)
+                .map(|artifact| artifact.bytes.len())
+                .chain(
+                    store
+                        .publications
+                        .values()
+                        .filter(|artifact| artifact.project_id == project_id)
+                        .map(|artifact| artifact.bytes.len()),
+                );
+            let artifact_bytes = checked_byte_total(artifact_lengths)?;
+            let payload_byte_length = accepted_bytes
+                .checked_add(context_bytes)
+                .and_then(|total| total.checked_add(proposal_bytes))
+                .and_then(|total| total.checked_add(artifact_bytes))
+                .ok_or_else(ApiError::capacity)?;
+            state
+                .storage()?
+                .delete_project(
+                    &project_id,
+                    &expected_revision_id,
+                    &expected_manifest_sha256,
+                )
+                .map_err(storage_api_error)?;
+            store.projects.remove(&project_id);
+            store.reviews.retain(|_, owner| owner != &project_id);
+            store
+                .approvals
+                .retain(|_, grant| grant.binding.project_id != project_id);
+            store
+                .exports
+                .retain(|_, artifact| artifact.project_id != project_id);
+            store
+                .publications
+                .retain(|_, artifact| artifact.project_id != project_id);
+            store.ai_attempts.remove_project(&project_id);
+            RetentionRemovalDto {
+                scope: "project",
+                id: project_id,
+                payload_byte_length,
+            }
+        }
+    };
+    Ok(Json(Versioned::new(RetentionCleanupPayload {
+        removed,
+        retention: retention_inventory(&store)?,
+    })))
+}
+
+fn recovery_point_dto(point: RecoveryPointSummary) -> RecoveryPointDto {
+    let verified = point.diagnostic.verified;
+    let id = point.id;
+    RecoveryPointDto {
+        export_url: verified.then(|| format!("/api/v1/recovery/{id}/export")),
+        id,
+        kind: match point.kind {
+            RecoveryPointKind::VersionedBackup => "versioned_backup",
+            RecoveryPointKind::LastAccepted => "last_accepted",
+        },
+        project_id: (!point.project_id.is_empty()).then_some(point.project_id),
+        revision_id: point.revision_id,
+        artifact_manifest_sha256: point.artifact_manifest_sha256,
+        diagnostic: RecoveryDiagnosticDto {
+            verified,
+            code: point.diagnostic.code,
+            manifest_sha256: point.diagnostic.manifest_sha256,
+            file_count: point.diagnostic.file_count,
+            total_bytes: point.diagnostic.total_bytes,
+        },
+    }
+}
+
+async fn get_recovery_points(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+) -> Result<Json<Versioned<RecoveryPayload>>, ApiError> {
+    authorize_read(&state, &headers)?;
+    let reader = state.recovery().ok_or_else(ApiError::not_found)?;
+    let recovery_points = reader
+        .list_points()
+        .map_err(storage_api_error)?
+        .into_iter()
+        .map(recovery_point_dto)
+        .collect();
+    Ok(Json(Versioned::new(RecoveryPayload { recovery_points })))
+}
+
+async fn download_recovery_export(
+    State(state): State<StudioState>,
+    Path(point_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_read(&state, &headers)?;
+    let reader = state.recovery().ok_or_else(ApiError::not_found)?;
+    let snapshot = reader.open_snapshot(&point_id).map_err(storage_api_error)?;
+    let revision_id = snapshot
+        .point
+        .revision_id
+        .as_deref()
+        .ok_or_else(ApiError::internal)?;
+    let manifest_sha256 = snapshot
+        .point
+        .artifact_manifest_sha256
+        .as_deref()
+        .ok_or_else(ApiError::internal)?;
+    let generated_at_utc = now_rfc3339()?;
+    let artifact = generate_static_export(&StaticExportInput {
+        source_revision_id: revision_id,
+        source_manifest_sha256: manifest_sha256,
+        generated_at_utc: &generated_at_utc,
+        entry_point: "index.html",
+        files: snapshot.files(),
+    })
+    .map_err(static_export_api_error)?;
+    let mut response = Response::new(Body::from(artifact.zip_bytes));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=lp-recovery-export.zip"),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        "x-content-sha256",
+        HeaderValue::from_str(&artifact.receipt.archive.sha256)
+            .map_err(|_| ApiError::internal())?,
+    );
+    response.headers_mut().insert(
+        "x-recovery-point-binding",
+        HeaderValue::from_str(&raw_sha256(point_id.as_bytes()))
             .map_err(|_| ApiError::internal())?,
     );
     Ok(response)
@@ -2491,14 +5363,26 @@ async fn serve_preview(
         )?;
         nonce = Some(script_nonce);
     }
+    let response_media_type = if mime.essence_str() != "text/html"
+        && is_active_preview_markup(mime.essence_str())
+        && is_preview_document_navigation(&headers)
+    {
+        // SVG, XML, and XHTML are active document formats. When navigation
+        // promotes one to the Preview iframe's top-level document, render it
+        // inert instead of relying solely on browser-specific CSP navigation
+        // behavior. Subresource image loads retain their original media type.
+        "text/plain; charset=utf-8"
+    } else {
+        mime.as_ref()
+    };
     let mut response = Response::new(Body::from(response_bytes));
     response.headers_mut().insert(
         CONTENT_TYPE,
-        HeaderValue::from_str(mime.as_ref()).map_err(|_| ApiError::internal())?,
+        HeaderValue::from_str(response_media_type).map_err(|_| ApiError::internal())?,
     );
     if let Some(nonce) = nonce {
         let csp = format!(
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; script-src 'self' 'nonce-{nonce}'; worker-src 'none'; frame-src 'none'; connect-src 'none'; webrtc 'block'; frame-ancestors {}; object-src 'none'; base-uri 'none'; form-action 'none'",
+            "sandbox allow-scripts allow-same-origin; default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; script-src 'self' 'nonce-{nonce}'; script-src-attr 'none'; worker-src 'none'; frame-src 'none'; connect-src 'none'; webrtc 'block'; frame-ancestors {}; object-src 'none'; base-uri 'none'; form-action 'none'; navigate-to 'self'",
             state.0.config.editor_origin
         );
         response.headers_mut().insert(
@@ -2507,6 +5391,35 @@ async fn serve_preview(
         );
     }
     Ok(response)
+}
+
+fn is_active_preview_markup(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "image/svg+xml" | "application/xml" | "text/xml" | "application/xhtml+xml"
+    ) || media_type.ends_with("+xml")
+}
+
+fn is_preview_document_navigation(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-mode")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("navigate"))
+    {
+        return true;
+    }
+    match headers
+        .get("sec-fetch-dest")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(destination) => matches!(
+            destination.to_ascii_lowercase().as_str(),
+            "document" | "iframe" | "frame" | "embed" | "object"
+        ),
+        // Missing Fetch Metadata is treated as a document request for active
+        // markup. Browser subresource requests identify their destination.
+        None => true,
+    }
 }
 
 fn canonical_preview_file_path(path: &str) -> Option<String> {
@@ -2580,7 +5493,9 @@ fn authorize_mutation(state: &StudioState, headers: &HeaderMap) -> Result<String
             false,
         ));
     }
-    authenticate(state, headers)
+    let session_id = authenticate(state, headers)?;
+    state.storage()?;
+    Ok(session_id)
 }
 
 fn authorize_read(state: &StudioState, headers: &HeaderMap) -> Result<String, ApiError> {
@@ -3693,15 +6608,19 @@ fn manifest(files: &BTreeMap<String, Vec<u8>>) -> Result<RegularFileManifest, Ap
         files
             .iter()
             .map(|(path, bytes)| ArtifactManifestEntry::regular_file(path, bytes.clone())),
-        ArtifactLimits {
-            max_files: STORAGE_MAX_FILES,
-            max_file_bytes: STORAGE_MAX_FILE_BYTES as u64,
-            max_total_bytes: STORAGE_MAX_TOTAL_BYTES as u64,
-            max_path_bytes: STORAGE_MAX_PATH_BYTES,
-            max_depth: STORAGE_MAX_DEPTH,
-        },
+        artifact_limits(),
     )
     .map_err(|_| ApiError::internal())
+}
+
+fn artifact_limits() -> ArtifactLimits {
+    ArtifactLimits {
+        max_files: STORAGE_MAX_FILES,
+        max_file_bytes: STORAGE_MAX_FILE_BYTES as u64,
+        max_total_bytes: STORAGE_MAX_TOTAL_BYTES as u64,
+        max_path_bytes: STORAGE_MAX_PATH_BYTES,
+        max_depth: STORAGE_MAX_DEPTH,
+    }
 }
 
 fn manifest_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String, ApiError> {
@@ -3800,7 +6719,8 @@ fn proposal_review_details(
                 AppliedChangeKind::Modified => "modified",
                 AppliedChangeKind::Renamed => "renamed",
                 AppliedChangeKind::Deleted => "deleted",
-            },
+            }
+            .into(),
             from_path: change.from_path.clone(),
         })
         .collect();
@@ -3809,6 +6729,7 @@ fn proposal_review_details(
         .iter()
         .map(|check| {
             let blocking = check.status == StaticCheckStatus::BlockingWarning;
+            let warning = check.status != StaticCheckStatus::Passed;
             let destinations = if blocking {
                 applied
                     .blocking_warnings
@@ -3821,7 +6742,7 @@ fn proposal_review_details(
             ProposalValidationCheckDto {
                 id: check.id.clone(),
                 label: validation_check_label(&check.id).into(),
-                status: if blocking { "warning" } else { "passed" },
+                status: if warning { "warning" } else { "passed" }.into(),
                 message: check.message.clone(),
                 blocking,
                 destinations,
@@ -3831,7 +6752,7 @@ fn proposal_review_details(
     checks.push(ProposalValidationCheckDto {
         id: "synapsegit-recorded".into(),
         label: "SynapseGit proposal".into(),
-        status: "passed",
+        status: "passed".into(),
         message: "SynapseGit recorded the isolated caller-supplied AI proposal.".into(),
         blocking: false,
         destinations: Vec::new(),
@@ -3840,10 +6761,36 @@ fn proposal_review_details(
     (
         changes,
         ProposalValidationDto {
-            status: if blocking { "warning" } else { "passed" },
+            status: if blocking { "warning" } else { "passed" }.into(),
             checks,
         },
     )
+}
+
+fn persisted_proposal_metadata(proposal: &ProposalRecord) -> PersistedProposalMetadata {
+    PersistedProposalMetadata {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        id: proposal.id.clone(),
+        base_revision_id: proposal.base_revision_id.clone(),
+        base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256.clone(),
+        planned_revision_id: proposal.planned_revision_id.clone(),
+        artifact_manifest_sha256: proposal.artifact_manifest_sha256.clone(),
+        review_context_sha256: proposal.review_context_sha256.clone(),
+        review_context_json: proposal.review_context_json.clone(),
+        provider_context_sha256: proposal.provider_context_sha256.clone(),
+        change_set_sha256: proposal.change_set_sha256.clone(),
+        change_set: proposal.change_set.clone(),
+        attribution: proposal.attribution.clone(),
+        summary: proposal.summary.clone(),
+        changes: proposal.changes.clone(),
+        unified_diff: proposal.unified_diff.clone(),
+        validation: proposal.validation.clone(),
+        target: proposal.target.clone(),
+        instruction: proposal.instruction.clone(),
+        recorded_at: proposal.recorded_at.clone(),
+        grant_expires_at: proposal.grant_expires_at.clone(),
+        derived_from_proposal_id: proposal.derived_from_proposal_id.clone(),
+    }
 }
 
 fn validation_check_label(id: &str) -> &'static str {
@@ -3857,6 +6804,7 @@ fn validation_check_label(id: &str) -> &'static str {
         "entry-point" => "Entry point",
         "local-references" => "Local references",
         "export-deny-list" => "Export deny-list",
+        "accessibility-smoke" => "Accessibility smoke (not WCAG conformance)",
         "active-behavior" => "Active behavior review",
         "target-reresolution" => "Proposed Target re-resolution",
         _ => "Bounded validation",
@@ -3879,6 +6827,31 @@ fn project_dto(state: &StudioState, session_id: &str, project: &Project) -> Proj
                 byte_length: bytes.len(),
             })
             .collect(),
+        active_review: project.proposal.as_ref().map(|proposal| ActiveReviewDto {
+            review_id: proposal.review_id.clone(),
+            proposal_id: proposal.id.clone(),
+            base_revision_id: proposal.base_revision_id.clone(),
+            status: proposal_active_status(proposal),
+        }),
+        history: project
+            .history
+            .iter()
+            .map(|entry| ProjectHistoryEntryDto {
+                review_id: entry.review_id.clone(),
+                proposal_id: entry.proposal_id.clone(),
+                base_revision_id: entry.base_revision_id.clone(),
+                base_artifact_manifest_sha256: entry.base_artifact_manifest_sha256.clone(),
+                resulting_revision_id: entry.resulting_revision_id.clone(),
+                disposition: entry.disposition,
+                artifact_manifest_sha256: entry.artifact_manifest_sha256.clone(),
+                resulting_accepted_manifest_sha256: entry
+                    .resulting_accepted_manifest_sha256
+                    .clone(),
+                decision_receipt_sha256: entry.decision_receipt_sha256.clone(),
+                recorded_at: entry.recorded_at.clone(),
+                public_note: entry.public_note.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -3887,8 +6860,13 @@ fn proposal_dto(
     session_id: &str,
     project: &Project,
     proposal: &ProposalRecord,
-) -> ProposalDto {
-    ProposalDto {
+) -> Result<ProposalDto, ApiError> {
+    let target_resolution = resolve_target_against_files(
+        &proposal.target,
+        &proposal.proposed_files,
+        &proposal.planned_revision_id,
+    )?;
+    Ok(ProposalDto {
         id: proposal.id.clone(),
         review_id: proposal.review_id.clone(),
         base_revision_id: proposal.base_revision_id.clone(),
@@ -3906,7 +6884,207 @@ fn proposal_dto(
         changes: proposal.changes.clone(),
         unified_diff: proposal.unified_diff.clone(),
         validation: proposal.validation.clone(),
+        target: proposal.target.clone(),
+        target_resolution,
+        instruction: proposal.instruction.clone(),
+        derived_from_proposal_id: proposal.derived_from_proposal_id.clone(),
+    })
+}
+
+fn proposal_active_status(proposal: &ProposalRecord) -> &'static str {
+    match proposal.review_outcome {
+        ProposalReviewOutcome::PendingReview => "pending_review",
+        ProposalReviewOutcome::RetryableFailure | ProposalReviewOutcome::OutcomeUnknown => {
+            "reconciliation_required"
+        }
+        ProposalReviewOutcome::TerminalDenial => "failed",
     }
+}
+
+fn review_dto(
+    state: &StudioState,
+    session_id: &str,
+    project: &Project,
+    review_id: &str,
+) -> Result<ReviewDto, ApiError> {
+    if let Some(proposal) = project
+        .proposal
+        .as_ref()
+        .filter(|proposal| proposal.review_id == review_id)
+    {
+        return Ok(ReviewDto {
+            review_id: review_id.to_owned(),
+            project_id: project.id.clone(),
+            proposal_id: proposal.id.clone(),
+            status: proposal_active_status(proposal),
+            reconciliation_required: matches!(
+                proposal.review_outcome,
+                ProposalReviewOutcome::RetryableFailure | ProposalReviewOutcome::OutcomeUnknown
+            ),
+            proposal: Some(proposal_dto(state, session_id, project, proposal)?),
+            decision: None,
+        });
+    }
+    let history = project
+        .history
+        .iter()
+        .find(|entry| entry.review_id == review_id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(ReviewDto {
+        review_id: review_id.to_owned(),
+        project_id: project.id.clone(),
+        proposal_id: history.proposal_id.clone(),
+        status: match history.disposition {
+            DispositionDto::AdoptedUnchanged => "adopted",
+            DispositionDto::Rejected => "rejected",
+            DispositionDto::Deferred => "deferred",
+        },
+        reconciliation_required: false,
+        proposal: None,
+        decision: Some(ReviewDecisionDto {
+            proposal_id: history.proposal_id.clone(),
+            disposition: history.disposition,
+            revision_id: history.resulting_revision_id.clone(),
+            artifact_manifest_sha256: history.resulting_accepted_manifest_sha256.clone(),
+        }),
+    })
+}
+
+fn open_runtime_sidecar(
+    state: &StudioState,
+    project: &Project,
+    proposal: &ProposalRecord,
+) -> Result<SynapseSidecar, ApiError> {
+    let (repository, journal) = state
+        .storage()?
+        .synapse_paths(&project.id)
+        .map_err(storage_api_error)?;
+    SynapseSidecar::open(SidecarConfig::new(
+        repository,
+        journal,
+        project.id.clone(),
+        "Local creator",
+        if proposal.attribution.external {
+            "External AI provider"
+        } else {
+            "Deterministic fake AI"
+        },
+        proposal.recorded_at.clone(),
+        proposal.grant_expires_at.clone(),
+        artifact_limits(),
+    ))
+    .map_err(sidecar_api_error)
+}
+
+fn finalize_reconciled_decision(
+    state: &StudioState,
+    project: &mut Project,
+    review_id: &str,
+    receipt: SidecarDecisionReceipt,
+) -> Result<(), ApiError> {
+    let proposal = project
+        .proposal
+        .as_ref()
+        .filter(|proposal| proposal.review_id == review_id)
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    let disposition = DispositionDto::from_artifact(receipt.disposition);
+    let base_is_current = project.revision_id == proposal.base_revision_id
+        && project.accepted_manifest_sha256 == proposal.base_artifact_manifest_sha256;
+    let adopted_is_current = disposition == DispositionDto::AdoptedUnchanged
+        && project.revision_id == proposal.planned_revision_id
+        && project.accepted_manifest_sha256 == proposal.artifact_manifest_sha256;
+    if !base_is_current && !adopted_is_current {
+        return Err(ApiError::conflict("stale_proposal"));
+    }
+    let expected_manifest = match disposition {
+        DispositionDto::AdoptedUnchanged => proposal.artifact_manifest_sha256.as_str(),
+        DispositionDto::Rejected | DispositionDto::Deferred => {
+            proposal.base_artifact_manifest_sha256.as_str()
+        }
+    };
+    if receipt.reviewed_artifact_manifest_sha256 != expected_manifest {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "synapsegit_receipt_mismatch",
+            "The durable SynapseGit Decision receipt did not match the immutable Proposal.",
+            false,
+        ));
+    }
+    let resulting_revision_id = match disposition {
+        DispositionDto::AdoptedUnchanged => proposal.planned_revision_id.clone(),
+        DispositionDto::Rejected | DispositionDto::Deferred => project.revision_id.clone(),
+    };
+    let decision_receipt_sha256 =
+        durable_decision_receipt_sha256(&receipt, disposition).map_err(|_| ApiError::internal())?;
+    let decision = PersistedDecisionMetadata {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        base_revision_id: proposal.base_revision_id.clone(),
+        base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256.clone(),
+        resulting_revision_id: resulting_revision_id.clone(),
+        disposition,
+        reviewed_artifact_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+        decision_receipt_sha256: decision_receipt_sha256.clone(),
+        recorded_at: proposal.recorded_at.clone(),
+    };
+    let bytes = serde_json::to_vec(&decision).map_err(|_| ApiError::internal())?;
+    state
+        .storage()?
+        .persist_decision_metadata(&project.id, &proposal.id, &bytes)
+        .map_err(storage_api_error)?;
+    if disposition == DispositionDto::AdoptedUnchanged && !adopted_is_current {
+        state
+            .storage()?
+            .commit_revision(
+                &project.id,
+                &resulting_revision_id,
+                &proposal.artifact_manifest_sha256,
+                &proposal.proposed_files,
+            )
+            .map_err(storage_api_error)?;
+        project.revision_id = resulting_revision_id.clone();
+        project.accepted_manifest_sha256 = proposal.artifact_manifest_sha256.clone();
+        project.accepted_files = proposal.proposed_files.clone();
+    }
+    let completion = PersistedDecisionCompletion {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        proposal_id: proposal.id.clone(),
+        review_id: proposal.review_id.clone(),
+        disposition,
+        resulting_revision_id: resulting_revision_id.clone(),
+        resulting_accepted_manifest_sha256: receipt.reviewed_artifact_manifest_sha256.clone(),
+        decision_receipt_sha256: decision_receipt_sha256.clone(),
+    };
+    let completion_bytes = serde_json::to_vec(&completion).map_err(|_| ApiError::internal())?;
+    state
+        .storage()?
+        .persist_decision_completion(&project.id, &proposal.id, &completion_bytes)
+        .map_err(storage_api_error)?;
+    if !project
+        .history
+        .iter()
+        .any(|entry| entry.review_id == proposal.review_id)
+    {
+        project.history.push(HistoryRecord {
+            proposal_id: proposal.id,
+            review_id: proposal.review_id,
+            base_revision_id: proposal.base_revision_id,
+            base_artifact_manifest_sha256: proposal.base_artifact_manifest_sha256,
+            resulting_revision_id,
+            artifact_manifest_sha256: proposal.artifact_manifest_sha256,
+            resulting_accepted_manifest_sha256: receipt.reviewed_artifact_manifest_sha256,
+            provider_id: proposal.attribution.provider_id,
+            reported_model: proposal.attribution.reported_model,
+            disposition,
+            decision_receipt_sha256,
+            recorded_at: proposal.recorded_at,
+            public_note: None,
+        });
+    }
+    project.proposal = None;
+    Ok(())
 }
 
 fn consume_approval(
@@ -4047,6 +7225,29 @@ fn raw_sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn durable_decision_receipt_sha256(
+    receipt: &SidecarDecisionReceipt,
+    disposition: DispositionDto,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_vec(&json!({
+        "appContract": "org.synapsegit-lp-studio.durable-decision-receipt",
+        "appContractVersion": 1,
+        "synapseContract": receipt.contract(),
+        "synapseContractVersion": receipt.contract_version(),
+        "reviewedArtifactManifestSha256": receipt.reviewed_artifact_manifest_sha256,
+        "selectedSnapshot": receipt.selected_snapshot,
+        "disposition": disposition,
+    }))
+    .map(|bytes| raw_sha256(&bytes))
+}
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4069,6 +7270,12 @@ fn canonical_timestamp(value: OffsetDateTime) -> String {
         value.second(),
         value.nanosecond()
     )
+}
+
+fn is_canonical_server_timestamp(value: &str) -> bool {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .is_some_and(|timestamp| canonical_timestamp(timestamp) == value)
 }
 
 fn format_timestamp(seconds: i64) -> Result<String, ApiError> {

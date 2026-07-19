@@ -5,7 +5,10 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import type { ProposalResponse } from "@synapsegit-lp/contracts";
+import type {
+  ArtifactDisposition,
+  ProposalResponse,
+} from "@synapsegit-lp/contracts";
 import { App } from "../App";
 import {
   ACCEPTED_PREVIEW_ORIGIN,
@@ -154,9 +157,11 @@ const openRetainedProjectAndSelectTarget = async (): Promise<void> => {
 
 type DecisionFailureScenario =
   "approval" | "decision_response" | "accepted_refresh";
+type DecisionTestScenario = DecisionFailureScenario | "success";
 
 const renderReadyProposalForDecisionFailure = async (
-  scenario: DecisionFailureScenario,
+  scenario: DecisionTestScenario,
+  disposition: ArtifactDisposition = "adopted_unchanged",
 ) => {
   let reviewedAttemptId = "";
   let decisionCommitted = false;
@@ -174,7 +179,13 @@ const renderReadyProposalForDecisionFailure = async (
         if (scenario === "accepted_refresh" && decisionCommitted) {
           throw new Error("Accepted状態を再取得できませんでした。");
         }
-        return jsonResponse(projectResponseFixture());
+        return jsonResponse(
+          projectResponseFixture(
+            decisionCommitted && disposition === "adopted_unchanged"
+              ? "revision-accepted-002"
+              : "revision-accepted-001",
+          ),
+        );
       }
       if (path.endsWith("/targets")) {
         return jsonResponse(targetResponseFixture);
@@ -229,12 +240,22 @@ const renderReadyProposalForDecisionFailure = async (
           decision: {
             reviewId: "review-001",
             proposalId: "proposal-001",
-            disposition: "adopted_unchanged",
+            disposition,
             status: "committed",
-            revisionId: "revision-accepted-002",
-            artifactManifestSha256: HASH_C,
+            revisionId:
+              disposition === "adopted_unchanged"
+                ? "revision-accepted-002"
+                : "revision-accepted-001",
+            artifactManifestSha256:
+              disposition === "adopted_unchanged"
+                ? HASH_C
+                : projectResponseFixture().project.acceptedManifestSha256,
           },
-          project: projectResponseFixture("revision-accepted-002").project,
+          project: projectResponseFixture(
+            disposition === "adopted_unchanged"
+              ? "revision-accepted-002"
+              : "revision-accepted-001",
+          ).project,
         });
       }
       throw new Error(`Unexpected request: ${method} ${path}`);
@@ -252,8 +273,14 @@ const renderReadyProposalForDecisionFailure = async (
   const review = await screen.findByRole("heading", { name: "変更案を確認" });
   const drawer = review.closest("section");
   expect(drawer).not.toBeNull();
+  const buttonName =
+    disposition === "adopted_unchanged"
+      ? "変更を採用"
+      : disposition === "rejected"
+        ? "変更案を却下"
+        : "今回は保留";
   fireEvent.click(
-    within(drawer as HTMLElement).getByRole("button", { name: "変更を採用" }),
+    within(drawer as HTMLElement).getByRole("button", { name: buttonName }),
   );
   return fetchMock;
 };
@@ -261,6 +288,342 @@ const renderReadyProposalForDecisionFailure = async (
 describe("C2 browser vertical slice", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("debounces and serializes durable Project display-name autosaves", async () => {
+    let currentDisplayName = "Untitled landing page";
+    let firstSaveResolve: ((response: Response) => void) | undefined;
+    const firstSave = new Promise<Response>((resolve) => {
+      firstSaveResolve = resolve;
+    });
+    const patchBodies: Array<{
+      expectedDisplayName: string;
+      displayName: string;
+    }> = [];
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        if (method === "PATCH" && path === "/api/v1/projects/project-001") {
+          const body = JSON.parse(String(init?.body)) as {
+            expectedDisplayName: string;
+            displayName: string;
+          };
+          patchBodies.push(body);
+          if (patchBodies.length === 1) return firstSave;
+          currentDisplayName = body.displayName;
+          return jsonResponse({
+            ...projectResponseFixture(),
+            project: {
+              ...projectResponseFixture().project,
+              displayName: currentDisplayName,
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Untitled landing pageを開く",
+      }),
+    );
+    const input = (await screen.findByLabelText("Project")) as HTMLInputElement;
+    const acceptedBefore =
+      screen.getByLabelText("Accepted revision").textContent;
+    fireEvent.change(input, { target: { value: "Campaign one" } });
+    expect(screen.getByText("入力待ち")).toBeVisible();
+    await waitFor(() => expect(patchBodies).toHaveLength(1), {
+      timeout: 1_500,
+    });
+    expect(screen.getByText("保存中")).toBeVisible();
+
+    fireEvent.change(input, { target: { value: "Campaign two" } });
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    expect(patchBodies).toHaveLength(1);
+    currentDisplayName = "Campaign one";
+    firstSaveResolve?.(
+      jsonResponse({
+        ...projectResponseFixture(),
+        project: {
+          ...projectResponseFixture().project,
+          displayName: currentDisplayName,
+        },
+      }),
+    );
+
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies).toEqual([
+      {
+        schemaVersion: "1",
+        expectedDisplayName: "Untitled landing page",
+        displayName: "Campaign one",
+      },
+      {
+        schemaVersion: "1",
+        expectedDisplayName: "Campaign one",
+        displayName: "Campaign two",
+      },
+    ]);
+    expect(
+      within(input.closest(".project-name-editor") as HTMLElement).getByRole(
+        "status",
+      ),
+    ).toHaveTextContent("保存済み");
+    expect(input).toHaveValue("Campaign two");
+    expect(screen.getByLabelText("Accepted revision").textContent).toBe(
+      acceptedBefore,
+    );
+
+    fireEvent.change(input, { target: { value: "/home/private/project" } });
+    expect(await screen.findByText("保存エラー")).toBeVisible();
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    expect(patchBodies).toHaveLength(2);
+  });
+
+  it("cancels an active AI attempt accessibly and requires a fresh reviewed context", async () => {
+    const generatedIds = [
+      "11111111-2222-4333-8444-555555555555",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+    ];
+    vi.stubGlobal("crypto", {
+      ...crypto,
+      randomUUID: () => generatedIds.shift()!,
+    });
+    const attemptIds: string[] = [];
+    let cancelCalls = 0;
+    let statusCalls = 0;
+    const pendingProposal = new Promise<Response>(() => undefined);
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        if (path.endsWith("/targets")) {
+          return jsonResponse(targetResponseFixture);
+        }
+        if (path.endsWith("/contexts")) {
+          const request = JSON.parse(String(init?.body)) as {
+            attemptId: string;
+          };
+          attemptIds.push(request.attemptId);
+          return jsonResponse({
+            ...contextResponseFixture,
+            context: {
+              ...contextResponseFixture.context,
+              attemptId: request.attemptId,
+            },
+          });
+        }
+        if (path.endsWith("/proposals")) return pendingProposal;
+        if (path.endsWith("/cancel")) {
+          cancelCalls += 1;
+          return new Response(
+            JSON.stringify({
+              schemaVersion: "1",
+              error: {
+                code: "ai_attempt_not_active",
+                message: "AI attempt is already terminal.",
+                requestId: "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                operationId: "op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                retryable: false,
+                detail: {
+                  acceptedState: "unchanged",
+                  recoveryAction: "refresh",
+                },
+              },
+            }),
+            {
+              status: 409,
+              headers: {
+                "Content-Type": "application/json",
+                "x-request-id": "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "x-operation-id": "op_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              },
+            },
+          );
+        }
+        if (method === "GET" && path.includes("/ai-attempts/")) {
+          statusCalls += 1;
+          return jsonResponse({
+            schemaVersion: "1",
+            attemptId: attemptIds[0],
+            status: "cancelled",
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await openRetainedProjectAndSelectTarget();
+    const reviewButton = screen.getByRole("button", {
+      name: "送信内容を確認",
+    });
+    fireEvent.click(reviewButton);
+    let dialog = await screen.findByRole("dialog", {
+      name: "送信内容を確認",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "変更案を作成" }),
+    );
+
+    expect(
+      await within(dialog).findByRole("status", { name: "AI処理状態" }),
+    ).toHaveTextContent("Provider応答待機・ChangeSet検証");
+    expect(within(dialog).getByText(/開始から \d+ 秒/)).toBeVisible();
+    const cancel = within(dialog).getByRole("button", {
+      name: "AI処理を取り消す",
+    });
+    await waitFor(() => expect(cancel).toHaveFocus());
+    fireEvent.click(cancel);
+    fireEvent.click(cancel);
+
+    expect(
+      await screen.findByText(/AI処理を取り消しました。送信内容を確認し直す/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(reviewButton).toHaveFocus());
+    expect(cancelCalls).toBe(1);
+    expect(statusCalls).toBe(1);
+
+    fireEvent.click(reviewButton);
+    dialog = await screen.findByRole("dialog", { name: "送信内容を確認" });
+    await waitFor(() => expect(attemptIds).toHaveLength(2));
+    expect(attemptIds[1]).not.toBe(attemptIds[0]);
+    expect(
+      within(dialog).getByRole("button", { name: "変更案を作成" }),
+    ).toBeEnabled();
+  });
+
+  it("uses server recovery detail and consumes a failed proposal context", async () => {
+    const generatedIds = [
+      "11111111-2222-4333-8444-555555555555",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+    ];
+    vi.stubGlobal("crypto", {
+      ...crypto,
+      randomUUID: () => generatedIds.shift()!,
+    });
+    const attemptIds: string[] = [];
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        if (path.endsWith("/targets"))
+          return jsonResponse(targetResponseFixture);
+        if (path.endsWith("/contexts")) {
+          const request = JSON.parse(String(init?.body)) as {
+            attemptId: string;
+          };
+          attemptIds.push(request.attemptId);
+          return jsonResponse({
+            ...contextResponseFixture,
+            context: {
+              ...contextResponseFixture.context,
+              attemptId: request.attemptId,
+            },
+          });
+        }
+        if (path.endsWith("/proposals")) {
+          return new Response(
+            JSON.stringify({
+              schemaVersion: "1",
+              error: {
+                code: "ai_provider_timeout",
+                message: "AI provider timed out.",
+                requestId: "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                operationId: attemptIds[0],
+                retryable: true,
+                detail: {
+                  acceptedState: "unchanged",
+                  recoveryAction: "retry",
+                },
+              },
+            }),
+            {
+              status: 504,
+              headers: {
+                "Content-Type": "application/json",
+                "x-request-id": "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "x-operation-id": attemptIds[0]!,
+              },
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await openRetainedProjectAndSelectTarget();
+    const reviewButton = screen.getByRole("button", {
+      name: "送信内容を確認",
+    });
+    fireEvent.click(reviewButton);
+    const dialog = await screen.findByRole("dialog", {
+      name: "送信内容を確認",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "変更案を作成" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Accepted LPは変更されていません。新しい操作として安全に再試行できます。",
+    );
+    const diagnostic = screen.getByText(/Last error:/).closest("details");
+    expect(diagnostic).not.toBeNull();
+    expect(diagnostic).toHaveTextContent(attemptIds[0]!);
+    expect(diagnostic).toHaveTextContent("Accepted LPは変更されていません");
+    expect(diagnostic).toHaveTextContent("新しい操作として安全に再試行");
+    await waitFor(() => expect(reviewButton).toHaveFocus());
+
+    fireEvent.click(reviewButton);
+    await screen.findByRole("dialog", { name: "送信内容を確認" });
+    expect(attemptIds).toHaveLength(2);
+    expect(attemptIds[1]).not.toBe(attemptIds[0]);
   });
 
   it("creates, targets, reviews exact context, adopts, and refreshes Accepted state", async () => {
@@ -383,6 +746,29 @@ describe("C2 browser vertical slice", () => {
     const acceptedFrameForTarget = screen.getByTitle(
       "LPプレビュー",
     ) as HTMLIFrameElement;
+    const scalePostMessage = vi.spyOn(
+      acceptedFrameForTarget.contentWindow as Window,
+      "postMessage",
+    );
+    fireEvent.click(screen.getByTestId("preview-scale-75"));
+    expect(screen.getByTestId("preview-scale-75")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(acceptedFrameForTarget.closest(".viewport-frame")).toHaveStyle({
+      transform: "scale(0.75)",
+      transformOrigin: "top center",
+    });
+    await waitFor(() =>
+      expect(scalePostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "synapsegit-lp.action",
+          action: "set_mode",
+          previewScale: 0.75,
+        }),
+        ACCEPTED_PREVIEW_ORIGIN,
+      ),
+    );
     fireEvent(
       window,
       new MessageEvent("message", {
@@ -605,6 +991,32 @@ describe("C2 browser vertical slice", () => {
     expect(alert).not.toHaveTextContent("安全に再試行できます");
     expect(screen.getByRole("button", { name: "変更を採用" })).toBeDisabled();
   });
+
+  it.each(["rejected", "deferred"] as const)(
+    "records %s through the same approval path without changing Accepted",
+    async (disposition) => {
+      const fetchMock = await renderReadyProposalForDecisionFailure(
+        "success",
+        disposition,
+      );
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("heading", { name: "変更案を確認" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(screen.getByLabelText("Accepted revision")).toHaveTextContent(
+        "revision-a…ed-001",
+      );
+      const bodies = fetchMock.mock.calls
+        .map(([, init]) => init?.body)
+        .filter((body): body is BodyInit => body !== undefined)
+        .map((body) => JSON.parse(String(body)) as Record<string, unknown>);
+      expect(
+        bodies.filter((body) => body.disposition === disposition),
+      ).toHaveLength(2);
+    },
+  );
 
   it("rejects an external context binding that suppresses provider disclosure", async () => {
     const fetchMock = vi.fn(
@@ -894,7 +1306,9 @@ describe("C2 browser vertical slice", () => {
     expect(await screen.findByLabelText("Accepted revision")).toHaveTextContent(
       "revision-a…ed-001",
     );
-    expect(screen.getByText("Untitled landing page")).toBeInTheDocument();
+    expect(screen.getByLabelText("Project")).toHaveValue(
+      "Untitled landing page",
+    );
   });
 
   it("shows only privacy-safe diagnostics from the exact Accepted frame", async () => {
@@ -1003,6 +1417,53 @@ describe("C2 browser vertical slice", () => {
     expect(screen.queryByTitle("LPプレビュー")).not.toBeInTheDocument();
     expect(isolationError).not.toHaveTextContent("pv-");
     expect(isolationError).not.toHaveTextContent("preview/project");
+  });
+
+  it("lets the Creator terminate and recreate an untrusted Preview realm", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Untitled landing pageを開く",
+      }),
+    );
+    const initialFrame = await screen.findByTitle("LPプレビュー");
+
+    fireEvent.click(screen.getByRole("button", { name: "プレビューを停止" }));
+    expect(initialFrame).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/プレビューの実行を停止しました/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "プレビューを再読み込み" }),
+    );
+    const restartedFrame = await screen.findByTitle("LPプレビュー");
+    expect(restartedFrame).not.toBe(initialFrame);
+    expect(restartedFrame).toHaveAttribute(
+      "src",
+      projectResponseFixture().project.previewUrl,
+    );
   });
 
   it("reviews an exact registered-root copy before explicit import", async () => {

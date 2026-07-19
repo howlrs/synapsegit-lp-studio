@@ -10,9 +10,16 @@ import {
 
 describe("studio reducer Accepted invariant", () => {
   it("keeps Decision adoption locked after an outcome-unknown failure", () => {
-    const failed = studioReducer(initialStudioState, {
+    const deciding = studioReducer(initialStudioState, {
+      type: "OPERATION_STARTED",
+      operation: "committing_decision",
+    });
+    const failed = studioReducer(deciding, {
       type: "FAILED",
       message: "Decision outcome unknown",
+      code: "decision_outcome_unknown",
+      requestId: "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      retryable: false,
       requiresDecisionReconciliation: true,
     });
     const dismissed = studioReducer(failed, { type: "DISMISS_ERROR" });
@@ -20,6 +27,64 @@ describe("studio reducer Accepted invariant", () => {
     expect(failed.decisionReconciliationRequired).toBe(true);
     expect(dismissed.decisionReconciliationRequired).toBe(true);
     expect(dismissed.error).toBeNull();
+    expect(dismissed.lastError).toEqual({
+      operation: "committing_decision",
+      code: "decision_outcome_unknown",
+      requestId: "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      operationId: null,
+      retryable: false,
+      acceptedState: null,
+      recoveryAction: null,
+    });
+  });
+
+  it("clears a consumed proposal context and retains safe error recovery detail", () => {
+    const generating = {
+      ...initialStudioState,
+      project: projectFixture(),
+      contextReview: contextResponseFixture.context,
+      operation: "generating_proposal" as const,
+    };
+    const failed = studioReducer(generating, {
+      type: "FAILED",
+      message: "provider timed out",
+      code: "ai_attempt_timed_out",
+      requestId: "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      operationId: contextResponseFixture.context.attemptId,
+      retryable: true,
+      acceptedState: "unchanged",
+      recoveryAction: "retry",
+      clearContextReview: true,
+    });
+
+    expect(failed.contextReview).toBeNull();
+    expect(failed.operation).toBeNull();
+    expect(failed.lastError).toMatchObject({
+      operation: "generating_proposal",
+      operationId: contextResponseFixture.context.attemptId,
+      acceptedState: "unchanged",
+      recoveryAction: "retry",
+    });
+  });
+
+  it("treats semantic cancellation as completion instead of an error", () => {
+    const cancelled = studioReducer(
+      {
+        ...initialStudioState,
+        contextReview: contextResponseFixture.context,
+        operation: "generating_proposal",
+        error: "old error",
+      },
+      {
+        type: "PROPOSAL_ATTEMPT_CLEARED",
+        announcement: "AI処理を取り消しました。",
+      },
+    );
+
+    expect(cancelled.contextReview).toBeNull();
+    expect(cancelled.operation).toBeNull();
+    expect(cancelled.error).toBeNull();
+    expect(cancelled.announcement).toBe("AI処理を取り消しました。");
   });
 
   it("does not infer an Accepted revision from Decision completion", () => {
@@ -42,6 +107,39 @@ describe("studio reducer Accepted invariant", () => {
     });
     expect(refreshed.project?.revisionId).toBe("revision-accepted-002");
     expect(refreshed.operation).toBeNull();
+  });
+
+  it("updates only the display name and preserves every Accepted binding", () => {
+    const project = projectFixture();
+    const before = {
+      ...initialStudioState,
+      project,
+      target: {
+        target: targetResponseFixture.target,
+        resolution: targetResponseFixture.resolution,
+        resolutionId: targetResponseFixture.resolutionId,
+      },
+    };
+    const renamed = studioReducer(before, {
+      type: "PROJECT_DISPLAY_NAME_SAVED",
+      projectId: project.id,
+      displayName: "Campaign LP",
+    });
+
+    expect(renamed.project).toEqual({ ...project, displayName: "Campaign LP" });
+    expect(renamed.project?.revisionId).toBe(project.revisionId);
+    expect(renamed.project?.acceptedManifestSha256).toBe(
+      project.acceptedManifestSha256,
+    );
+    expect(renamed.project?.files).toBe(project.files);
+    expect(renamed.target).toBe(before.target);
+    expect(
+      studioReducer(renamed, {
+        type: "PROJECT_DISPLAY_NAME_SAVED",
+        projectId: "project-foreign",
+        displayName: "Wrong project",
+      }),
+    ).toBe(renamed);
   });
 
   it("detaches a target captured against an older revision", () => {
@@ -170,5 +268,18 @@ describe("studio reducer Accepted invariant", () => {
     });
     expect(narrow.customWidth).toBe(320);
     expect(wide.customWidth).toBe(1920);
+  });
+
+  it("keeps the selected preview scale as explicit Studio state", () => {
+    const scaled = studioReducer(initialStudioState, {
+      type: "SET_PREVIEW_SCALE",
+      scale: 0.75,
+    });
+
+    expect(scaled.previewScale).toBe(0.75);
+    expect(
+      studioReducer(scaled, { type: "SET_PREVIEW_SCALE", scale: 1 })
+        .previewScale,
+    ).toBe(1);
   });
 });

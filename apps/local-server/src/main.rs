@@ -10,6 +10,28 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+const DEFAULT_LOG_LEVEL: &str = "info";
+
+fn safe_log_level(value: Option<&str>) -> &'static str {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("off") => "off",
+        Some("error") => "error",
+        Some("warn") => "warn",
+        Some("info") => "info",
+        Some("debug") => "debug",
+        Some("trace") => "trace",
+        _ => DEFAULT_LOG_LEVEL,
+    }
+}
+
+fn safe_env_filter(value: Option<&str>) -> EnvFilter {
+    // Dependency targets are disabled even at the maximum supported level.
+    // Callers can choose an app level, but cannot inject an EnvFilter directive
+    // that would turn provider/client internals into a logging surface.
+    let level = safe_log_level(value);
+    EnvFilter::new(format!("off,synapsegit_lp_local_server={level}"))
+}
+
 struct StateRootLease {
     path: PathBuf,
     remove_on_drop: bool,
@@ -185,10 +207,10 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(safe_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
         .init();
 
     let editor_listener = bind_local(port_from_env("LP_STUDIO_EDITOR_PORT")?).await?;
@@ -224,13 +246,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             std::env::var("LP_STUDIO_OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
         server_config = server_config.with_openai(api_key, model)?;
     }
-    let state = StudioState::new(server_config)?;
+    let (state, operating_mode) = match StudioState::new(server_config.clone()) {
+        Ok(state) => (state, "normal"),
+        Err(normal_error) => match StudioState::new_recovery(server_config) {
+            Ok(state) => {
+                tracing::warn!(
+                    code = "managed_storage_read_only_recovery",
+                    "managed storage opened in read-only recovery mode"
+                );
+                (state, "read_only_recovery")
+            }
+            Err(_) => return Err(normal_error.into()),
+        },
+    };
 
     println!(
         "LP_STUDIO_READY {}",
         serde_json::json!({
             "editorOrigin": editor_origin,
             "previewOrigin": preview_listener_origin,
+            "operatingMode": operating_mode,
         })
     );
 
@@ -311,6 +346,18 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_level_is_an_exact_allow_list_not_an_env_filter_directive() {
+        for level in ["off", "error", "warn", "info", "debug", "trace"] {
+            assert_eq!(safe_log_level(Some(level)), level);
+            assert_eq!(safe_log_level(Some(&level.to_ascii_uppercase())), level);
+        }
+        assert_eq!(safe_log_level(None), DEFAULT_LOG_LEVEL);
+        assert_eq!(safe_log_level(Some("")), DEFAULT_LOG_LEVEL);
+        assert_eq!(safe_log_level(Some("reqwest=trace")), DEFAULT_LOG_LEVEL);
+        assert_eq!(safe_log_level(Some("trace,hyper=trace")), DEFAULT_LOG_LEVEL);
+    }
 
     #[test]
     fn preview_listener_health_origin_and_browser_scope_base_have_distinct_hosts() {

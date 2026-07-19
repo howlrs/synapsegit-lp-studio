@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.production-integration-performance-profile/1",
+  "scope": "packaged_local_production_application_integration",
+  "runnerVersion": "synapsegit-lp-studio.production-integration-performance-runner/1",
+  "fixture": {
+    "zoomRootElementId": "production-performance-zoom-root",
+    "targetElementId": "production-performance-target",
+    "outerScrollElementId": "production-performance-outer-scroll",
+    "innerScrollElementId": "production-performance-inner-scroll"
+  },
+  "geometryMatrix": {
+    "viewports": [
+      { "name": "desktop", "width": 1280 },
+      { "name": "tablet", "width": 768 },
+      { "name": "mobile", "width": 375 }
+    ],
+    "deviceScaleFactors": [1, 2],
+    "contentZoomFactors": [1, 1.25, 2],
+    "previewScales": [0.75, 1],
+    "scrollCases": [
+      { "name": "origin", "windowTop": 0, "outerTop": 0, "innerLeft": 0 },
+      {
+        "name": "nested-scroll",
+        "windowTop": 48,
+        "outerTop": 72,
+        "innerLeft": 56
+      }
+    ]
+  },
+  "geometryThresholds": {
+    "overlayMaximumErrorCssPx": 2,
+    "overlayFeedbackP95Ms": 100
+  },
+  "autosave": {
+    "warmupSampleCount": 2,
+    "sampleCount": 20,
+    "finalInputToCompletionP95Ms": 1000
+  },
+  "changeSet": {
+    "probeSchemaVersion": "synapsegit-lp-studio.change-set-performance-probe/1",
+    "warmupSampleCount": 2,
+    "sampleCount": 20,
+    "changedTextFileCount": 10,
+    "totalChangedTextBytes": 2097152,
+    "validationAndApplicationP95Ms": 2000
+  },
+  "thresholdPolicy": "advisory_on_uncharacterized_ci",
+  "hardGates": [
+    "packaged App import reaches a scoped Preview iframe",
+    "all 72 matrix cases across 3 configured and distinct rendered Preview widths, 2 DPRs, 3 content zooms, 2 Preview scales, and 2 scroll states traverse preview_target_runtime, the bound bridge, Target API, and the runtime overlay",
+    "maximum overlay-to-element error is at most 2 CSS px",
+    "autosave samples complete through the production App and Project metadata API",
+    "the production ChangeSet parser validates and applies exactly 10 text files totaling 2 MiB",
+    "raw samples and recomputable aggregates are retained without project data or private paths"
+  ],
+  "manualEvidence": {
+    "creatorEndToEndVerification": "pending",
+    "screenReader": "pending",
+    "liveProvider": "pending_external_credential_and_billing_acknowledgement"
+  },
+  "claimBoundary": {
+    "crossBrowserSupport": false,
+    "productionReady": false,
+    "releaseCreated": false
+  }
+}

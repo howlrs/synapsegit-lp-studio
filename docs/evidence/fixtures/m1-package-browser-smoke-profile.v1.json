@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.package-browser-smoke-profile/1",
+  "scope": "local_internal_evaluation_editor_root",
+  "performanceThresholdPolicy": "advisory_on_uncharacterized_ci",
+  "warmupReloads": 1,
+  "sampleCount": 3,
+  "viewports": {
+    "desktop": { "width": 1280, "height": 800 },
+    "narrow": { "width": 320, "height": 640 }
+  },
+  "thresholds": {
+    "navigationDurationP95Ms": 5000,
+    "responseStartP95Ms": 2000,
+    "domNodeCountMaximum": 5000,
+    "narrowHorizontalOverflowMaximumPx": 1
+  },
+  "accessibilitySmoke": {
+    "requiredDocumentLanguage": "ja",
+    "requiredMainLandmarksMinimum": 1,
+    "duplicateIdMaximum": 0,
+    "namelessInteractiveControlMaximum": 0,
+    "imageWithoutAltMaximum": 0,
+    "unlabelledFormControlMaximum": 0,
+    "positiveTabIndexMaximum": 0,
+    "keyboardInitialTabMustFocusVisibleControl": true,
+    "reducedMotionRenderRequired": true,
+    "forcedColorsRenderRequired": true
+  },
+  "manualEvidence": {
+    "creatorEndToEndVerification": "pending",
+    "keyboardZoomAndContrast": "pending",
+    "screenReader": "pending",
+    "liveProvider": "pending_external_credential_and_billing_acknowledgement"
+  },
+  "coverageBoundary": {
+    "thisProfileMeasures": [
+      "packaged Editor root navigation timing",
+      "basic document and control accessibility invariants",
+      "initial keyboard focus",
+      "320 CSS pixel rendering",
+      "reduced-motion and forced-colors rendering"
+    ],
+    "thisProfileDoesNotComplete": [
+      "the ADR-0011 50 MiB and 10000-node performance corpus",
+      "Target overlay geometry across DPR, zoom, transforms, and nested scrolling",
+      "manual keyboard-only Creator workflow",
+      "manual screen-reader review",
+      "WCAG conformance",
+      "live-provider evidence",
+      "production, release, distribution, or platform support claims"
+    ]
+  }
+}
