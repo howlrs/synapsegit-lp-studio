@@ -14,16 +14,29 @@ axum = "0.8.8"
 base64 = "0.22.1"
 getrandom = "0.4.2"
 fs2 = "0.4.3"
+html5ever = "=0.39.0"
 http = "1.4.0"
 libc = "0.2.183"
+lightningcss = { version = "=1.0.0-alpha.71", default-features = false }
+markup5ever_rcdom = "=0.39.0"
 mime_guess = "2.0.5"
+oxc_allocator = "=0.140.0"
+oxc_parser = { version = "=0.140.0", default-features = false, features = ["regular_expression"] }
+oxc_semantic = { version = "=0.140.0", default-features = false }
+oxc_span = "=0.140.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
 synapse-artifact = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-application = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-artifact-journal = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-canonical = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-core = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-sqlite = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
 thiserror = "2.0.18"
-time = { version = "0.3.47", features = ["formatting", "macros"] }
+time = { version = "0.3.47", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["catch-panic", "compression-gzip", "fs", "request-id", "set-header", "trace"] }

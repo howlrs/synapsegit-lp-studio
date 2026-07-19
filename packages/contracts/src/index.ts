@@ -41,6 +41,17 @@ export const TARGET_CONTRACT_LIMITS = {
   blockLevel: 64,
 } as const;
 
+export const RECOVERY_CONTRACT_LIMITS = {
+  maxPoints: 72,
+  maxSnapshotFiles: 1_000,
+} as const;
+
+export const PROJECT_DISPLAY_NAME_LIMITS = {
+  codePoints: 256,
+  utf8Bytes: 1_024,
+} as const;
+export const PROJECT_METADATA_AUTOSAVE_DEBOUNCE_MS = 250 as const;
+
 export type SchemaVersion = typeof SCHEMA_VERSION;
 export type PreviewMode = "select" | "interact";
 export type PreviewSource = "accepted" | "proposed";
@@ -60,6 +71,9 @@ export interface AiProviderDescriptor {
   adapterVersion: string;
   external: boolean;
   availability: AiProviderAvailability;
+  dataRetentionPolicy: string;
+  trainingPolicy: string;
+  policyNotice: string;
   models: AiProviderModelDescriptor[];
 }
 
@@ -73,6 +87,8 @@ export interface BootstrapResponse {
   editorOrigin: string;
   previewOrigin: string;
   capabilities: {
+    operatingMode?: "normal" | "read_only_recovery";
+    recoveryPointCount?: number;
     targetKinds: ["page", "block", "element", "text", "point", "region"];
     dispositions: ArtifactDisposition[];
     singleProposalPerProject: true;
@@ -95,6 +111,30 @@ export interface ProjectFile {
   byteLength: number;
 }
 
+export type ActiveReviewStatus =
+  "pending_review" | "reconciliation_required" | "failed";
+
+export interface ProjectActiveReview {
+  reviewId: string;
+  proposalId: string;
+  baseRevisionId: string;
+  status: ActiveReviewStatus;
+}
+
+export interface ProjectHistoryEntry {
+  reviewId: string;
+  proposalId: string;
+  baseRevisionId: string;
+  resultingRevisionId: string;
+  disposition: ArtifactDisposition;
+  artifactManifestSha256: string;
+  baseArtifactManifestSha256?: string;
+  resultingAcceptedManifestSha256?: string;
+  decisionReceiptSha256: string;
+  recordedAt: string;
+  publicNote?: string | null;
+}
+
 export interface Project {
   id: string;
   displayName: string;
@@ -103,6 +143,10 @@ export interface Project {
   status: "ready";
   previewUrl: string;
   files: ProjectFile[];
+  /** Absent only when talking to the pre-C7 local server. */
+  activeReview?: ProjectActiveReview | null;
+  /** Absent only when talking to the pre-C7 local server. */
+  history?: ProjectHistoryEntry[];
 }
 
 export interface ProjectResponse {
@@ -154,6 +198,12 @@ export interface ConfirmImportRequest {
 export interface CreateProjectRequest {
   schemaVersion: SchemaVersion;
   template: "blank";
+}
+
+export interface UpdateProjectMetadataRequest {
+  schemaVersion: SchemaVersion;
+  expectedDisplayName: string;
+  displayName: string;
 }
 
 export interface CreateTargetRequest {
@@ -499,6 +549,10 @@ export interface AiAttemptStatusV1 {
   status: AiAttemptStatus;
 }
 
+export interface CancelAiAttemptRequest {
+  schemaVersion: SchemaVersion;
+}
+
 interface AiProviderStreamEventCommonV1 {
   schemaVersion: SchemaVersion;
   attemptId: string;
@@ -575,6 +629,14 @@ export interface Proposal {
   changes: ProposalChange[];
   unifiedDiff: string;
   validation: ProposalValidation;
+  /** Persisted review context added by the C7 resume contract. */
+  target?: TargetV1;
+  /** Proposed-workspace re-resolution added by the C7 resume contract. */
+  targetResolution?: TargetResolverResultV1;
+  /** Human request restored without exposing provider request/response data. */
+  instruction?: string;
+  /** A deferred predecessor is terminal; continuation always has a new ID. */
+  derivedFromProposalId?: string | null;
 }
 
 export interface ProposalResponse {
@@ -617,12 +679,100 @@ export interface DecisionResponse {
   project: Project;
 }
 
+export type ReviewStatus =
+  | "pending_review"
+  | "adopted"
+  | "rejected"
+  | "deferred"
+  | "reconciliation_required"
+  | "failed";
+
+export interface ReviewDecision {
+  proposalId: string;
+  disposition: ArtifactDisposition;
+  revisionId: string;
+  artifactManifestSha256: string;
+}
+
+export interface Review {
+  reviewId: string;
+  projectId: string;
+  proposalId: string;
+  status: ReviewStatus;
+  reconciliationRequired: boolean;
+  proposal: Proposal | null;
+  decision: ReviewDecision | null;
+}
+
+export interface ReviewResponse {
+  schemaVersion: SchemaVersion;
+  review: Review;
+}
+
 export interface CreateExportRequest {
   schemaVersion: SchemaVersion;
   revisionId: string;
 }
 
-export interface ExportReceipt {
+export interface SchemaIdentityV1 {
+  name: string;
+  version: number;
+}
+
+export interface ExportOptionsV1 {
+  entryPoint: string;
+  basePathProfile: "relative_static_http";
+  externalAssetPolicy: "report";
+  artifactFormat: "zip_stored_v1";
+}
+
+export interface ExportFileManifestEntryV1 {
+  path: string;
+  mediaType: string;
+  byteLength: number;
+  sha256: string;
+}
+
+export interface ExportFileManifestV1 {
+  schema: SchemaIdentityV1;
+  sha256: string;
+  totalByteLength: number;
+  files: ExportFileManifestEntryV1[];
+}
+
+export type StaticHostingProfile =
+  "offline_self_contained" | "standalone_static";
+
+export interface ExportExternalReferenceV1 {
+  sourcePath: string;
+  sanitizedUrl: string;
+  origin: string;
+  userinfoRedacted: boolean;
+  queryRedacted: boolean;
+  fragmentRedacted: boolean;
+}
+
+export interface ExportNoticeV1 {
+  code: string;
+  message: string;
+}
+
+export interface ExportValidationReportV1 {
+  profile: StaticHostingProfile;
+  localReferenceCount: number;
+  externalReferences: ExportExternalReferenceV1[];
+  externalOrigins: string[];
+  dynamicReferenceSources: string[];
+  warnings: ExportNoticeV1[];
+  limitations: ExportNoticeV1[];
+}
+
+export interface ExportArchiveIdentityV1 {
+  sha256: string;
+  byteLength: number;
+}
+
+interface ExportReceiptBase {
   id: string;
   revisionId: string;
   sha256: string;
@@ -630,9 +780,188 @@ export interface ExportReceipt {
   downloadUrl: string;
 }
 
+interface LegacyExportReceiptDetails {
+  receiptSha256?: never;
+  sourceManifestSha256?: never;
+  generatedAtUtc?: never;
+  options?: never;
+  fileManifest?: never;
+  validation?: never;
+  archive?: never;
+}
+
+interface DetailedExportReceiptDetails {
+  receiptSha256: string;
+  sourceManifestSha256: string;
+  generatedAtUtc: string;
+  options: ExportOptionsV1;
+  fileManifest: ExportFileManifestV1;
+  validation: ExportValidationReportV1;
+  archive: ExportArchiveIdentityV1;
+}
+
+/** Detailed fields are all-or-none while the pre-C8 server remains readable. */
+export type ExportReceipt = ExportReceiptBase &
+  (LegacyExportReceiptDetails | DetailedExportReceiptDetails);
+
 export interface ExportResponse {
   schemaVersion: SchemaVersion;
   export: ExportReceipt;
+}
+
+export interface CreatePublicationRequest {
+  schemaVersion: SchemaVersion;
+  revisionId: string;
+  publicLabel: string;
+  title: string;
+  summary: string;
+  publicDecisionNote?: string;
+}
+
+export interface PublicationFile {
+  path: string;
+  mediaType: string;
+  sha256: string;
+  byteLength: number;
+  utf8: string;
+}
+
+export interface PublicationDraft {
+  id: string;
+  revisionId: string;
+  sha256: string;
+  byteLength: number;
+  files: PublicationFile[];
+  downloadUrl: string;
+  networkWrites: false;
+  remotePublication: "separate_human_action";
+}
+
+export interface PublicationResponse {
+  schemaVersion: SchemaVersion;
+  publication: PublicationDraft;
+}
+
+export type RetainedArtifactKind = "static_export" | "publication_draft";
+
+export interface RetainedArtifactSummary {
+  kind: RetainedArtifactKind;
+  id: string;
+  projectId: string;
+  revisionId: string;
+  sha256: string;
+  payloadByteLength: number;
+  cleanupImpact: string;
+}
+
+export interface FailedProposalRetentionSummary {
+  proposalId: string;
+  reviewId: string;
+  status: "failed";
+  payloadByteLength: number;
+  cleanupImpact: string;
+}
+
+export interface ProjectRetentionSummary {
+  projectId: string;
+  displayName: string;
+  revisionId: string;
+  acceptedManifestSha256: string;
+  acceptedFileByteLength: number;
+  targetCount: number;
+  conversationContextCount: number;
+  conversationPersistence: "memory_only";
+  failedProposal: FailedProposalRetentionSummary | null;
+  terminalDecisionCount: number;
+  artifacts: RetainedArtifactSummary[];
+  projectDeletionImpact: string;
+}
+
+export interface RetentionInventory {
+  automaticGc: false;
+  telemetry: "absent";
+  cleanupRequiresExplicitConfirmation: true;
+  projects: ProjectRetentionSummary[];
+}
+
+export interface RetentionResponse {
+  schemaVersion: SchemaVersion;
+  retention: RetentionInventory;
+}
+
+export type RetentionCleanupScope =
+  | "conversation_context"
+  | "failed_proposal"
+  | "static_export"
+  | "publication_draft"
+  | "project";
+
+export type RetentionCleanupRequest =
+  | {
+      scope: "conversation_context";
+      projectId: string;
+      confirmation: string;
+    }
+  | {
+      scope: "failed_proposal";
+      projectId: string;
+      proposalId: string;
+      reviewId: string;
+      confirmation: string;
+    }
+  | {
+      scope: "static_export" | "publication_draft";
+      projectId: string;
+      artifactId: string;
+      expectedSha256: string;
+      confirmation: string;
+    }
+  | {
+      scope: "project";
+      projectId: string;
+      expectedRevisionId: string;
+      expectedManifestSha256: string;
+      confirmation: string;
+    };
+
+export interface RetentionCleanupResponse {
+  schemaVersion: SchemaVersion;
+  removed: {
+    scope: RetentionCleanupScope;
+    id: string;
+    payloadByteLength: number;
+  };
+  retention: RetentionInventory;
+}
+
+export interface RecoveryPoint {
+  id: string;
+  kind: "versioned_backup" | "last_accepted";
+  projectId: string | null;
+  revisionId: string | null;
+  artifactManifestSha256: string | null;
+  diagnostic: {
+    verified: boolean;
+    code: string;
+    manifestSha256: string | null;
+    fileCount: number;
+    totalBytes: number;
+  };
+  exportUrl: string | null;
+}
+
+export interface RecoveryResponse {
+  schemaVersion: SchemaVersion;
+  recoveryPoints: RecoveryPoint[];
+}
+
+export type ApiErrorAcceptedState = "unchanged" | "reconciliation_required";
+export type ApiErrorRecoveryAction =
+  "retry" | "refresh" | "reconcile" | "correct_request" | "manual_recovery";
+
+export interface ApiErrorDetail {
+  acceptedState: ApiErrorAcceptedState;
+  recoveryAction: ApiErrorRecoveryAction;
 }
 
 export interface ApiErrorResponse {
@@ -641,7 +970,9 @@ export interface ApiErrorResponse {
     code: string;
     message: string;
     requestId: string;
+    operationId: string;
     retryable: boolean;
+    detail: ApiErrorDetail;
   };
 }
 
@@ -877,6 +1208,14 @@ const isPathPrivateNonEmptyString = (value: unknown): value is string =>
   isNonEmptyString(value) &&
   !value.includes("\0") &&
   !containsAbsolutePath(value);
+
+export const isProjectDisplayName = (value: unknown): value is string =>
+  isBoundedString(value, 1, PROJECT_DISPLAY_NAME_LIMITS.codePoints) &&
+  isBoundedUtf8String(value, 1, PROJECT_DISPLAY_NAME_LIMITS.utf8Bytes) &&
+  value.normalize("NFC") === value &&
+  value.trim().length > 0 &&
+  !containsAbsolutePath(value) &&
+  ![...value].some((character) => /\p{Cc}/u.test(character));
 const isExactArrayOf = <T>(
   value: unknown,
   guard: (item: unknown) => item is T,
@@ -933,6 +1272,14 @@ const isBoundedUtf8String = (
   const bytes = new TextEncoder().encode(value).byteLength;
   return bytes >= minimumBytes && bytes <= maximumBytes;
 };
+
+const isArtifactDisposition = (value: unknown): value is ArtifactDisposition =>
+  value === "adopted_unchanged" || value === "rejected" || value === "deferred";
+
+const isUtcTimestamp = (value: unknown): value is string =>
+  isString(value) &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value) &&
+  !Number.isNaN(Date.parse(value));
 
 const isBoundedId = (value: unknown): value is string =>
   isBoundedString(value, 1, TARGET_CONTRACT_LIMITS.idLength);
@@ -1441,18 +1788,70 @@ export const isTargetResolverResultV1 = (
   );
 };
 
+const isProjectActiveReview = (value: unknown): value is ProjectActiveReview =>
+  isRecord(value) &&
+  hasExactKeys(value, ["reviewId", "proposalId", "baseRevisionId", "status"]) &&
+  isBoundedId(value.reviewId) &&
+  isBoundedId(value.proposalId) &&
+  isBoundedId(value.baseRevisionId) &&
+  (value.status === "pending_review" ||
+    value.status === "reconciliation_required" ||
+    value.status === "failed");
+
+const isProjectHistoryEntry = (value: unknown): value is ProjectHistoryEntry =>
+  isRecord(value) &&
+  hasExactKeys(
+    value,
+    [
+      "reviewId",
+      "proposalId",
+      "baseRevisionId",
+      "resultingRevisionId",
+      "disposition",
+      "artifactManifestSha256",
+      "decisionReceiptSha256",
+      "recordedAt",
+    ],
+    [
+      "baseArtifactManifestSha256",
+      "resultingAcceptedManifestSha256",
+      "publicNote",
+    ],
+  ) &&
+  isBoundedId(value.reviewId) &&
+  isBoundedId(value.proposalId) &&
+  isBoundedId(value.baseRevisionId) &&
+  isBoundedId(value.resultingRevisionId) &&
+  isArtifactDisposition(value.disposition) &&
+  isSha256(value.artifactManifestSha256) &&
+  Object.hasOwn(value, "baseArtifactManifestSha256") ===
+    Object.hasOwn(value, "resultingAcceptedManifestSha256") &&
+  (!Object.hasOwn(value, "baseArtifactManifestSha256") ||
+    isSha256(value.baseArtifactManifestSha256)) &&
+  (!Object.hasOwn(value, "resultingAcceptedManifestSha256") ||
+    isSha256(value.resultingAcceptedManifestSha256)) &&
+  isSha256(value.decisionReceiptSha256) &&
+  isUtcTimestamp(value.recordedAt) &&
+  (!Object.hasOwn(value, "publicNote") ||
+    value.publicNote === null ||
+    isBoundedUtf8String(value.publicNote, 1, 2_000));
+
 export const isProject = (value: unknown): value is Project => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, [
-      "id",
-      "displayName",
-      "revisionId",
-      "acceptedManifestSha256",
-      "status",
-      "previewUrl",
-      "files",
-    ]) ||
+    !hasExactKeys(
+      value,
+      [
+        "id",
+        "displayName",
+        "revisionId",
+        "acceptedManifestSha256",
+        "status",
+        "previewUrl",
+        "files",
+      ],
+      ["activeReview", "history"],
+    ) ||
     !isExactArrayOf(
       value.files,
       (file): file is ProjectFile =>
@@ -1466,11 +1865,20 @@ export const isProject = (value: unknown): value is Project => {
   }
   return (
     isNonEmptyString(value.id) &&
-    isPathPrivateNonEmptyString(value.displayName) &&
+    isProjectDisplayName(value.displayName) &&
     isNonEmptyString(value.revisionId) &&
     isSha256(value.acceptedManifestSha256) &&
     value.status === "ready" &&
-    isScopedPreviewUrl(value.previewUrl)
+    isScopedPreviewUrl(value.previewUrl) &&
+    (!Object.hasOwn(value, "activeReview") ||
+      value.activeReview === null ||
+      (isProjectActiveReview(value.activeReview) &&
+        value.activeReview.baseRevisionId === value.revisionId)) &&
+    (!Object.hasOwn(value, "history") ||
+      (isBoundedExactArray(value.history, 0, 1_024, isProjectHistoryEntry) &&
+        new Set(
+          value.history.map((entry) => `${entry.reviewId}:${entry.proposalId}`),
+        ).size === value.history.length))
   );
 };
 
@@ -1493,6 +1901,9 @@ export const isAiProviderDescriptor = (
       "adapterVersion",
       "external",
       "availability",
+      "dataRetentionPolicy",
+      "trainingPolicy",
+      "policyNotice",
       "models",
     ]) ||
     !isBoundedExactArray(value.models, 0, 32, isAiProviderModelDescriptor)
@@ -1510,6 +1921,9 @@ export const isAiProviderDescriptor = (
     typeof value.external === "boolean" &&
     (value.availability === "available" ||
       value.availability === "not_configured") &&
+    isBoundedString(value.dataRetentionPolicy, 1, 256) &&
+    isBoundedString(value.trainingPolicy, 1, 256) &&
+    isBoundedString(value.policyNotice, 1, 1024) &&
     (value.availability !== "available" || value.models.length > 0) &&
     new Set(value.models.map((model) => model.id)).size === value.models.length
   );
@@ -1538,14 +1952,18 @@ export const isBootstrapResponse = (
     !isRecord(session) ||
     !hasExactKeys(session, ["token", "expiresAt"]) ||
     !isRecord(capabilities) ||
-    !hasExactKeys(capabilities, [
-      "targetKinds",
-      "dispositions",
-      "singleProposalPerProject",
-      "importAvailable",
-      "aiProviders",
-      "limits",
-    ])
+    !hasExactKeys(
+      capabilities,
+      [
+        "targetKinds",
+        "dispositions",
+        "singleProposalPerProject",
+        "importAvailable",
+        "aiProviders",
+        "limits",
+      ],
+      ["operatingMode", "recoveryPointCount"],
+    )
   ) {
     return false;
   }
@@ -1572,6 +1990,17 @@ export const isBootstrapResponse = (
       ["adopted_unchanged", "rejected", "deferred"].includes(item),
     ) &&
     capabilities.singleProposalPerProject === true &&
+    (!Object.hasOwn(capabilities, "operatingMode") ||
+      capabilities.operatingMode === "normal" ||
+      capabilities.operatingMode === "read_only_recovery") &&
+    (!Object.hasOwn(capabilities, "recoveryPointCount") ||
+      isSafeIntegerRange(
+        capabilities.recoveryPointCount,
+        0,
+        RECOVERY_CONTRACT_LIMITS.maxPoints,
+      )) &&
+    Object.hasOwn(capabilities, "operatingMode") ===
+      Object.hasOwn(capabilities, "recoveryPointCount") &&
     typeof capabilities.importAvailable === "boolean" &&
     isBoundedExactArray(
       capabilities.aiProviders,
@@ -1616,6 +2045,19 @@ export const isProjectsResponse = (value: unknown): value is ProjectsResponse =>
   hasExactKeys(value, ["schemaVersion", "projects"]) &&
   hasVersion(value) &&
   isExactArrayOf(value.projects, isProject);
+
+export const isUpdateProjectMetadataRequest = (
+  value: unknown,
+): value is UpdateProjectMetadataRequest =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "schemaVersion",
+    "expectedDisplayName",
+    "displayName",
+  ]) &&
+  hasVersion(value) &&
+  isProjectDisplayName(value.expectedDisplayName) &&
+  isProjectDisplayName(value.displayName);
 
 const isImportPreviewFile = (value: unknown): value is ImportPreviewFile =>
   isRecord(value) &&
@@ -2141,58 +2583,79 @@ const isProposalValidation = (value: unknown): value is ProposalValidation =>
     value.status === "failed") &&
   isExactArrayOf(value.checks, isValidationCheck);
 
-export const isProposalResponse = (
-  value: unknown,
-): value is ProposalResponse => {
+const isProposal = (value: unknown): value is Proposal => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["schemaVersion", "proposal"]) ||
-    !hasVersion(value) ||
-    !isRecord(value.proposal) ||
-    !hasExactKeys(value.proposal, [
-      "id",
-      "reviewId",
-      "baseRevisionId",
-      "status",
-      "summary",
-      "artifactManifestSha256",
-      "reviewContextSha256",
-      "providerContextSha256",
-      "changeSetSha256",
-      "changeSet",
-      "attribution",
-      "sourceAttribution",
-      "executionVerified",
-      "previewUrl",
-      "changes",
-      "unifiedDiff",
-      "validation",
-    ])
+    !hasExactKeys(
+      value,
+      [
+        "id",
+        "reviewId",
+        "baseRevisionId",
+        "status",
+        "summary",
+        "artifactManifestSha256",
+        "reviewContextSha256",
+        "providerContextSha256",
+        "changeSetSha256",
+        "changeSet",
+        "attribution",
+        "sourceAttribution",
+        "executionVerified",
+        "previewUrl",
+        "changes",
+        "unifiedDiff",
+        "validation",
+      ],
+      ["target", "targetResolution", "instruction", "derivedFromProposalId"],
+    )
   ) {
     return false;
   }
-  const proposal = value.proposal;
+  const hasResumeContext = ["target", "targetResolution", "instruction"].map(
+    (key) => Object.hasOwn(value, key),
+  );
+  if (hasResumeContext.some(Boolean) && !hasResumeContext.every(Boolean)) {
+    return false;
+  }
   return (
-    isNonEmptyString(proposal.id) &&
-    isNonEmptyString(proposal.reviewId) &&
-    isNonEmptyString(proposal.baseRevisionId) &&
-    proposal.status === "pending_review" &&
-    isString(proposal.summary) &&
-    isSha256(proposal.artifactManifestSha256) &&
-    isSha256(proposal.reviewContextSha256) &&
-    isSha256(proposal.providerContextSha256) &&
-    isSha256(proposal.changeSetSha256) &&
-    isChangeSetV1(proposal.changeSet) &&
-    proposal.changeSet.baseRevisionId === proposal.baseRevisionId &&
-    isAiProviderAttributionV1(proposal.attribution) &&
-    proposal.sourceAttribution === "caller_supplied_ai_attributed" &&
-    proposal.executionVerified === false &&
-    isScopedPreviewUrl(proposal.previewUrl) &&
-    isExactArrayOf(proposal.changes, isProposalChange) &&
-    isString(proposal.unifiedDiff) &&
-    isProposalValidation(proposal.validation)
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.reviewId) &&
+    isNonEmptyString(value.baseRevisionId) &&
+    value.status === "pending_review" &&
+    isString(value.summary) &&
+    isSha256(value.artifactManifestSha256) &&
+    isSha256(value.reviewContextSha256) &&
+    isSha256(value.providerContextSha256) &&
+    isSha256(value.changeSetSha256) &&
+    isChangeSetV1(value.changeSet) &&
+    value.changeSet.baseRevisionId === value.baseRevisionId &&
+    isAiProviderAttributionV1(value.attribution) &&
+    value.sourceAttribution === "caller_supplied_ai_attributed" &&
+    value.executionVerified === false &&
+    isScopedPreviewUrl(value.previewUrl) &&
+    isExactArrayOf(value.changes, isProposalChange) &&
+    isString(value.unifiedDiff) &&
+    isProposalValidation(value.validation) &&
+    (!hasResumeContext[0] ||
+      (isTargetV1(value.target) &&
+        value.target.captureRevisionId === value.baseRevisionId &&
+        isTargetResolverResultV1(value.targetResolution) &&
+        value.targetResolution.targetId === value.target.targetId &&
+        value.targetResolution.captureRevisionId ===
+          value.target.captureRevisionId &&
+        isBoundedUtf8String(value.instruction, 1, 2_000))) &&
+    (!Object.hasOwn(value, "derivedFromProposalId") ||
+      value.derivedFromProposalId === null ||
+      isBoundedId(value.derivedFromProposalId))
   );
 };
+
+export const isProposalResponse = (value: unknown): value is ProposalResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "proposal"]) &&
+  hasVersion(value) &&
+  isProposal(value.proposal);
 
 export const isApprovalResponse = (
   value: unknown,
@@ -2237,14 +2700,246 @@ export const isDecisionResponse = (
   return (
     isNonEmptyString(decision.reviewId) &&
     isNonEmptyString(decision.proposalId) &&
-    (decision.disposition === "adopted_unchanged" ||
-      decision.disposition === "rejected" ||
-      decision.disposition === "deferred") &&
+    isArtifactDisposition(decision.disposition) &&
     decision.status === "committed" &&
     isNonEmptyString(decision.revisionId) &&
     isSha256(decision.artifactManifestSha256)
   );
 };
+
+const isReviewDecision = (value: unknown): value is ReviewDecision =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "proposalId",
+    "disposition",
+    "revisionId",
+    "artifactManifestSha256",
+  ]) &&
+  isBoundedId(value.proposalId) &&
+  isArtifactDisposition(value.disposition) &&
+  isBoundedId(value.revisionId) &&
+  isSha256(value.artifactManifestSha256);
+
+export const isReviewResponse = (value: unknown): value is ReviewResponse => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["schemaVersion", "review"]) ||
+    !hasVersion(value) ||
+    !isRecord(value.review) ||
+    !hasExactKeys(value.review, [
+      "reviewId",
+      "projectId",
+      "proposalId",
+      "status",
+      "reconciliationRequired",
+      "proposal",
+      "decision",
+    ])
+  ) {
+    return false;
+  }
+  const review = value.review;
+  if (
+    !isBoundedId(review.reviewId) ||
+    !isBoundedId(review.projectId) ||
+    !isBoundedId(review.proposalId) ||
+    ![
+      "pending_review",
+      "adopted",
+      "rejected",
+      "deferred",
+      "reconciliation_required",
+      "failed",
+    ].includes(String(review.status)) ||
+    typeof review.reconciliationRequired !== "boolean"
+  ) {
+    return false;
+  }
+  if (
+    review.status === "pending_review" ||
+    review.status === "reconciliation_required" ||
+    review.status === "failed"
+  ) {
+    return (
+      review.reconciliationRequired ===
+        (review.status === "reconciliation_required") &&
+      isProposal(review.proposal) &&
+      review.proposal.reviewId === review.reviewId &&
+      review.proposal.id === review.proposalId &&
+      review.decision === null
+    );
+  }
+  const expectedDisposition: ArtifactDisposition =
+    review.status === "adopted"
+      ? "adopted_unchanged"
+      : review.status === "rejected"
+        ? "rejected"
+        : "deferred";
+  return (
+    review.reconciliationRequired === false &&
+    review.proposal === null &&
+    isReviewDecision(review.decision) &&
+    review.decision.proposalId === review.proposalId &&
+    review.decision.disposition === expectedDisposition
+  );
+};
+
+const isSchemaIdentityV1 = (value: unknown): value is SchemaIdentityV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["name", "version"]) &&
+  isBoundedString(value.name, 1, 128) &&
+  isSafeIntegerRange(value.version, 1, 65_535);
+
+const isExportOptionsV1 = (value: unknown): value is ExportOptionsV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "entryPoint",
+    "basePathProfile",
+    "externalAssetPolicy",
+    "artifactFormat",
+  ]) &&
+  isContractRelativePath(value.entryPoint) &&
+  value.basePathProfile === "relative_static_http" &&
+  value.externalAssetPolicy === "report" &&
+  value.artifactFormat === "zip_stored_v1";
+
+const isExportFileManifestEntryV1 = (
+  value: unknown,
+): value is ExportFileManifestEntryV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["path", "mediaType", "byteLength", "sha256"]) &&
+  isContractRelativePath(value.path) &&
+  isBoundedString(value.mediaType, 1, 256) &&
+  isNonNegativeInteger(value.byteLength) &&
+  isSha256(value.sha256);
+
+const isExportFileManifestV1 = (
+  value: unknown,
+): value is ExportFileManifestV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["schema", "sha256", "totalByteLength", "files"]) ||
+    !isSchemaIdentityV1(value.schema) ||
+    value.schema.name !== "org.synapsegit-lp-studio.export-file-manifest" ||
+    value.schema.version !== 1 ||
+    !isSha256(value.sha256) ||
+    !isNonNegativeInteger(value.totalByteLength) ||
+    !isBoundedExactArray(value.files, 1, 4_096, isExportFileManifestEntryV1)
+  ) {
+    return false;
+  }
+  const paths = value.files.map((file) => file.path);
+  const total = value.files.reduce((sum, file) => sum + file.byteLength, 0);
+  return (
+    new Set(paths).size === paths.length &&
+    total === value.totalByteLength &&
+    Number.isSafeInteger(total)
+  );
+};
+
+const isExportNoticeV1 = (value: unknown): value is ExportNoticeV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["code", "message"]) &&
+  isBoundedString(value.code, 1, 128) &&
+  isBoundedString(value.message, 1, 2_048);
+
+const sanitizedExternalIdentity = (
+  sanitizedUrl: string,
+  origin: string,
+): boolean => {
+  const protocolRelative = sanitizedUrl.startsWith("//");
+  let parsed: URL;
+  try {
+    parsed = new URL(protocolRelative ? `https:${sanitizedUrl}` : sanitizedUrl);
+  } catch {
+    return false;
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    return false;
+  }
+  const expectedOrigin = protocolRelative
+    ? parsed.origin.replace(/^https:/, "")
+    : parsed.origin;
+  return expectedOrigin === origin;
+};
+
+const isExportExternalReferenceV1 = (
+  value: unknown,
+): value is ExportExternalReferenceV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "sourcePath",
+    "sanitizedUrl",
+    "origin",
+    "userinfoRedacted",
+    "queryRedacted",
+    "fragmentRedacted",
+  ]) &&
+  isContractRelativePath(value.sourcePath) &&
+  isBoundedString(value.sanitizedUrl, 1, 4_096) &&
+  isBoundedString(value.origin, 1, 512) &&
+  sanitizedExternalIdentity(value.sanitizedUrl, value.origin) &&
+  typeof value.userinfoRedacted === "boolean" &&
+  typeof value.queryRedacted === "boolean" &&
+  typeof value.fragmentRedacted === "boolean";
+
+const isExportValidationReportV1 = (
+  value: unknown,
+): value is ExportValidationReportV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "profile",
+    "localReferenceCount",
+    "externalReferences",
+    "externalOrigins",
+    "dynamicReferenceSources",
+    "warnings",
+    "limitations",
+  ]) &&
+  (value.profile === "offline_self_contained" ||
+    value.profile === "standalone_static") &&
+  isNonNegativeInteger(value.localReferenceCount) &&
+  isBoundedExactArray(
+    value.externalReferences,
+    0,
+    4_096,
+    isExportExternalReferenceV1,
+  ) &&
+  isBoundedExactArray(
+    value.externalOrigins,
+    0,
+    4_096,
+    (origin): origin is string => isBoundedString(origin, 1, 512),
+  ) &&
+  new Set(value.externalOrigins).size === value.externalOrigins.length &&
+  isBoundedExactArray(
+    value.dynamicReferenceSources,
+    0,
+    4_096,
+    (path): path is string => isContractRelativePath(path),
+  ) &&
+  new Set(value.dynamicReferenceSources).size ===
+    value.dynamicReferenceSources.length &&
+  isBoundedExactArray(value.warnings, 0, 256, isExportNoticeV1) &&
+  isBoundedExactArray(value.limitations, 1, 256, isExportNoticeV1) &&
+  (value.profile !== "offline_self_contained" ||
+    value.externalReferences.length === 0) &&
+  (value.profile !== "standalone_static" ||
+    value.externalReferences.length > 0);
+
+const isExportArchiveIdentityV1 = (
+  value: unknown,
+): value is ExportArchiveIdentityV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["sha256", "byteLength"]) &&
+  isSha256(value.sha256) &&
+  isNonNegativeInteger(value.byteLength);
 
 export const isExportResponse = (value: unknown): value is ExportResponse => {
   if (
@@ -2252,25 +2947,308 @@ export const isExportResponse = (value: unknown): value is ExportResponse => {
     !hasExactKeys(value, ["schemaVersion", "export"]) ||
     !hasVersion(value) ||
     !isRecord(value.export) ||
-    !hasExactKeys(value.export, [
-      "id",
-      "revisionId",
-      "sha256",
-      "byteLength",
-      "downloadUrl",
-    ])
+    !hasExactKeys(
+      value.export,
+      ["id", "revisionId", "sha256", "byteLength", "downloadUrl"],
+      [
+        "receiptSha256",
+        "sourceManifestSha256",
+        "generatedAtUtc",
+        "options",
+        "fileManifest",
+        "validation",
+        "archive",
+      ],
+    )
   ) {
     return false;
   }
   const receipt = value.export;
-  return (
+  if (!(
     isNonEmptyString(receipt.id) &&
     isNonEmptyString(receipt.revisionId) &&
     isSha256(receipt.sha256) &&
     isNonNegativeInteger(receipt.byteLength) &&
     isNonEmptyString(receipt.downloadUrl)
+  )) {
+    return false;
+  }
+  const detailKeys = [
+    "receiptSha256",
+    "sourceManifestSha256",
+    "generatedAtUtc",
+    "options",
+    "fileManifest",
+    "validation",
+    "archive",
+  ];
+  const detailPresence = detailKeys.map((key) => Object.hasOwn(receipt, key));
+  if (!detailPresence.some(Boolean)) return true;
+  if (
+    !detailPresence.every(Boolean) ||
+    !isSha256(receipt.receiptSha256) ||
+    !isSha256(receipt.sourceManifestSha256) ||
+    !isUtcTimestamp(receipt.generatedAtUtc) ||
+    !isExportOptionsV1(receipt.options) ||
+    !isExportFileManifestV1(receipt.fileManifest) ||
+    !isExportValidationReportV1(receipt.validation) ||
+    !isExportArchiveIdentityV1(receipt.archive)
+  ) {
+    return false;
+  }
+  const options = receipt.options;
+  const fileManifest = receipt.fileManifest;
+  const archive = receipt.archive;
+  return (
+    fileManifest.files.some((file) => file.path === options.entryPoint) &&
+    archive.sha256 === receipt.sha256 &&
+    archive.byteLength === receipt.byteLength
   );
 };
+
+const isPublicationFile = (value: unknown): value is PublicationFile =>
+  isRecord(value) &&
+  hasExactKeys(value, ["path", "mediaType", "sha256", "byteLength", "utf8"]) &&
+  isContractRelativePath(value.path) &&
+  isBoundedString(value.mediaType, 1, 256) &&
+  isSha256(value.sha256) &&
+  isNonNegativeInteger(value.byteLength) &&
+  isString(value.utf8) &&
+  new TextEncoder().encode(value.utf8).byteLength === value.byteLength;
+
+export const isPublicationResponse = (
+  value: unknown,
+): value is PublicationResponse => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["schemaVersion", "publication"]) ||
+    !hasVersion(value) ||
+    !isRecord(value.publication) ||
+    !hasExactKeys(value.publication, [
+      "id",
+      "revisionId",
+      "sha256",
+      "byteLength",
+      "files",
+      "downloadUrl",
+      "networkWrites",
+      "remotePublication",
+    ])
+  ) {
+    return false;
+  }
+  const publication = value.publication;
+  if (
+    !isBoundedId(publication.id) ||
+    !isBoundedId(publication.revisionId) ||
+    !isSha256(publication.sha256) ||
+    !isNonNegativeInteger(publication.byteLength) ||
+    !isBoundedExactArray(publication.files, 1, 64, isPublicationFile) ||
+    !isNonEmptyString(publication.downloadUrl) ||
+    publication.networkWrites !== false ||
+    publication.remotePublication !== "separate_human_action"
+  ) {
+    return false;
+  }
+  const paths = publication.files.map((file) => file.path);
+  return (
+    new Set(paths).size === paths.length &&
+    ["projection.json", "story.md", "index.html", "manifest.json"].every(
+      (required) => paths.includes(required),
+    )
+  );
+};
+
+const isRetainedArtifactSummary = (
+  value: unknown,
+): value is RetainedArtifactSummary =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "kind",
+    "id",
+    "projectId",
+    "revisionId",
+    "sha256",
+    "payloadByteLength",
+    "cleanupImpact",
+  ]) &&
+  (value.kind === "static_export" || value.kind === "publication_draft") &&
+  isBoundedId(value.id) &&
+  isBoundedId(value.projectId) &&
+  isBoundedId(value.revisionId) &&
+  isSha256(value.sha256) &&
+  isNonNegativeInteger(value.payloadByteLength) &&
+  isBoundedString(value.cleanupImpact, 1, 1_024);
+
+const isFailedProposalRetentionSummary = (
+  value: unknown,
+): value is FailedProposalRetentionSummary =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "proposalId",
+    "reviewId",
+    "status",
+    "payloadByteLength",
+    "cleanupImpact",
+  ]) &&
+  isBoundedId(value.proposalId) &&
+  isBoundedId(value.reviewId) &&
+  value.status === "failed" &&
+  isNonNegativeInteger(value.payloadByteLength) &&
+  isBoundedString(value.cleanupImpact, 1, 1_024);
+
+const isProjectRetentionSummary = (
+  value: unknown,
+): value is ProjectRetentionSummary => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "projectId",
+      "displayName",
+      "revisionId",
+      "acceptedManifestSha256",
+      "acceptedFileByteLength",
+      "targetCount",
+      "conversationContextCount",
+      "conversationPersistence",
+      "failedProposal",
+      "terminalDecisionCount",
+      "artifacts",
+      "projectDeletionImpact",
+    ]) ||
+    !isBoundedId(value.projectId) ||
+    !isBoundedString(value.displayName, 1, 256) ||
+    !isBoundedId(value.revisionId) ||
+    !isSha256(value.acceptedManifestSha256) ||
+    !isNonNegativeInteger(value.acceptedFileByteLength) ||
+    !isSafeIntegerRange(value.targetCount, 0, 32) ||
+    !isSafeIntegerRange(value.conversationContextCount, 0, 32) ||
+    value.conversationPersistence !== "memory_only" ||
+    (value.failedProposal !== null &&
+      !isFailedProposalRetentionSummary(value.failedProposal)) ||
+    !isSafeIntegerRange(value.terminalDecisionCount, 0, 1_024) ||
+    !isBoundedExactArray(value.artifacts, 0, 32, isRetainedArtifactSummary) ||
+    !isBoundedString(value.projectDeletionImpact, 1, 2_048)
+  ) {
+    return false;
+  }
+  return (
+    value.artifacts.every(
+      (artifact) => artifact.projectId === value.projectId,
+    ) &&
+    new Set(
+      value.artifacts.map((artifact) => `${artifact.kind}:${artifact.id}`),
+    ).size === value.artifacts.length
+  );
+};
+
+const isRetentionInventory = (value: unknown): value is RetentionInventory =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "automaticGc",
+    "telemetry",
+    "cleanupRequiresExplicitConfirmation",
+    "projects",
+  ]) &&
+  value.automaticGc === false &&
+  value.telemetry === "absent" &&
+  value.cleanupRequiresExplicitConfirmation === true &&
+  isBoundedExactArray(value.projects, 0, 8, isProjectRetentionSummary) &&
+  new Set(value.projects.map((project) => project.projectId)).size ===
+    value.projects.length;
+
+export const isRetentionResponse = (
+  value: unknown,
+): value is RetentionResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "retention"]) &&
+  hasVersion(value) &&
+  isRetentionInventory(value.retention);
+
+export const isRetentionCleanupResponse = (
+  value: unknown,
+): value is RetentionCleanupResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "removed", "retention"]) &&
+  hasVersion(value) &&
+  isRecord(value.removed) &&
+  hasExactKeys(value.removed, ["scope", "id", "payloadByteLength"]) &&
+  [
+    "conversation_context",
+    "failed_proposal",
+    "static_export",
+    "publication_draft",
+    "project",
+  ].includes(String(value.removed.scope)) &&
+  isBoundedId(value.removed.id) &&
+  isNonNegativeInteger(value.removed.payloadByteLength) &&
+  isRetentionInventory(value.retention);
+
+const isRecoveryPoint = (value: unknown): value is RecoveryPoint => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "id",
+      "kind",
+      "projectId",
+      "revisionId",
+      "artifactManifestSha256",
+      "diagnostic",
+      "exportUrl",
+    ]) ||
+    !isBoundedId(value.id) ||
+    (value.kind !== "versioned_backup" && value.kind !== "last_accepted") ||
+    (value.projectId !== null && !isBoundedId(value.projectId)) ||
+    (value.revisionId !== null && !isBoundedId(value.revisionId)) ||
+    (value.artifactManifestSha256 !== null &&
+      !isSha256(value.artifactManifestSha256)) ||
+    !isRecord(value.diagnostic) ||
+    !hasExactKeys(value.diagnostic, [
+      "verified",
+      "code",
+      "manifestSha256",
+      "fileCount",
+      "totalBytes",
+    ]) ||
+    typeof value.diagnostic.verified !== "boolean" ||
+    !isBoundedString(value.diagnostic.code, 1, 128) ||
+    (value.diagnostic.manifestSha256 !== null &&
+      !isSha256(value.diagnostic.manifestSha256)) ||
+    !isSafeIntegerRange(
+      value.diagnostic.fileCount,
+      0,
+      RECOVERY_CONTRACT_LIMITS.maxSnapshotFiles,
+    ) ||
+    !isNonNegativeInteger(value.diagnostic.totalBytes) ||
+    (value.exportUrl !== null &&
+      (!isNonEmptyString(value.exportUrl) ||
+        !value.exportUrl.startsWith("/api/v1/recovery/") ||
+        !value.exportUrl.endsWith("/export")))
+  ) {
+    return false;
+  }
+  return (
+    value.diagnostic.verified === (value.exportUrl !== null) &&
+    (!value.diagnostic.verified ||
+      (value.projectId !== null &&
+        value.revisionId !== null &&
+        value.artifactManifestSha256 !== null &&
+        value.diagnostic.manifestSha256 !== null))
+  );
+};
+
+export const isRecoveryResponse = (value: unknown): value is RecoveryResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "recoveryPoints"]) &&
+  hasVersion(value) &&
+  isBoundedExactArray(
+    value.recoveryPoints,
+    0,
+    RECOVERY_CONTRACT_LIMITS.maxPoints,
+    isRecoveryPoint,
+  ) &&
+  new Set(value.recoveryPoints.map((point) => point.id)).size ===
+    value.recoveryPoints.length;
 
 export const isApiErrorResponse = (
   value: unknown,
@@ -2280,7 +3258,14 @@ export const isApiErrorResponse = (
     !hasExactKeys(value, ["schemaVersion", "error"]) ||
     !hasVersion(value) ||
     !isRecord(value.error) ||
-    !hasExactKeys(value.error, ["code", "message", "requestId", "retryable"])
+    !hasExactKeys(value.error, [
+      "code",
+      "message",
+      "requestId",
+      "operationId",
+      "retryable",
+      "detail",
+    ])
   ) {
     return false;
   }
@@ -2288,8 +3273,18 @@ export const isApiErrorResponse = (
   return (
     isNonEmptyString(error.code) &&
     isNonEmptyString(error.message) &&
-    isNonEmptyString(error.requestId) &&
-    typeof error.retryable === "boolean"
+    isBoundedId(error.requestId) &&
+    isBoundedId(error.operationId) &&
+    typeof error.retryable === "boolean" &&
+    isRecord(error.detail) &&
+    hasExactKeys(error.detail, ["acceptedState", "recoveryAction"]) &&
+    (error.detail.acceptedState === "unchanged" ||
+      error.detail.acceptedState === "reconciliation_required") &&
+    (error.detail.recoveryAction === "retry" ||
+      error.detail.recoveryAction === "refresh" ||
+      error.detail.recoveryAction === "reconcile" ||
+      error.detail.recoveryAction === "correct_request" ||
+      error.detail.recoveryAction === "manual_recovery")
   );
 };
 

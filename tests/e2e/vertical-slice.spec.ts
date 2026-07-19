@@ -6,6 +6,7 @@ import {
   expect,
   test,
   type APIResponse,
+  type Locator,
   type Page,
   type Response as BrowserResponse,
 } from "@playwright/test";
@@ -22,9 +23,13 @@ import {
   isPreviewDiagnosticMessage,
   isPreviewStructureMessage,
   isPreviewTargetMessage,
+  isPublicationResponse,
   isProjectResponse,
   isProjectsResponse,
   isProposalResponse,
+  isRecoveryResponse,
+  isRetentionCleanupResponse,
+  isRetentionResponse,
   isTargetResponse,
   type BootstrapResponse,
   type ExportResponse,
@@ -33,6 +38,7 @@ import {
   type PreviewTargetMessage,
   type Project,
   type ProjectResponse,
+  type PublicationResponse,
 } from "../../packages/contracts/src/index";
 import apiSchema from "../../packages/contracts/schemas/api-v1.schema.json";
 
@@ -58,6 +64,13 @@ ajv.addKeyword({
   schemaType: "number",
   validate: (limit: number, value: string) =>
     new TextEncoder().encode(value).byteLength <= limit,
+});
+ajv.addKeyword({
+  keyword: "x-normalization",
+  type: "string",
+  schemaType: "string",
+  validate: (form: string, value: string) =>
+    form === "NFC" && value.normalize("NFC") === value,
 });
 ajv.addSchema(apiSchema);
 
@@ -93,7 +106,12 @@ function responseContract(response: BrowserResponse): ResponseContract | null {
   if (!response.ok()) {
     return { definition: "errorResponse", guard: isApiErrorResponse };
   }
-  if (path.endsWith("/download")) return null;
+  if (
+    path.endsWith("/download") ||
+    /^\/api\/v1\/recovery\/[^/]+\/export$/.test(path)
+  ) {
+    return null;
+  }
   if (method === "GET" && path === "/api/v1/bootstrap") {
     return { definition: "bootstrapResponse", guard: isBootstrapResponse };
   }
@@ -130,6 +148,21 @@ function responseContract(response: BrowserResponse): ResponseContract | null {
   }
   if (method === "POST" && path.endsWith("/exports")) {
     return { definition: "exportResponse", guard: isExportResponse };
+  }
+  if (method === "POST" && path.endsWith("/publications")) {
+    return { definition: "publicationResponse", guard: isPublicationResponse };
+  }
+  if (method === "GET" && path === "/api/v1/retention") {
+    return { definition: "retentionResponse", guard: isRetentionResponse };
+  }
+  if (method === "POST" && path === "/api/v1/retention/cleanup") {
+    return {
+      definition: "retentionCleanupResponse",
+      guard: isRetentionCleanupResponse,
+    };
+  }
+  if (method === "GET" && path === "/api/v1/recovery") {
+    return { definition: "recoveryResponse", guard: isRecoveryResponse };
   }
   throw new Error(`Unclassified JSON API response: ${method} ${path}`);
 }
@@ -307,9 +340,33 @@ async function createBlankProject(
   return (payload.value as ProjectResponse).project;
 }
 
+async function focusByTab(
+  page: Page,
+  target: Locator,
+  maxPresses = 180,
+): Promise<void> {
+  await expect(target).toBeVisible();
+  for (let index = 0; index <= maxPresses; index += 1) {
+    if (
+      await target.evaluate((element) => document.activeElement === element)
+    ) {
+      return;
+    }
+    await page.keyboard.press("Tab");
+  }
+  const active = await page.evaluate(() => {
+    const element = document.activeElement;
+    return element instanceof HTMLElement
+      ? `${element.tagName.toLowerCase()}#${element.id}.${element.className}`
+      : String(element);
+  });
+  throw new Error(`Tab order did not reach target; active=${active}`);
+}
+
 test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを得る", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const configuredEditorOrigin = process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
@@ -591,12 +648,31 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   await page.getByRole("button", { name: "送信内容を確認" }).click();
 
   const contextReview = page.getByRole("dialog", { name: "送信内容を確認" });
+  const contextClose = contextReview.getByRole("button", {
+    name: "送信内容を閉じる",
+  });
+  const contextConfirm = contextReview.getByRole("button", {
+    name: "変更案を作成",
+  });
+  await expect(contextClose).toBeFocused();
+  await expect(page.locator("header.studio-header")).toHaveAttribute(
+    "inert",
+    "",
+  );
+  await expect(page.locator("header.studio-header")).toHaveAttribute(
+    "aria-hidden",
+    "true",
+  );
+  await page.keyboard.press("Shift+Tab");
+  await expect(contextConfirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(contextClose).toBeFocused();
   await expect(contextReview).toContainText(INITIAL_HEADING);
   await expect(contextReview).toContainText(/fake/i);
   expect(
     (await contextReview.textContent())?.includes(bootstrap.session.token),
   ).toBeFalsy();
-  await contextReview.getByRole("button", { name: "変更案を作成" }).click();
+  await contextConfirm.click();
 
   const review = page.getByRole("region", { name: "変更案を確認" });
   await expect(review).toBeVisible();
@@ -622,6 +698,8 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
     new URL(proposedPreviewSource!, editorOrigin).href,
     bootstrap.previewOrigin,
   );
+  await page.getByRole("button", { name: "操作モード" }).click();
+  await page.getByRole("button", { name: "選択モード" }).click();
   const proposedTargetResponsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -737,10 +815,317 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   expect(entries[0]?.data.toString("utf8")).toContain(PROPOSED_HEADING);
   expect(entries[0]?.data.toString("utf8")).not.toContain(INITIAL_HEADING);
 
+  await page.getByRole("button", { name: "GitHub-ready記録" }).click();
+  const publicationDialog = page.getByRole("dialog", {
+    name: "GitHub-ready記録",
+  });
+  const publicationClose = publicationDialog.getByRole("button", {
+    name: "publication reviewを閉じる",
+  });
+  const publicationDecisionNote = publicationDialog.getByRole("textbox", {
+    name: "Public decision note（任意・private rationaleとは別）",
+  });
+  await expect(publicationClose).toBeFocused();
+  await expect(page.locator("header.studio-header")).toHaveAttribute(
+    "inert",
+    "",
+  );
+  await page.keyboard.press("Shift+Tab");
+  await expect(publicationDecisionNote).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(publicationClose).toBeFocused();
+  await publicationDialog
+    .getByRole("textbox", { name: "Public label" })
+    .fill("E2E campaign");
+  await publicationDialog
+    .getByRole("textbox", { name: "Public title" })
+    .fill("E2E reviewed campaign");
+  await publicationDialog
+    .getByRole("textbox", { name: "Public summary" })
+    .fill("Human-reviewed local publication summary.");
+  await publicationDialog
+    .getByRole("textbox", {
+      name: "Public decision note（任意・private rationaleとは別）",
+    })
+    .fill("Approved only for this local publication record.");
+  const publicationResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/publications"),
+  );
+  await publicationDialog
+    .getByRole("button", { name: "GitHub-ready filesを生成" })
+    .click();
+  const publicationResponse = await publicationResponsePromise;
+  expect(publicationResponse.ok()).toBeTruthy();
+  const publicationPayload =
+    (await publicationResponse.json()) as PublicationResponse;
+  expect(isPublicationResponse(publicationPayload)).toBe(true);
+  await expect(
+    publicationDialog.getByText("Network writes: none"),
+  ).toBeVisible();
+  await expect(
+    publicationDialog.getByText(
+      "GitHubへ公開: 別Human操作（この画面では実行しません）",
+    ),
+  ).toBeVisible();
+  await publicationDialog
+    .getByRole("button", { name: /projection\.json/ })
+    .click();
+  await expect(
+    publicationDialog.getByRole("article", {
+      name: "projection.json exact bytes",
+    }),
+  ).toContainText("caller_supplied_ai_attributed");
+
+  const publicationDownload = await page.request.get(
+    new URL(publicationPayload.publication.downloadUrl, editorOrigin).href,
+    {
+      headers: {
+        Authorization: `Bearer ${bootstrap.session.token}`,
+        Origin: editorOrigin,
+      },
+    },
+  );
+  expect(publicationDownload.ok()).toBeTruthy();
+  expect(publicationDownload.headers()["content-type"]).toContain(
+    "application/zip",
+  );
+  const publicationArchive = await publicationDownload.body();
+  expect(publicationArchive).toHaveLength(
+    publicationPayload.publication.byteLength,
+  );
+  expect(createHash("sha256").update(publicationArchive).digest("hex")).toBe(
+    publicationPayload.publication.sha256,
+  );
+  const publicationEntries = readStoredZipEntries(publicationArchive);
+  expect(publicationEntries.map((entry) => entry.name)).toEqual([
+    "checksums.json",
+    "index.html",
+    "manifest.json",
+    "projection.json",
+    "story.md",
+  ]);
+  for (const entry of publicationEntries) {
+    expect(entry.data.includes(Buffer.from(PROMPT_CANARY, "utf8"))).toBeFalsy();
+    expect(
+      entry.data.includes(Buffer.from(bootstrap.session.token, "utf8")),
+    ).toBeFalsy();
+  }
+  await page.keyboard.press("Escape");
+  await expect(publicationDialog).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "GitHub-ready記録" }),
+  ).toBeFocused();
+  await expect(page.locator("header.studio-header")).not.toHaveAttribute(
+    "inert",
+  );
+
+  const scale75 = page.getByTestId("preview-scale-75");
+  const scale100 = page.getByTestId("preview-scale-100");
+  await scale75.click();
+  await expect(scale75).toHaveAttribute("aria-pressed", "true");
+  await expect(viewportFrame).toHaveAttribute("data-preview-scale", "0.75");
+  await expect(viewportFrame).toHaveCSS(
+    "transform",
+    "matrix(0.75, 0, 0, 0.75, 0, 0)",
+  );
+  const scaledTargetResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/targets"),
+  );
+  await headingTreeButton.click();
+  const scaledTargetPayload = await (await scaledTargetResponse).json();
+  expect(scaledTargetPayload.target.viewport.previewScale).toBe(0.75);
+  await scale100.click();
+  await expect(scale100).toHaveAttribute("aria-pressed", "true");
+  await expect(viewportFrame).toHaveAttribute("data-preview-scale", "1");
+
   await Promise.all(apiValidationTasks);
   expect(capturedApiResponseCount).toBeGreaterThanOrEqual(10);
   expect(apiValidationErrors).toEqual([]);
   expect(pageErrors).toEqual([]);
+});
+
+test("320px・reduced motion・forced colorsでkeyboard-only Decision全種とexportを完了する", async ({
+  page,
+}) => {
+  const editorOrigin = process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
+  if (editorOrigin === undefined) {
+    throw new Error("E2E Editor origin was not initialized by global setup");
+  }
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.emulateMedia({
+    forcedColors: "active",
+    reducedMotion: "reduce",
+  });
+  const dispositions: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/decisions")
+    ) {
+      const body = request.postDataJSON() as { disposition?: unknown };
+      if (typeof body.disposition === "string") {
+        dispositions.push(body.disposition);
+      }
+    }
+  });
+
+  await page.goto(`${editorOrigin}/`);
+  const create = page.getByRole("button", { name: "空のLPを作成" });
+  await focusByTab(page, create);
+  await page.keyboard.press("Enter");
+
+  const previewElement = page.getByTitle("LPプレビュー");
+  const preview = page.frameLocator('iframe[title="LPプレビュー"]');
+  await expect(previewElement).toBeVisible();
+  await expect(
+    preview.getByRole("heading", { name: INITIAL_HEADING }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        matchMedia("(prefers-reduced-motion: reduce)").matches &&
+        matchMedia("(forced-colors: active)").matches,
+    ),
+  ).toBe(true);
+  expect(
+    await page.locator(".viewport-frame").evaluate((element) =>
+      getComputedStyle(element)
+        .transitionDuration.split(",")
+        .every((duration) => {
+          const value = Number.parseFloat(duration);
+          return duration.trim().endsWith("ms") ? value <= 1 : value <= 0.001;
+        }),
+    ),
+  ).toBe(true);
+
+  const runKeyboardDecision = async (
+    targetLabel: string,
+    decisionName: "変更を採用" | "変更案を却下" | "今回は保留",
+    exerciseIframeExit = false,
+  ) => {
+    const treeTarget = page
+      .locator(".element-list button")
+      .filter({ hasText: targetLabel })
+      .first();
+    await expect(treeTarget).toBeVisible();
+    await focusByTab(page, treeTarget);
+    const targetResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/targets"),
+    );
+    await page.keyboard.press("Enter");
+    expect((await targetResponse).ok()).toBeTruthy();
+    await expect(
+      page
+        .getByRole("complementary", { name: "選択中のターゲット" })
+        .locator(".resolution"),
+    ).toContainText("resolved");
+
+    const instruction = page.getByRole("textbox", { name: "AIへの要望" });
+    if (exerciseIframeExit) {
+      await focusByTab(page, previewElement);
+      const activeInPreview = async () =>
+        preview.locator("html").evaluate(() => {
+          const active = document.activeElement;
+          return active instanceof HTMLElement ? active.id : "";
+        });
+      if ((await activeInPreview()) !== "hero-cta") {
+        await page.keyboard.press("Tab");
+      }
+      await expect.poll(activeInPreview).toBe("hero-cta");
+      await page.keyboard.press("Tab");
+      const exit = page.getByRole("link", {
+        name: "プレビューを抜けてEditorへ移動",
+      });
+      await expect(exit).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(instruction).toBeFocused();
+    } else {
+      await focusByTab(page, instruction);
+    }
+    await page.keyboard.press("Control+A");
+    await page.keyboard.type(`${targetLabel}を明確にしてください`);
+
+    const contextTrigger = page.getByRole("button", {
+      name: "送信内容を確認",
+    });
+    await focusByTab(page, contextTrigger);
+    await page.keyboard.press("Enter");
+    const contextDialog = page.getByRole("dialog", {
+      name: "送信内容を確認",
+    });
+    const contextClose = contextDialog.getByRole("button", {
+      name: "送信内容を閉じる",
+    });
+    const contextConfirm = contextDialog.getByRole("button", {
+      name: "変更案を作成",
+    });
+    await expect(contextClose).toBeFocused();
+    await expect(page.locator("header.studio-header")).toHaveAttribute(
+      "inert",
+      "",
+    );
+    await page.keyboard.press("Shift+Tab");
+    await expect(contextConfirm).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const review = page.getByRole("region", { name: "変更案を確認" });
+    await expect(review).toBeVisible();
+    await expect(page.locator("header.studio-header")).not.toHaveAttribute(
+      "inert",
+    );
+    const decision = review.getByRole("button", { name: decisionName });
+    await focusByTab(page, decision);
+    const decisionResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/decisions"),
+    );
+    await page.keyboard.press("Enter");
+    expect((await decisionResponse).ok()).toBeTruthy();
+    await expect(review).toBeHidden();
+    await expect(page.locator(".operation-bar")).toHaveCount(0);
+  };
+
+  await runKeyboardDecision("ヒーロー見出し", "変更を採用", true);
+  await runKeyboardDecision("ヒーロー説明文", "変更案を却下");
+  await runKeyboardDecision("ヒーローCTA", "今回は保留");
+  expect(dispositions).toEqual(["adopted_unchanged", "rejected", "deferred"]);
+
+  const exportButton = page.getByRole("button", {
+    name: "Acceptedをエクスポート",
+  });
+  await focusByTab(page, exportButton);
+  expect(
+    await exportButton.evaluate(
+      (element) => getComputedStyle(element).outlineStyle,
+    ),
+  ).not.toBe("none");
+  const exportResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/exports"),
+  );
+  await page.keyboard.press("Enter");
+  expect((await exportResponse).ok()).toBeTruthy();
+  await expect(
+    page.getByRole("region", { name: "Accepted export receipt" }),
+  ).toBeVisible();
+  await expect(exportButton).toBeFocused();
+
+  const layout = await page.evaluate(() => ({
+    innerWidth,
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(layout.innerWidth).toBe(320);
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
 });
 
 test("scoped Preview originが権限・storage・navigationをproject/session間で隔離する", async ({
@@ -1227,6 +1612,18 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
     name: "取り込むファイルを確認",
   });
   await expect(dialog).toBeVisible();
+  const importClose = dialog.getByRole("button", {
+    name: "取り込み確認を閉じる",
+  });
+  const importConfirm = dialog.getByRole("button", {
+    name: "この内容をコピーして取り込む",
+  });
+  await expect(importClose).toBeFocused();
+  await expect(page.locator("main.project-home")).toHaveAttribute("inert", "");
+  await page.keyboard.press("Shift+Tab");
+  await expect(importConfirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(importClose).toBeFocused();
   await expect(dialog).toContainText("取り込み元のファイルは変更しません");
   await expect(dialog).toContainText("assets/theme.css");
   await expect(dialog).toContainText("assets/app.js");
@@ -1255,9 +1652,7 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
         new URL(request.url()).pathname,
       ),
   );
-  await dialog
-    .getByRole("button", { name: "この内容をコピーして取り込む" })
-    .click();
+  await importConfirm.click();
   const [confirmRequest, confirmResponse] = await Promise.all([
     confirmRequestPromise,
     confirmResponsePromise,

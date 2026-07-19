@@ -13,6 +13,7 @@
 | 要件を実装する | [詳細要件](detailed-requirements.md) | [実装計画](implementation-plan.md) |
 | 設計理由を調べる | [ADR一覧](adr/README.md) | 関連する個別ADR |
 | SynapseGit境界を調べる | [contract lock](synapsegit-contract.lock.json) | [upstream feedback](upstream-issues/README.md) |
+| M1 evidence契約を確認する | [evidence README](evidence/README.md) | [ADR-0011](adr/0011-observability-performance-accessibility-evidence.md) |
 | 製品の将来像を読む | [current specification](current-specification.md) | [詳細要件](detailed-requirements.md) |
 
 ## 文書の優先順位
@@ -58,19 +59,27 @@
   revision、contract hash、claim boundary
 - [SynapseGit upstream feedback](upstream-issues/README.md): このintegrationから
   作成したIssueとpublication follow-up
+- [M1 evidence](evidence/README.md): fail-closed template、package browser smoke
+  fixture/result schema、検証commandとmanual gate
 
 ## 現在地の短い要約
 
 - Status date: 2026-07-19
-- Completed: C0–C6、65%
-- C0–C6 integration: merged PR #1 commit `c9a22b1`, contained in `main`
-- Next: C7 Review / Decision / recovery
+- Verified baseline: C0–C6 merged PR #1 commit `c9a22b1`, contained in `main`
+- Automated local baseline: C7 restart-safe Decision/recovery、C8 export/publication、
+  C9 process-kill/migration/read-only recovery/retention、C10 application performanceと
+  browser accessibilityを統合
+- C11 automated handoff: clean-source package、checksum、launcher/restart/browser smoke、
+  traceability/evidence validationを提供
+- Human/external gate: Creator UX、manual screen-reader、live-provider、license/brand、
+  merge/release decisionは未完了
 - Product status: local evaluation build、not production-ready
 - Browser evidence: Chromium
 - Provider: deterministic fake、optional OpenAI when configured
-- Important limit: `singleProposalPerProject: true`
-- Current UI Decision: adopt only
-- Export: Accepted static ZIP
+- Important limit: one active Proposal per Project; no concurrent ready comparison
+- Current UI Decision: adopt/reject/defer, with restart recovery/reconciliation
+- Export: Accepted static ZIP plus detailed receipt
+- Publication: exact-byte local GitHub-ready draft only; no network write
 
 この要約より詳しい主張には、
 [実装ステータス](implementation-status.md)のevidenceを引用してください。
@@ -81,8 +90,12 @@
 
 ~~~bash
 pnpm check:docs
+pnpm check:evidence
 pnpm format:check
 ~~~
 
 `pnpm check:docs`はlink、fence、trailing whitespace、requirement ID、
 checkpoint weight、generated traceability、SynapseGit contract lockを検査します。
+`pnpm check:evidence`はC0–C11 template、P0 traceability、manual pending gate、
+package browser、synthetic geometry、production application integration performanceの
+profile/result schemaを検査します。

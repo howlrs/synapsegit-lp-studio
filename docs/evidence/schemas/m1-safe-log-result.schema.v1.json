@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit.invalid/schemas/lp-studio/m1-safe-log-result.v1.json",
+  "title": "SynapseGit LP Studio packaged safe-log result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "scope",
+    "profileSha256",
+    "maximumSupportedLogLevel",
+    "flow",
+    "logCapture",
+    "requiredSafeFields",
+    "adapterCorrelation",
+    "privacyScan",
+    "requirementIds",
+    "pendingGates",
+    "claimBoundary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "synapsegit-lp-studio.safe-log-result/1"
+    },
+    "status": { "const": "passed" },
+    "scope": { "const": "packaged_local_fake_provider_flow" },
+    "profileSha256": { "$ref": "#/$defs/sha256" },
+    "maximumSupportedLogLevel": { "const": "trace" },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "requestedModel",
+        "externalProviderConfigured",
+        "fakeProviderAttributionExternal",
+        "decisionDisposition",
+        "importedFileBodyExercised",
+        "providerRawResponseExercised",
+        "intentionallyFailedRequestErrorCode",
+        "requestOperationCount"
+      ],
+      "properties": {
+        "providerId": { "const": "fake" },
+        "requestedModel": { "const": "deterministic-v1" },
+        "externalProviderConfigured": { "const": false },
+        "fakeProviderAttributionExternal": { "const": false },
+        "decisionDisposition": { "const": "adopted_unchanged" },
+        "importedFileBodyExercised": { "const": true },
+        "providerRawResponseExercised": { "const": true },
+        "intentionallyFailedRequestErrorCode": {
+          "const": "invalid_request"
+        },
+        "requestOperationCount": { "const": 9 }
+      }
+    },
+    "logCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stdoutByteLength",
+        "stdoutSha256",
+        "stderrByteLength",
+        "stderrSha256",
+        "rawLogsRetained"
+      ],
+      "properties": {
+        "stdoutByteLength": { "type": "integer", "minimum": 1 },
+        "stdoutSha256": { "$ref": "#/$defs/sha256" },
+        "stderrByteLength": { "type": "integer", "minimum": 1 },
+        "stderrSha256": { "$ref": "#/$defs/sha256" },
+        "rawLogsRetained": { "const": false }
+      }
+    },
+    "requiredSafeFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "requestRecordCount",
+        "errorRecordCount",
+        "checksPassed"
+      ],
+      "properties": {
+        "fields": {
+          "const": [
+            "operation_id",
+            "correlation_id",
+            "error_code",
+            "duration_ms",
+            "version"
+          ]
+        },
+        "requestRecordCount": { "const": 9 },
+        "errorRecordCount": { "const": 1 },
+        "checksPassed": { "const": true }
+      }
+    },
+    "adapterCorrelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "phases",
+        "correlatedOperationCount",
+        "checksPassed"
+      ],
+      "properties": {
+        "component": { "const": "synapsegit-adapter" },
+        "phases": {
+          "const": [
+            "proposal.publish.begin",
+            "proposal.publish.observed",
+            "decision.publish.begin",
+            "decision.publish.observed"
+          ]
+        },
+        "correlatedOperationCount": { "const": 2 },
+        "checksPassed": { "const": true }
+      }
+    },
+    "privacyScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canaryChecks",
+        "absoluteRuntimePathCount",
+        "authorizationSchemeAbsent",
+        "rawCanaryValuesRetained",
+        "checksPassed"
+      ],
+      "properties": {
+        "canaryChecks": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["class", "sha256", "absent"],
+            "properties": {
+              "class": {
+                "enum": [
+                  "prompt",
+                  "session_token",
+                  "approval_token",
+                  "file_body",
+                  "private_rationale",
+                  "absolute_path",
+                  "provider_raw_response"
+                ]
+              },
+              "sha256": { "$ref": "#/$defs/sha256" },
+              "absent": { "const": true }
+            }
+          }
+        },
+        "absoluteRuntimePathCount": {
+          "type": "integer",
+          "minimum": 8
+        },
+        "authorizationSchemeAbsent": { "const": true },
+        "rawCanaryValuesRetained": { "const": false },
+        "checksPassed": { "const": true }
+      }
+    },
+    "requirementIds": {
+      "const": [
+        "NFR-OBS-001",
+        "NFR-OBS-002",
+        "NFR-OBS-004",
+        "TEST-001",
+        "TEST-005"
+      ]
+    },
+    "pendingGates": { "$ref": "#/$defs/pendingGates" },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultLevelIncludedByMaximumLevel",
+        "safeAtMaximumSupportedLevel",
+        "liveProviderCovered",
+        "productionReady",
+        "releaseCreated"
+      ],
+      "properties": {
+        "defaultLevelIncludedByMaximumLevel": { "const": true },
+        "safeAtMaximumSupportedLevel": { "const": true },
+        "liveProviderCovered": { "const": false },
+        "productionReady": { "const": false },
+        "releaseCreated": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "pendingGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "liveProvider",
+        "creatorVerification",
+        "manualKeyboardZoomContrast",
+        "screenReader",
+        "license",
+        "brand",
+        "releaseCreated"
+      ],
+      "properties": {
+        "liveProvider": {
+          "const": "pending_external_credential_and_billing_acknowledgement"
+        },
+        "creatorVerification": { "const": "pending" },
+        "manualKeyboardZoomContrast": { "const": "pending" },
+        "screenReader": { "const": "pending" },
+        "license": { "const": "unresolved" },
+        "brand": { "const": "unresolved" },
+        "releaseCreated": { "const": false }
+      }
+    }
+  }
+}

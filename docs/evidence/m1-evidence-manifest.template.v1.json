@@ -1,0 +1,126 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.m1-evidence/1",
+  "recordKind": "template",
+  "completionState": "incomplete",
+  "scope": "local_internal_evaluation_only",
+  "sourceRevision": null,
+  "sourceTreeStatus": "unverified",
+  "generatedAt": null,
+  "supportMatrix": "docs/evidence/m1-support-matrix.template.v1.json",
+  "requirements": {
+    "source": "docs/detailed-requirements.md",
+    "traceability": "docs/requirements-traceability.md",
+    "requirementCount": null,
+    "p0RequirementCount": null,
+    "p0WithEvidenceCount": null,
+    "unresolvedP0Count": null,
+    "claimMismatchCount": null
+  },
+  "checkpoints": [
+    { "id": "C0", "weight": 5, "status": "unverified", "evidence": [] },
+    { "id": "C1", "weight": 15, "status": "unverified", "evidence": [] },
+    { "id": "C2", "weight": 10, "status": "unverified", "evidence": [] },
+    { "id": "C3", "weight": 8, "status": "unverified", "evidence": [] },
+    { "id": "C4", "weight": 8, "status": "unverified", "evidence": [] },
+    { "id": "C5", "weight": 10, "status": "unverified", "evidence": [] },
+    { "id": "C6", "weight": 9, "status": "unverified", "evidence": [] },
+    { "id": "C7", "weight": 8, "status": "unverified", "evidence": [] },
+    { "id": "C8", "weight": 7, "status": "unverified", "evidence": [] },
+    { "id": "C9", "weight": 10, "status": "unverified", "evidence": [] },
+    { "id": "C10", "weight": 7, "status": "unverified", "evidence": [] },
+    { "id": "C11", "weight": 3, "status": "unverified", "evidence": [] }
+  ],
+  "automatedEvidence": {
+    "documentationAndContractLocks": [],
+    "formatAndLint": [],
+    "unitAndIntegration": [],
+    "fakeProviderE2e": [],
+    "decisionCrashRecovery": [],
+    "storageFaultAndMigration": [],
+    "maliciousPreviewAndBrowserSecurity": [],
+    "exportPurityAndDeterminism": [],
+    "publicationPurityAndDeterminism": [],
+    "performanceAndGeometry": [],
+    "accessibility": [],
+    "safeObservability": [],
+    "localPackageSmoke": []
+  },
+  "automatedEvidenceContracts": {
+    "packageBrowserSmoke": {
+      "profile": "docs/evidence/fixtures/m1-package-browser-smoke-profile.v1.json",
+      "resultSchema": "docs/evidence/schemas/m1-package-browser-smoke-result.schema.v1.json",
+      "command": "pnpm measure:package-browser -- --editor-origin http://127.0.0.1:<port>",
+      "resultStatus": "pending_result"
+    },
+    "performanceGeometryCorpus": {
+      "profile": "docs/evidence/fixtures/m1-performance-geometry-profile.v1.json",
+      "resultSchema": "docs/evidence/schemas/m1-performance-geometry-result.schema.v1.json",
+      "command": "pnpm measure:performance-geometry",
+      "resultStatus": "pending_result"
+    },
+    "productionIntegrationPerformance": {
+      "profile": "docs/evidence/fixtures/m1-production-integration-performance-profile.v1.json",
+      "resultSchema": "docs/evidence/schemas/m1-production-integration-performance-result.schema.v1.json",
+      "command": "pnpm measure:production-integration-performance -- --editor-origin http://127.0.0.1:<port> --change-set-probe <packaged-probe-path>",
+      "resultStatus": "pending_result"
+    },
+    "safeObservability": {
+      "profile": "docs/evidence/fixtures/m1-safe-log-profile.v1.json",
+      "resultSchema": "docs/evidence/schemas/m1-safe-log-result.schema.v1.json",
+      "command": "pnpm verify:package -- --output-dir <outside-repository-directory>",
+      "resultStatus": "pending_result"
+    }
+  },
+  "manualEvidence": {
+    "creator80PercentVerification": {
+      "status": "pending",
+      "actor": null,
+      "recordedAt": null,
+      "evidence": []
+    },
+    "liveProvider": {
+      "status": "pending_external_credential_and_billing_acknowledgement",
+      "provider": null,
+      "model": null,
+      "recordedAt": null,
+      "evidence": []
+    },
+    "keyboardZoomAndContrast": {
+      "status": "pending",
+      "actor": null,
+      "recordedAt": null,
+      "evidence": []
+    },
+    "screenReader": {
+      "status": "pending",
+      "actor": null,
+      "recordedAt": null,
+      "evidence": []
+    }
+  },
+  "dependencyAndDecisionStatus": {
+    "depSg001": "unverified",
+    "blockingAdrs": [],
+    "unresolvedP0Findings": [],
+    "unresolvedDataLossFindings": [],
+    "unresolvedSecurityFindings": [],
+    "unresolvedClaimMismatches": []
+  },
+  "licenseAndReleaseBoundary": {
+    "responsibleOwner": "unassigned",
+    "licenseStatus": "unresolved",
+    "brandStatus": "unresolved",
+    "productionPermission": "not_recorded",
+    "externalDeliveryPermission": "not_recorded",
+    "redistributionPermission": "not_recorded",
+    "releaseCreated": false,
+    "tagCreated": false
+  },
+  "finalVerification": {
+    "localRun": null,
+    "pullRequest": null,
+    "mergeCommit": null,
+    "postMergeRun": null,
+    "annotations": null
+  }
+}

@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit.invalid/schemas/lp-studio/m1-package-browser-smoke-result.v1.json",
+  "title": "SynapseGit LP Studio package browser smoke result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "schemaVersion",
+        "status",
+        "scope",
+        "profileSha256",
+        "environment",
+        "performance",
+        "accessibilitySmoke",
+        "responsiveSmoke",
+        "manualEvidence",
+        "claimBoundary"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "status": { "const": "passed" },
+            "accessibilitySmoke": {
+              "type": "object",
+              "properties": {
+                "documentLanguage": { "const": "ja" },
+                "titlePresent": { "const": true },
+                "mainLandmarkCount": { "type": "integer", "minimum": 1 },
+                "duplicateIdCount": { "const": 0 },
+                "namelessInteractiveControlCount": { "const": 0 },
+                "imageWithoutAltCount": { "const": 0 },
+                "unlabelledFormControlCount": { "const": 0 },
+                "positiveTabIndexCount": { "const": 0 },
+                "initialTabFocusedVisibleControl": { "const": true },
+                "reducedMotionRendered": { "const": true },
+                "forcedColorsRendered": { "const": true },
+                "checksPassed": { "const": true }
+              }
+            },
+            "responsiveSmoke": {
+              "type": "object",
+              "properties": {
+                "horizontalOverflowPx": {
+                  "type": "integer",
+                  "maximum": 1
+                },
+                "checksPassed": { "const": true }
+              }
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["failureCodes"] },
+              { "required": ["errorCode"] }
+            ]
+          }
+        },
+        {
+          "required": ["failureCodes"],
+          "properties": {
+            "status": { "const": "failed" },
+            "failureCodes": { "type": "array", "minItems": 1 }
+          },
+          "not": { "required": ["errorCode"] }
+        }
+      ]
+    },
+    {
+      "required": [
+        "schemaVersion",
+        "status",
+        "scope",
+        "errorCode",
+        "manualEvidence",
+        "claimBoundary"
+      ],
+      "properties": { "status": { "const": "failed" } }
+    }
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "synapsegit-lp-studio.package-browser-smoke-result/1"
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "scope": { "const": "local_internal_evaluation_editor_root" },
+    "profileSha256": { "$ref": "#/$defs/sha256" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "architecture", "node", "browser"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "node": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "browser": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmupReloads",
+        "sampleCount",
+        "navigationDurationMs",
+        "navigationDurationP95Ms",
+        "responseStartMs",
+        "responseStartP95Ms",
+        "domNodeCount",
+        "thresholdsPassed",
+        "gatePolicy"
+      ],
+      "properties": {
+        "warmupReloads": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "sampleCount": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "navigationDurationMs": { "$ref": "#/$defs/measurements" },
+        "navigationDurationP95Ms": { "$ref": "#/$defs/measurement" },
+        "responseStartMs": { "$ref": "#/$defs/measurements" },
+        "responseStartP95Ms": { "$ref": "#/$defs/measurement" },
+        "domNodeCount": { "type": "integer", "minimum": 1 },
+        "thresholdsPassed": { "type": "boolean" },
+        "gatePolicy": { "const": "advisory_on_uncharacterized_ci" }
+      }
+    },
+    "accessibilitySmoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "documentLanguage",
+        "titlePresent",
+        "mainLandmarkCount",
+        "duplicateIdCount",
+        "namelessInteractiveControlCount",
+        "imageWithoutAltCount",
+        "unlabelledFormControlCount",
+        "positiveTabIndexCount",
+        "initialTabFocusedVisibleControl",
+        "reducedMotionRendered",
+        "forcedColorsRendered",
+        "checksPassed"
+      ],
+      "properties": {
+        "documentLanguage": { "type": "string", "maxLength": 32 },
+        "titlePresent": { "type": "boolean" },
+        "mainLandmarkCount": { "type": "integer", "minimum": 0 },
+        "duplicateIdCount": { "type": "integer", "minimum": 0 },
+        "namelessInteractiveControlCount": { "type": "integer", "minimum": 0 },
+        "imageWithoutAltCount": { "type": "integer", "minimum": 0 },
+        "unlabelledFormControlCount": { "type": "integer", "minimum": 0 },
+        "positiveTabIndexCount": { "type": "integer", "minimum": 0 },
+        "initialTabFocusedVisibleControl": { "type": "boolean" },
+        "reducedMotionRendered": { "type": "boolean" },
+        "forcedColorsRendered": { "type": "boolean" },
+        "checksPassed": { "type": "boolean" }
+      }
+    },
+    "responsiveSmoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["narrowViewport", "horizontalOverflowPx", "checksPassed"],
+      "properties": {
+        "narrowViewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height"],
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "horizontalOverflowPx": { "type": "integer", "minimum": 0 },
+        "checksPassed": { "type": "boolean" }
+      }
+    },
+    "manualEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "creatorEndToEndVerification",
+        "keyboardZoomAndContrast",
+        "screenReader",
+        "liveProvider"
+      ],
+      "properties": {
+        "creatorEndToEndVerification": { "const": "pending" },
+        "keyboardZoomAndContrast": { "const": "pending" },
+        "screenReader": { "const": "pending" },
+        "liveProvider": {
+          "const": "pending_external_credential_and_billing_acknowledgement"
+        }
+      }
+    },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wcagConformance",
+        "fullPerformanceProfile",
+        "productionReady",
+        "releaseCreated"
+      ],
+      "properties": {
+        "wcagConformance": { "const": false },
+        "fullPerformanceProfile": { "const": false },
+        "productionReady": { "const": false },
+        "releaseCreated": { "const": false }
+      }
+    },
+    "failureCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+    },
+    "advisoryCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+    },
+    "errorCode": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "measurement": { "type": "number", "minimum": 0 },
+    "measurements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": { "$ref": "#/$defs/measurement" }
+    }
+  }
+}

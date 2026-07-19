@@ -1,0 +1,460 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit.invalid/schemas/lp-studio/m1-production-integration-performance-result.v1.json",
+  "title": "SynapseGit LP Studio packaged production integration performance result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "scope",
+    "manualEvidence",
+    "claimBoundary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "synapsegit-lp-studio.production-integration-performance-result/1"
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "scope": {
+      "const": "packaged_local_production_application_integration"
+    },
+    "profileSha256": { "$ref": "#/$defs/sha256" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "architecture", "node", "browser"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "architecture": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "node": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "browser": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "productionIntegration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measurement",
+        "status",
+        "packagedApplication",
+        "scopedPreviewIframe",
+        "previewTargetRuntime",
+        "boundBridgeRoundTrip",
+        "targetApiRoundTrip",
+        "actualRuntimeOverlay",
+        "caseCount"
+      ],
+      "properties": {
+        "measurement": { "const": "measured" },
+        "status": { "const": "pass" },
+        "packagedApplication": { "const": true },
+        "scopedPreviewIframe": { "const": true },
+        "previewTargetRuntime": { "const": true },
+        "boundBridgeRoundTrip": { "const": true },
+        "targetApiRoundTrip": { "const": true },
+        "actualRuntimeOverlay": { "const": true },
+        "caseCount": { "const": 72 }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseCount",
+        "expectedCaseCount",
+        "distinctRenderedViewportWidthCount",
+        "rawCaseRecordsIncluded",
+        "maximumErrorCssPx",
+        "thresholdCssPx",
+        "overlayFeedbackP95Ms",
+        "overlayFeedbackReferenceThresholdMs",
+        "overlayFeedbackThresholdPassed",
+        "overlayFeedbackGatePolicy",
+        "checksPassed",
+        "cases"
+      ],
+      "properties": {
+        "caseCount": { "const": 72 },
+        "expectedCaseCount": { "const": 72 },
+        "distinctRenderedViewportWidthCount": { "const": 3 },
+        "rawCaseRecordsIncluded": { "const": true },
+        "maximumErrorCssPx": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "thresholdCssPx": { "const": 2 },
+        "overlayFeedbackP95Ms": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60000
+        },
+        "overlayFeedbackReferenceThresholdMs": { "const": 100 },
+        "overlayFeedbackThresholdPassed": { "type": "boolean" },
+        "overlayFeedbackGatePolicy": {
+          "const": "advisory_on_uncharacterized_ci"
+        },
+        "checksPassed": { "const": true },
+        "cases": {
+          "type": "array",
+          "minItems": 72,
+          "maxItems": 72,
+          "items": { "$ref": "#/$defs/geometryCase" }
+        }
+      }
+    },
+    "autosave": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productionApplicationMeasured",
+        "finalInputEventMeasured",
+        "durableApiCompletionMeasured",
+        "warmupSampleCount",
+        "sampleCount",
+        "rawSamplesMs",
+        "p95Ms",
+        "referenceThresholdMs",
+        "thresholdPassed",
+        "functionalChecksPassed",
+        "gatePolicy"
+      ],
+      "properties": {
+        "productionApplicationMeasured": { "const": true },
+        "finalInputEventMeasured": { "const": true },
+        "durableApiCompletionMeasured": { "const": true },
+        "warmupSampleCount": { "const": 2 },
+        "sampleCount": { "const": 20 },
+        "rawSamplesMs": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 60000 }
+        },
+        "p95Ms": { "type": "number", "exclusiveMinimum": 0, "maximum": 60000 },
+        "referenceThresholdMs": { "const": 1000 },
+        "thresholdPassed": { "type": "boolean" },
+        "functionalChecksPassed": { "const": true },
+        "gatePolicy": { "const": "advisory_on_uncharacterized_ci" }
+      }
+    },
+    "changeSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productionParserMeasured",
+        "probeSchemaVersion",
+        "changedTextFileCount",
+        "totalChangedTextBytes",
+        "operationCount",
+        "changeSetSha256",
+        "outputManifestSha256",
+        "warmupSampleCount",
+        "sampleCount",
+        "rawSamplesMs",
+        "p95Ms",
+        "referenceThresholdMs",
+        "thresholdPassed",
+        "functionalChecksPassed",
+        "gatePolicy"
+      ],
+      "properties": {
+        "productionParserMeasured": { "const": true },
+        "probeSchemaVersion": {
+          "const": "synapsegit-lp-studio.change-set-performance-probe/1"
+        },
+        "changedTextFileCount": { "const": 10 },
+        "totalChangedTextBytes": { "const": 2097152 },
+        "operationCount": { "const": 10 },
+        "changeSetSha256": { "$ref": "#/$defs/sha256" },
+        "outputManifestSha256": { "$ref": "#/$defs/sha256" },
+        "warmupSampleCount": { "const": 2 },
+        "sampleCount": { "const": 20 },
+        "rawSamplesMs": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 60000 }
+        },
+        "p95Ms": { "type": "number", "exclusiveMinimum": 0, "maximum": 60000 },
+        "referenceThresholdMs": { "const": 2000 },
+        "thresholdPassed": { "type": "boolean" },
+        "functionalChecksPassed": { "const": true },
+        "gatePolicy": { "const": "advisory_on_uncharacterized_ci" }
+      }
+    },
+    "manualEvidence": { "$ref": "#/$defs/manualEvidence" },
+    "claimBoundary": { "$ref": "#/$defs/claimBoundary" },
+    "advisoryCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "overlay_feedback_reference_threshold_exceeded",
+          "autosave_reference_threshold_exceeded",
+          "change_set_reference_threshold_exceeded"
+        ]
+      }
+    },
+    "failureCodes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+    },
+    "errorCode": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+  },
+  "oneOf": [
+    {
+      "properties": { "status": { "const": "passed" } },
+      "required": [
+        "profileSha256",
+        "environment",
+        "productionIntegration",
+        "geometry",
+        "autosave",
+        "changeSet"
+      ],
+      "not": {
+        "anyOf": [
+          { "required": ["failureCodes"] },
+          { "required": ["errorCode"] }
+        ]
+      }
+    },
+    {
+      "properties": { "status": { "const": "failed" } },
+      "required": ["errorCode"],
+      "not": {
+        "anyOf": [
+          { "required": ["productionIntegration"] },
+          { "required": ["geometry"] },
+          { "required": ["autosave"] },
+          { "required": ["changeSet"] }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "manualEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "creatorEndToEndVerification",
+        "screenReader",
+        "liveProvider"
+      ],
+      "properties": {
+        "creatorEndToEndVerification": { "const": "pending" },
+        "screenReader": { "const": "pending" },
+        "liveProvider": {
+          "const": "pending_external_credential_and_billing_acknowledgement"
+        }
+      }
+    },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "crossBrowserSupport",
+        "productionReady",
+        "releaseCreated"
+      ],
+      "properties": {
+        "crossBrowserSupport": { "const": false },
+        "productionReady": { "const": false },
+        "releaseCreated": { "const": false }
+      }
+    },
+    "geometryCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseId",
+        "viewport",
+        "configuredViewportWidthCssPx",
+        "deviceScaleFactor",
+        "contentZoomFactor",
+        "previewScale",
+        "scrollCase",
+        "windowScrollTopCssPx",
+        "outerScrollTopCssPx",
+        "innerScrollLeftCssPx",
+        "renderedOuterFrameWidthCssPx",
+        "renderedIframeWidthCssPx",
+        "runtimeViewportWidthCssPx",
+        "runtimeViewportHeightCssPx",
+        "runtimeDevicePixelRatio",
+        "runtimePreviewScale",
+        "overlayErrorCssPx",
+        "overlayFeedbackDurationMs",
+        "scopedPreviewOriginVerified",
+        "appBridgeTargetVerified",
+        "targetApiRoundTripVerified",
+        "actualOverlayRendered"
+      ],
+      "properties": {
+        "caseId": {
+          "type": "string",
+          "pattern": "^[a-z0-9:=._-]+$",
+          "maxLength": 128
+        },
+        "viewport": { "enum": ["desktop", "tablet", "mobile"] },
+        "configuredViewportWidthCssPx": { "enum": [1280, 768, 375] },
+        "deviceScaleFactor": { "enum": [1, 2] },
+        "contentZoomFactor": { "enum": [1, 1.25, 2] },
+        "previewScale": { "enum": [0.75, 1] },
+        "scrollCase": { "enum": ["origin", "nested-scroll"] },
+        "windowScrollTopCssPx": { "type": "number", "minimum": 0 },
+        "outerScrollTopCssPx": { "type": "number", "minimum": 0 },
+        "innerScrollLeftCssPx": { "type": "number", "minimum": 0 },
+        "renderedOuterFrameWidthCssPx": {
+          "enum": [1280, 768, 375]
+        },
+        "renderedIframeWidthCssPx": { "type": "integer", "minimum": 1 },
+        "runtimeViewportWidthCssPx": { "type": "integer", "minimum": 1 },
+        "runtimeViewportHeightCssPx": { "type": "number", "minimum": 1 },
+        "runtimeDevicePixelRatio": { "enum": [1, 2] },
+        "runtimePreviewScale": { "enum": [0.75, 1] },
+        "overlayErrorCssPx": { "type": "number", "minimum": 0, "maximum": 2 },
+        "overlayFeedbackDurationMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60000
+        },
+        "scopedPreviewOriginVerified": { "const": true },
+        "appBridgeTargetVerified": { "const": true },
+        "targetApiRoundTripVerified": { "const": true },
+        "actualOverlayRendered": { "const": true }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "configuredViewportWidthCssPx": { "const": 1280 } }
+          },
+          "then": {
+            "properties": {
+              "renderedOuterFrameWidthCssPx": { "const": 1280 },
+              "renderedIframeWidthCssPx": {
+                "type": "integer",
+                "minimum": 1278,
+                "maximum": 1280
+              },
+              "runtimeViewportWidthCssPx": {
+                "type": "integer",
+                "minimum": 1278,
+                "maximum": 1280
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 1278 },
+                  "runtimeViewportWidthCssPx": { "const": 1278 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 1279 },
+                  "runtimeViewportWidthCssPx": { "const": 1279 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 1280 },
+                  "runtimeViewportWidthCssPx": { "const": 1280 }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": { "configuredViewportWidthCssPx": { "const": 768 } }
+          },
+          "then": {
+            "properties": {
+              "renderedOuterFrameWidthCssPx": { "const": 768 },
+              "renderedIframeWidthCssPx": {
+                "type": "integer",
+                "minimum": 766,
+                "maximum": 768
+              },
+              "runtimeViewportWidthCssPx": {
+                "type": "integer",
+                "minimum": 766,
+                "maximum": 768
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 766 },
+                  "runtimeViewportWidthCssPx": { "const": 766 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 767 },
+                  "runtimeViewportWidthCssPx": { "const": 767 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 768 },
+                  "runtimeViewportWidthCssPx": { "const": 768 }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": { "configuredViewportWidthCssPx": { "const": 375 } }
+          },
+          "then": {
+            "properties": {
+              "renderedOuterFrameWidthCssPx": { "const": 375 },
+              "renderedIframeWidthCssPx": {
+                "type": "integer",
+                "minimum": 373,
+                "maximum": 375
+              },
+              "runtimeViewportWidthCssPx": {
+                "type": "integer",
+                "minimum": 373,
+                "maximum": 375
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 373 },
+                  "runtimeViewportWidthCssPx": { "const": 373 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 374 },
+                  "runtimeViewportWidthCssPx": { "const": 374 }
+                }
+              },
+              {
+                "properties": {
+                  "renderedIframeWidthCssPx": { "const": 375 },
+                  "runtimeViewportWidthCssPx": { "const": 375 }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.safe-log-profile/1",
+  "scope": "packaged_local_fake_provider_flow",
+  "maximumSupportedLogLevel": "trace",
+  "provider": {
+    "id": "fake",
+    "model": "deterministic-v1",
+    "external": false
+  },
+  "decisionDisposition": "adopted_unchanged",
+  "requiredRequestFields": [
+    "operation_id",
+    "correlation_id",
+    "error_code",
+    "duration_ms",
+    "version"
+  ],
+  "requiredAdapterPhases": [
+    "proposal.publish.begin",
+    "proposal.publish.observed",
+    "decision.publish.begin",
+    "decision.publish.observed"
+  ],
+  "forbiddenCanaryClasses": [
+    "prompt",
+    "session_token",
+    "approval_token",
+    "file_body",
+    "private_rationale",
+    "absolute_path",
+    "provider_raw_response"
+  ],
+  "intentionallyFailedRequest": {
+    "errorCode": "invalid_request"
+  },
+  "requirementIds": [
+    "NFR-OBS-001",
+    "NFR-OBS-002",
+    "NFR-OBS-004",
+    "TEST-001",
+    "TEST-005"
+  ],
+  "pendingGates": {
+    "liveProvider": "pending_external_credential_and_billing_acknowledgement",
+    "creatorVerification": "pending",
+    "manualKeyboardZoomContrast": "pending",
+    "screenReader": "pending",
+    "license": "unresolved",
+    "brand": "unresolved",
+    "releaseCreated": false
+  }
+}

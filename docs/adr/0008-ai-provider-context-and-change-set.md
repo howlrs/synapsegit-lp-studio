@@ -1,6 +1,6 @@
 # ADR-0008: Reviewed AI context, provider boundary, and ChangeSet v1
 
-Status: accepted for M1 implementation
+Status: accepted and implemented for the automated local baseline
 
 Date: 2026-07-19
 
@@ -89,6 +89,15 @@ and remains configurable because availability can differ by account.
 - One active attempt is allowed per project. Provider execution occurs without
   holding the project mutex; the Accepted revision, context digest, attempt,
   provider attribution, and Proposal slot are revalidated afterward.
+- AI generation exposes a server-owned attempt status and explicit cancel
+  operation. Dropping an HTTP connection is not semantic cancellation. A
+  cancelled attempt is tombstoned before its active slot is released, and a
+  late provider result cannot be validated or materialized as a Proposal.
+- Each process-local claim has a monotonic internal generation. The handler and
+  its drop guard must still own the exact project, public attempt ID, and
+  generation under the Store lock before any post-provider side effect. This
+  prevents a stale handler from acting on a later reuse of an evicted public ID
+  without retaining an unbounded tombstone set.
 - A timeout, transport failure, refusal/incomplete response, attribution
   mismatch, stale base, malformed ChangeSet, failed precondition, or static
   validation failure returns a stable redacted error and never creates a ready
@@ -106,12 +115,14 @@ and remains configurable because availability can differ by account.
   exact same fake-provider boundary and ChangeSet parser.
 - A live call intentionally sends the expanded reviewed context to OpenAI; the
   UI labels this before the Creator confirms generation.
-- Conversation consultation mode, streaming progress, cancellation,
-  autosaved/branched messages, screenshot opt-in, provider cost estimation,
-  and live secret-gated network evidence remain C10 or later. Their shared
-  contract types do not imply that the runtime capability is complete.
+- Conversation consultation mode, streaming text, autosaved/branched messages,
+  screenshot opt-in, provider cost estimation, cancellation for non-AI long
+  operations, and live secret-gated network evidence remain outside the
+  automated local baseline. AI generation attempt cancellation is implemented;
+  it does not imply those broader capabilities.
 - Editing a redacted site file requires a future protocol with digest-bound
   protected ranges. C6 does not retrofit placeholder rehydration into
   ChangeSet v1.
-- C7 adds durable Proposal/Decision recovery. C6's immutable Proposal workspace
-  is not yet a restart-resumable pending Synapse authority record.
+- C7 adds durable Proposal/Decision recovery around C6's immutable Proposal
+  workspace. Provider attempts themselves remain bounded process-local status;
+  only a completed validated Proposal enters durable review authority.

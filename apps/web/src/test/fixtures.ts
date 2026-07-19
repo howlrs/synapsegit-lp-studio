@@ -48,6 +48,10 @@ export const bootstrapFixture = (
         adapterVersion: "fake-change-set/1",
         external: false,
         availability: "available",
+        dataRetentionPolicy: "local_only_not_retained_by_adapter",
+        trainingPolicy: "not_applicable",
+        policyNotice:
+          "No external provider is used by this deterministic local adapter.",
         models: [{ id: "deterministic-v1", label: "Deterministic v1" }],
       },
       {
@@ -56,6 +60,10 @@ export const bootstrapFixture = (
         adapterVersion: "openai-responses/1",
         external: true,
         availability: "not_configured",
+        dataRetentionPolicy: "unknown_verify_current_provider_terms",
+        trainingPolicy: "unknown_verify_current_provider_terms",
+        policyNotice:
+          "Review the provider's current account and data-control terms before enabling this external adapter.",
         models: [],
       },
     ],
@@ -375,6 +383,11 @@ export const apiErrorResponseFixture: ApiErrorResponse = {
     code: "revision_conflict",
     message: "Accepted revision changed.",
     requestId: "request-001",
+    operationId: "operation-001",
     retryable: false,
+    detail: {
+      acceptedState: "unchanged",
+      recoveryAction: "refresh",
+    },
   },
 };

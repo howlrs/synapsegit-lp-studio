@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "synapsegit-lp-studio.performance-geometry-profile/1",
+  "scope": "synthetic_full_corpus_local_evaluation",
+  "generatorVersion": "synapsegit-lp-studio.performance-geometry-generator/1",
+  "staticSite": {
+    "fileCount": 500,
+    "totalByteLength": 52428800,
+    "symlinksAllowed": false,
+    "specialEntriesAllowed": false
+  },
+  "dom": {
+    "nodeCount": 10000,
+    "targetKinds": ["page", "block", "element", "text", "point", "region"],
+    "responsiveBreakpointsCssPx": [400, 640, 960],
+    "nestedScrollContainers": 2,
+    "transformedTargetRequired": true
+  },
+  "geometryMatrix": {
+    "viewports": [
+      { "name": "desktop", "width": 1280, "height": 800 },
+      { "name": "tablet", "width": 768, "height": 900 },
+      { "name": "mobile", "width": 375, "height": 667 }
+    ],
+    "deviceScaleFactors": [1, 2],
+    "contentZoomFactors": [1, 1.25, 2],
+    "previewScales": [0.75, 1],
+    "scrollCases": [
+      {
+        "name": "origin",
+        "windowTop": 0,
+        "outerTop": 0,
+        "innerLeft": 0
+      },
+      {
+        "name": "nested-scroll",
+        "windowTop": 48,
+        "outerTop": 72,
+        "innerLeft": 56
+      }
+    ]
+  },
+  "measurement": {
+    "warmupCaseCount": 0,
+    "sampleCount": 72,
+    "rawCaseRecordsRequired": true
+  },
+  "thresholds": {
+    "overlayMaximumErrorCssPx": 2,
+    "overlayFeedbackP95Ms": 100,
+    "performanceThresholdPolicy": "advisory_on_uncharacterized_ci"
+  },
+  "coverageBoundary": {
+    "hardGates": [
+      "exact 500 regular files and 50 MiB bounded scan",
+      "exact 10000-element DOM",
+      "six deterministic target kinds",
+      "overlay projection at or below 2 CSS px across the complete matrix",
+      "nested scroll, transform, viewport, zoom, preview-scale, and DPR cases"
+    ],
+    "notMeasuredByThisSyntheticCorpus": [
+      "LP Studio production bridge integration",
+      "metadata autosave latency",
+      "ChangeSet validation latency",
+      "import, diff, and operation-queue cancellation",
+      "manual keyboard, screen-reader, zoom, or contrast workflow",
+      "production or cross-browser support"
+    ]
+  }
+}

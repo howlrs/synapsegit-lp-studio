@@ -57,6 +57,9 @@ pub(super) struct ProviderDescriptor {
     pub adapter_version: &'static str,
     pub external: bool,
     pub availability: &'static str,
+    pub data_retention_policy: &'static str,
+    pub training_policy: &'static str,
+    pub policy_notice: &'static str,
     pub models: Vec<ProviderModelDescriptor>,
 }
 
@@ -76,6 +79,9 @@ pub(super) fn provider_descriptors(openai: Option<&OpenAiConfig>) -> Vec<Provide
         adapter_version: FAKE_ADAPTER_VERSION,
         external: false,
         availability: "available",
+        data_retention_policy: "local_only_not_retained_by_adapter",
+        training_policy: "not_applicable",
+        policy_notice: "No external provider is used by this deterministic local adapter.",
         models: vec![ProviderModelDescriptor {
             id: FAKE_MODEL_ID.into(),
             label: "Deterministic v1".into(),
@@ -91,6 +97,9 @@ pub(super) fn provider_descriptors(openai: Option<&OpenAiConfig>) -> Vec<Provide
         } else {
             "not_configured"
         },
+        data_retention_policy: "unknown_verify_current_provider_terms",
+        training_policy: "unknown_verify_current_provider_terms",
+        policy_notice: "Review the provider's current account and data-control terms before enabling this external adapter.",
         models: openai
             .map(|config| {
                 vec![ProviderModelDescriptor {
@@ -156,7 +165,7 @@ pub(super) struct ProviderResult {
     pub attribution: ProviderAttribution,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProviderAttribution {
     pub attempt_id: String,
@@ -170,7 +179,7 @@ pub(super) struct ProviderAttribution {
     pub usage: Option<ProviderUsage>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProviderUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,6 +255,8 @@ pub(super) async fn execute_provider(
     if raw_sha256(request.canonical_context_json.as_bytes()) != request.provider_context_sha256 {
         return Err(ProviderError::new(ProviderErrorKind::InvalidContext, false));
     }
+    #[cfg(test)]
+    testing::wait_if_pending(&request.attempt_id).await;
     match request.binding.provider_id.as_str() {
         FAKE_PROVIDER_ID => execute_fake(request),
         OPENAI_PROVIDER_ID => {
@@ -257,6 +268,115 @@ pub(super) async fn execute_provider(
             ProviderErrorKind::ProviderRejected,
             false,
         )),
+    }
+}
+
+#[cfg(test)]
+pub(super) mod testing {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot};
+
+    static SERIAL: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
+    static PENDING: Mutex<Option<Arc<PendingHook>>> = Mutex::new(None);
+
+    #[derive(Default)]
+    struct Signal {
+        observed: AtomicBool,
+        notify: Notify,
+    }
+
+    impl Signal {
+        fn signal(&self) {
+            self.observed.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        async fn wait(&self) {
+            while !self.observed.load(Ordering::Acquire) {
+                self.notify.notified().await;
+            }
+        }
+    }
+
+    struct PendingHook {
+        attempt_id: String,
+        entered: Signal,
+        release: Signal,
+        completed: Signal,
+    }
+
+    pub(crate) struct PendingProvider {
+        hook: Arc<PendingHook>,
+        _serial: OwnedMutexGuard<()>,
+    }
+
+    impl PendingProvider {
+        pub(crate) async fn install(attempt_id: &str) -> Self {
+            let serial = SERIAL
+                .get_or_init(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+                .lock_owned()
+                .await;
+            let hook = Arc::new(PendingHook {
+                attempt_id: attempt_id.to_owned(),
+                entered: Signal::default(),
+                release: Signal::default(),
+                completed: Signal::default(),
+            });
+            *PENDING.lock().expect("pending provider registry") = Some(hook.clone());
+            Self {
+                hook,
+                _serial: serial,
+            }
+        }
+
+        pub(crate) async fn wait_until_entered(&self) {
+            self.hook.entered.wait().await;
+        }
+
+        pub(crate) fn release(&self) {
+            self.hook.release.signal();
+        }
+
+        pub(crate) async fn wait_until_completed(&self) {
+            self.hook.completed.wait().await;
+        }
+    }
+
+    impl Drop for PendingProvider {
+        fn drop(&mut self) {
+            self.hook.release.signal();
+            if let Ok(mut pending) = PENDING.lock()
+                && pending
+                    .as_ref()
+                    .is_some_and(|hook| Arc::ptr_eq(hook, &self.hook))
+            {
+                *pending = None;
+            }
+        }
+    }
+
+    pub(super) async fn wait_if_pending(attempt_id: &str) {
+        let hook = PENDING.lock().ok().and_then(|pending| {
+            pending
+                .as_ref()
+                .filter(|hook| hook.attempt_id == attempt_id)
+                .cloned()
+        });
+        let Some(hook) = hook else {
+            return;
+        };
+        hook.entered.signal();
+        let worker = hook.clone();
+        let (completed, observed) = oneshot::channel();
+        tokio::spawn(async move {
+            worker.release.wait().await;
+            worker.completed.signal();
+            let _ = completed.send(());
+        });
+        let _ = observed.await;
     }
 }
 

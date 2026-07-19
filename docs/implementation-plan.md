@@ -1,6 +1,7 @@
 # SynapseGit LP Studio 実装計画
 
-Status: active; C6 complete at 65%; development baseline integrated into `main`
+Status: automated local completion baseline implemented on the post-65% branch;
+Human/external/release gates remain pending
 
 Last updated: 2026-07-19
 
@@ -19,15 +20,21 @@ Traceability: [requirements-traceability.md](requirements-traceability.md)
 > この例外は80% gate、C7–C11、release、production readiness、または
 > distribution permissionを完了させません。
 
+> **Post-65% continuation record:** Creatorは2026-07-19に65%からcompletionまで
+> 開発を継続するよう明示しました。この指示により、historical 80% stopの後も
+> C7–C11の自動化可能なlocal実装・検証・package handoffを継続しました。これは
+> Creator UX、screen-reader、live provider、license/brand、merge、releaseの結果を
+> 代替しません。
+
 ## 1. 目的
 
 本計画は、M1 Product MVPを100%とした実装順、進捗weight、
 SynapseGit利用、Git checkpoint、GitHub可視化、80%時点の
 Creatorによるローカル確認を定義する。
 
-実装は80%到達時に一度停止する。起動手順、確認scenario、
-既知制限、GitHub上のbranch/PR、SynapseGit recordを報告し、
-Creatorの確認結果を受けるまで残り20%へ進まない。
+通常は80%到達時に一度停止する。今回のpost-65% continuationは上記の明示指示に
+基づく記録済み例外であり、自動化可能な残りを進めても未実行のHuman・外部gateを
+passedへ変更しない。
 
 ## 2. 実装原則
 
@@ -232,7 +239,9 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 
 ## 9. 80% local verification handoff
 
-C8完了後、次を報告して停止する。
+default protocolではC8完了後、次を報告して停止する。今回の作業は明示された
+post-65% continuationにより自動化可能なC9–C11へ進んだが、このchecklist自体と
+Creatorのmanual結果はpendingのまま保持する。
 
 1. branch、latest commit、draft PR URL、累計80%の根拠
 2. SynapseGit checkpoint/Issue URLと、保証できるclaimの範囲
@@ -258,7 +267,8 @@ C8完了後、次を報告して停止する。
 9. static exportを開き、Editor metadataがないことを確認する。
 10. SynapseGit status/claimとGitHub-ready record previewを確認する。
 
-Creatorから確認結果を受けるまでC9へ進まない。
+通常はCreatorから確認結果を受けるまでC9へ進まない。今回の例外は自動化作業を
+許可しただけで、Creator確認をpassedと記録するものではない。
 
 ## 10. Blocker handling
 

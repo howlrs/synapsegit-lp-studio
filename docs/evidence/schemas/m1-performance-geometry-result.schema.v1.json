@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit.invalid/schemas/lp-studio/m1-performance-geometry-result.v1.json",
+  "title": "SynapseGit LP Studio synthetic performance and geometry result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "schemaVersion",
+        "status",
+        "scope",
+        "profileSha256",
+        "environment",
+        "fixture",
+        "geometry",
+        "performance",
+        "coverageBoundary",
+        "claimBoundary"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "status": { "const": "passed" },
+            "fixture": {
+              "type": "object",
+              "properties": { "boundedScanPassed": { "const": true } }
+            },
+            "geometry": {
+              "type": "object",
+              "properties": {
+                "caseCount": { "const": 72 },
+                "expectedCaseCount": { "const": 72 },
+                "maximumErrorCssPx": { "type": "number", "maximum": 2 },
+                "checksPassed": { "const": true },
+                "cases": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "overlayErrorCssPx": {
+                        "type": "number",
+                        "maximum": 2
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["failureCodes"] },
+              { "required": ["errorCode"] }
+            ]
+          }
+        },
+        {
+          "required": ["failureCodes"],
+          "properties": {
+            "status": { "const": "failed" },
+            "failureCodes": { "type": "array", "minItems": 1 }
+          },
+          "not": { "required": ["errorCode"] }
+        }
+      ]
+    },
+    {
+      "required": [
+        "schemaVersion",
+        "status",
+        "scope",
+        "errorCode",
+        "claimBoundary"
+      ],
+      "properties": { "status": { "const": "failed" } }
+    }
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "synapsegit-lp-studio.performance-geometry-result/1"
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "scope": { "const": "synthetic_full_corpus_local_evaluation" },
+    "profileSha256": { "$ref": "#/$defs/sha256" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "architecture",
+        "osReleaseId",
+        "osReleaseVersionId",
+        "osReleaseSha256",
+        "kernelRelease",
+        "node",
+        "pnpm",
+        "rust",
+        "playwright",
+        "browser"
+      ],
+      "properties": {
+        "platform": { "const": "linux" },
+        "architecture": { "const": "x64" },
+        "osReleaseId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "maxLength": 64
+        },
+        "osReleaseVersionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._+-]+$",
+          "maxLength": 64
+        },
+        "osReleaseSha256": { "$ref": "#/$defs/sha256" },
+        "kernelRelease": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "node": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "pnpm": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
+        },
+        "rust": {
+          "type": "string",
+          "pattern": "^rustc [0-9]+\\.[0-9]+\\.[0-9]+"
+        },
+        "playwright": {
+          "type": "string",
+          "pattern": "^Version [0-9]+\\.[0-9]+\\.[0-9]+"
+        },
+        "browser": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generatorVersion",
+        "fileCount",
+        "totalByteLength",
+        "manifestSha256",
+        "indexSha256",
+        "domNodeCount",
+        "targetKinds",
+        "responsiveBreakpointsCssPx",
+        "boundedScanPassed"
+      ],
+      "properties": {
+        "generatorVersion": {
+          "const": "synapsegit-lp-studio.performance-geometry-generator/1"
+        },
+        "fileCount": { "const": 500 },
+        "totalByteLength": { "const": 52428800 },
+        "manifestSha256": { "$ref": "#/$defs/sha256" },
+        "indexSha256": { "$ref": "#/$defs/sha256" },
+        "domNodeCount": { "const": 10000 },
+        "targetKinds": {
+          "const": ["page", "block", "element", "text", "point", "region"]
+        },
+        "responsiveBreakpointsCssPx": { "const": [400, 640, 960] },
+        "boundedScanPassed": { "type": "boolean" }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseCount",
+        "expectedCaseCount",
+        "maximumErrorCssPx",
+        "thresholdCssPx",
+        "checksPassed",
+        "cases"
+      ],
+      "properties": {
+        "caseCount": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "expectedCaseCount": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "maximumErrorCssPx": { "type": "number", "minimum": 0 },
+        "thresholdCssPx": { "const": 2 },
+        "checksPassed": { "type": "boolean" },
+        "cases": {
+          "type": "array",
+          "minItems": 72,
+          "maxItems": 72,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/geometryCase" }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmupCaseCount",
+        "sampleCount",
+        "rawCaseRecordsIncluded",
+        "overlayFeedbackSampleCount",
+        "overlayFeedbackP95Ms",
+        "referenceThresholdMs",
+        "thresholdPassed",
+        "gatePolicy"
+      ],
+      "properties": {
+        "warmupCaseCount": { "const": 0 },
+        "sampleCount": { "const": 72 },
+        "rawCaseRecordsIncluded": { "const": true },
+        "overlayFeedbackSampleCount": { "const": 72 },
+        "overlayFeedbackP95Ms": { "type": "number", "minimum": 0 },
+        "referenceThresholdMs": { "const": 100 },
+        "thresholdPassed": { "type": "boolean" },
+        "gatePolicy": { "const": "advisory_on_uncharacterized_ci" }
+      }
+    },
+    "coverageBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["syntheticCorpus", "applicationIntegration", "unmeasured"],
+      "properties": {
+        "syntheticCorpus": { "const": "measured" },
+        "applicationIntegration": { "const": "not_measured" },
+        "unmeasured": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "claimBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fullApplicationPerformance",
+        "productionReady",
+        "crossBrowserSupport",
+        "releaseCreated"
+      ],
+      "properties": {
+        "fullApplicationPerformance": { "const": false },
+        "productionReady": { "const": false },
+        "crossBrowserSupport": { "const": false },
+        "releaseCreated": { "const": false }
+      }
+    },
+    "failureCodes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+    },
+    "advisoryCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+    },
+    "errorCode": { "type": "string", "pattern": "^[a-z0-9_]+$" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "geometryCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseId",
+        "viewport",
+        "viewportWidthCssPx",
+        "viewportHeightCssPx",
+        "deviceScaleFactor",
+        "contentZoomFactor",
+        "previewScale",
+        "scrollCase",
+        "windowScrollTopCssPx",
+        "outerScrollTopCssPx",
+        "innerScrollLeftCssPx",
+        "overlayErrorCssPx",
+        "overlayFeedbackDurationMs"
+      ],
+      "properties": {
+        "caseId": {
+          "type": "string",
+          "pattern": "^[a-z0-9:=._-]+$",
+          "maxLength": 128
+        },
+        "viewport": { "enum": ["desktop", "tablet", "mobile"] },
+        "viewportWidthCssPx": { "type": "integer", "minimum": 1 },
+        "viewportHeightCssPx": { "type": "integer", "minimum": 1 },
+        "deviceScaleFactor": { "enum": [1, 2] },
+        "contentZoomFactor": { "enum": [1, 1.25, 2] },
+        "previewScale": { "enum": [0.75, 1] },
+        "scrollCase": { "enum": ["origin", "nested-scroll"] },
+        "windowScrollTopCssPx": { "type": "number", "minimum": 0 },
+        "outerScrollTopCssPx": { "type": "number", "minimum": 0 },
+        "innerScrollLeftCssPx": { "type": "number", "minimum": 0 },
+        "overlayErrorCssPx": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "overlayFeedbackDurationMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60000
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": ["viewport"],
+            "properties": { "viewport": { "const": "desktop" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "viewportWidthCssPx": { "const": 1280 },
+              "viewportHeightCssPx": { "const": 800 }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["viewport"],
+            "properties": { "viewport": { "const": "tablet" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "viewportWidthCssPx": { "const": 768 },
+              "viewportHeightCssPx": { "const": 900 }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["viewport"],
+            "properties": { "viewport": { "const": "mobile" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "viewportWidthCssPx": { "const": 375 },
+              "viewportHeightCssPx": { "const": 667 }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["scrollCase"],
+            "properties": { "scrollCase": { "const": "origin" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "windowScrollTopCssPx": { "const": 0 },
+              "outerScrollTopCssPx": { "const": 0 },
+              "innerScrollLeftCssPx": { "const": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": ["scrollCase"],
+            "properties": { "scrollCase": { "const": "nested-scroll" } }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "windowScrollTopCssPx": { "const": 48 },
+              "outerScrollTopCssPx": { "const": 72 },
+              "innerScrollLeftCssPx": { "const": 56 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

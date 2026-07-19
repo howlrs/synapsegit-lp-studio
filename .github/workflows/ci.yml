@@ -52,6 +52,7 @@ jobs:
         run: |
           node scripts/check-synapsegit-contract.mjs
           pnpm check:docs
+          pnpm check:evidence
 
       - name: Check formatting
         run: pnpm format:check
@@ -73,6 +74,21 @@ jobs:
 
       - name: Run Chromium vertical slice
         run: pnpm test:e2e
+
+      - name: Build and smoke-test the local evaluation package
+        run: pnpm verify:package -- --output-dir "${{ runner.temp }}/lp-studio-local-evaluation"
+
+      - name: Verify retained local-package checksums
+        working-directory: ${{ runner.temp }}/lp-studio-local-evaluation
+        run: sha256sum -c SHA256SUMS
+
+      - name: Retain successful local-evaluation package and evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: lp-studio-local-evaluation-${{ github.sha }}
+          path: ${{ runner.temp }}/lp-studio-local-evaluation/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload browser failure evidence
         if: failure()
