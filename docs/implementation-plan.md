@@ -1,12 +1,16 @@
 # SynapseGit LP Studio 実装計画
 
-Status: active; C4 complete at 46%
+Status: active; C6 complete at 65%
 
 Last updated: 2026-07-19
 
 Requirements: [detailed-requirements.md](detailed-requirements.md)
 
 Traceability: [requirements-traceability.md](requirements-traceability.md)
+
+> **読み方:** 本書は実装順序とexit criteriaを定義します。checkpointに書かれた
+> 機能は、当該checkpointがcompleteになるまで現在のcapabilityではありません。
+> 現在のevidenceは[実装ステータス](implementation-status.md)を参照してください。
 
 ## 1. 目的
 

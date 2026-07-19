@@ -1,10 +1,15 @@
 # SynapseGit LP Studio current specification
 
-Status: working direction; pending implementation/local review
+Status: product target; not a statement of current implementation
 
 Last updated: 2026-07-19
 
 Repository: `howlrs/synapsegit-lp-studio`
+
+> **読み方:** 本書は製品方向と将来の要求を記述します。本書の「できる」
+> 「supportする」は、現在のruntimeで実装済みという証拠ではありません。
+> 現在の事実は[実装ステータス](implementation-status.md)と
+> [要件traceability](requirements-traceability.md)を確認してください。
 
 ## 1. Purpose
 

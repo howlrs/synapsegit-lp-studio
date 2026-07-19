@@ -1,12 +1,17 @@
 # SynapseGit LP Studio 詳細要件
 
-Status: implementation baseline draft
+Status: requirements baseline; includes planned work
 
 Version: 0.1
 
 Last updated: 2026-07-19
 
 Source: [current-specification.md](current-specification.md)
+
+> **重要:** 本書は実装すべき要求の正本です。要件の存在や`MUST`表記は、
+> 実装完了を意味しません。現在の完了範囲は
+> [実装ステータス](implementation-status.md)と
+> [generated traceability](requirements-traceability.md)で確認します。
 
 ## 1. 文書の目的
 

@@ -8,6 +8,9 @@ Draft PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
 
 Completed progress: 65%
 
+この文書は「現在実装され、検証済みの範囲」のdocumentation正本です。
+要件・計画・contract typeだけからruntime capabilityを推測しないでください。
+
 ## Checkpoints
 
 | Checkpoint | Weight | Status | Evidence |
@@ -250,8 +253,9 @@ Completed progress: 65%
   actions, script/iframe/download behavior, inline event handlers, changed
   local or inline script bodies, analytics, and cookie behavior are visible
   blocking warnings with exact destinations. Both the UI and Decision server
-  reject adoption while one is present; reject and defer remain available
-  Human dispositions. Accepted bytes are unchanged on every failed
+  reject adoption while one is present. The strict server contract accepts
+  reject and defer dispositions, but the current Review UI exposes only
+  unchanged adoption. Accepted bytes are unchanged on every failed
   generation/validation.
 - Local gates pass with 205 Web tests, 63 Rust library tests, 10 launcher
   tests, Clippy warnings denied, strict schema/guard parity, production build,
