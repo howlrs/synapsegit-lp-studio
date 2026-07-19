@@ -370,8 +370,10 @@
     "targetPagePathV1": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 1024,
-      "pattern": "^(?:/|(?!/)(?!.*[\\\\?#\\u0000])(?!(?:\\.|\\.\\.)(?:/|$))[^/]+(?:/(?!\\.\\.?(?:/|$))[^/]+)*)$"
+      "maxLength": 512,
+      "x-maxUtf8Bytes": 512,
+      "$comment": "NFC normalization is enforced by runtime contract guards because JSON Schema has no Unicode-normalization assertion.",
+      "pattern": "^(?![A-Za-z]:[\\\\/])(?:(?!\\.\\.?(?:/|$))(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?![^/]*[ .](?:/|$))[^/\\\\<>:\"|?*\\u0000-\\u001F\\u007F-\\u009F]+/){0,15}(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?$)[^/\\\\<>:\"|?*\\u0000-\\u001F\\u007F-\\u009F]+\\.[Hh][Tt][Mm][Ll]?$"
     },
     "targetLabelV1": {
       "type": "string",

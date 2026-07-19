@@ -901,6 +901,72 @@ describe("canonical API v1 schema", () => {
     }
   });
 
+  it("accepts canonical target HTML paths through the UTF-8 byte boundary", () => {
+    const validPagePaths = [
+      "INDEX.HTML",
+      "pages/Caf\u00e9/\u30e9\u30f3\u30c7\u30a3\u30f3\u30b0.HtM",
+      "docs/a#b.html",
+      `${"a".repeat(TARGET_CONTRACT_LIMITS.pagePathBytes - 5)}.html`,
+      `${"\u754c".repeat(169)}.html`,
+    ];
+
+    for (const pagePath of validPagePaths) {
+      const target = { ...pageTargetV1, pagePath };
+      expect(new TextEncoder().encode(pagePath).byteLength).toBeLessThanOrEqual(
+        TARGET_CONTRACT_LIMITS.pagePathBytes,
+      );
+      expect(validate(target), JSON.stringify(validate.errors)).toBe(true);
+      expect(isTargetV1(target)).toBe(true);
+    }
+  });
+
+  it("rejects unsafe and non-HTML target page paths", () => {
+    for (const pagePath of [
+      "/",
+      "/index.html",
+      "pages/",
+      "pages//index.html",
+      "pages/./index.html",
+      "pages/../index.html",
+      "index.html?draft=1",
+      "pages\\index.html",
+      "bad./index.html",
+      "con/index.html",
+      "C:index.html",
+      "pages/line\nbreak.html",
+      ".html",
+      "docs/.html",
+      "index.css",
+    ]) {
+      const target = { ...pageTargetV1, pagePath };
+      expect(validate(target)).toBe(false);
+      expect(isTargetV1(target)).toBe(false);
+    }
+  });
+
+  it("enforces target page path UTF-8 bytes and NFC normalization", () => {
+    const overAsciiLimit = `${"a".repeat(
+      TARGET_CONTRACT_LIMITS.pagePathBytes - 4,
+    )}.html`;
+    const overMultibyteLimit = `${"\u754c".repeat(170)}.html`;
+
+    for (const pagePath of [overAsciiLimit, overMultibyteLimit]) {
+      const target = { ...pageTargetV1, pagePath };
+      expect(new TextEncoder().encode(pagePath).byteLength).toBeGreaterThan(
+        TARGET_CONTRACT_LIMITS.pagePathBytes,
+      );
+      expect(validate(target)).toBe(false);
+      expect(isTargetV1(target)).toBe(false);
+    }
+
+    const nfcPagePath = "pages/Caf\u00e9.HTML";
+    const nfdPagePath = nfcPagePath.normalize("NFD");
+    expect(validate({ ...pageTargetV1, pagePath: nfcPagePath })).toBe(true);
+    expect(isTargetV1({ ...pageTargetV1, pagePath: nfcPagePath })).toBe(true);
+    expect(nfdPagePath).not.toBe(nfcPagePath);
+    expect(isTargetV1({ ...pageTargetV1, pagePath: nfdPagePath })).toBe(false);
+  });
+
   it("enforces the required and exclusive fields for all target kinds", () => {
     const { elementAnchor: _elementAnchor, ...elementWithoutAnchor } =
       elementTargetV1;

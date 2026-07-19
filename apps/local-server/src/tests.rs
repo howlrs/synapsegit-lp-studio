@@ -237,6 +237,71 @@ fn element_target_request(revision_id: &str, seed: u128, element_id: &str) -> Va
     target_request(revision_id, seed, "element", element_id)
 }
 
+fn oversized_canonical_target_request(revision_id: &str, seed: u128) -> Value {
+    const BODY_LIMIT: usize = 64 * 1024 - 1;
+    for token_count in 1..=8 {
+        for token_chars in 3..=128 {
+            let class_tokens = (0..token_count)
+                .map(|index| {
+                    let prefix = format!("c{index:02}");
+                    format!("{prefix}{}", "界".repeat(token_chars - prefix.len()))
+                })
+                .collect::<Vec<_>>();
+            let anchor = json!({
+                "tagName":"section",
+                "uniqueElementId":"界".repeat(MAX_TARGET_ANCHOR_LENGTH),
+                "role":"界".repeat(MAX_TARGET_CLASS_TOKEN_LENGTH),
+                "accessibleName":"界".repeat(512),
+                "domPath":"界".repeat(MAX_TARGET_ANCHOR_LENGTH),
+                "classTokens":class_tokens,
+                "ancestorFingerprint":"界".repeat(MAX_TARGET_ANCHOR_LENGTH)
+            });
+            let mut request = target_request(revision_id, seed, "region", "hero-heading");
+            request["target"]["label"] = json!("x");
+            request["target"]["viewport"] = json!({
+                "cssWidth":8,
+                "cssHeight":8,
+                "scrollX":0,
+                "scrollY":0,
+                "devicePixelRatio":1,
+                "visualViewportScale":1,
+                "previewScale":1
+            });
+            request["target"]["document"] = json!({"cssWidth":8,"cssHeight":8,"layoutEpoch":1});
+            request["target"]["geometry"] = json!({
+                "documentCssPixelRect":{"x":0,"y":0,"width":8,"height":8},
+                "viewportCssPixelRect":{"x":0,"y":0,"width":8,"height":8},
+                "viewportNormalizedRect":{"x":0,"y":0,"width":1,"height":1}
+            });
+            request["target"]["regionAnchor"] = json!({
+                "containingBlock":anchor,
+                "previousVisibleSibling":anchor,
+                "nextVisibleSibling":anchor,
+                "layoutMode":"flow"
+            });
+
+            let initial_length = serde_json::to_vec(&request).unwrap().len();
+            if initial_length > BODY_LIMIT {
+                continue;
+            }
+            let label_padding = BODY_LIMIT - initial_length;
+            if label_padding >= MAX_TARGET_LABEL_LENGTH {
+                continue;
+            }
+            request["target"]["label"] = json!("x".repeat(label_padding + 1));
+            assert_eq!(serde_json::to_vec(&request).unwrap().len(), BODY_LIMIT);
+            let parsed: CreateTargetRequest = serde_json::from_value(request.clone()).unwrap();
+            assert!(validate_target_shape(&parsed.target).is_ok());
+            assert!(
+                serde_json::to_vec(&parsed.target).unwrap().len()
+                    > STORAGE_MAX_TARGET_METADATA_BYTES
+            );
+            return request;
+        }
+    }
+    panic!("failed to construct a shape-valid request with oversized canonical metadata");
+}
+
 fn context_request(revision_id: &str, target_response: &Value, instruction: &str) -> Value {
     let target_id = string_at(target_response, "/target/targetId");
     json!({
@@ -1273,6 +1338,203 @@ async fn target_is_immutable_private_metadata_and_rehydrates_across_restart() {
 }
 
 #[tokio::test]
+async fn target_capacity_reuses_only_unreferenced_persisted_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let config = || {
+        ServerConfig::new(
+            EDITOR_ORIGIN,
+            EDITOR_HOST,
+            PREVIEW_ORIGIN,
+            root.path(),
+            root.path().join("missing-web-dist"),
+        )
+    };
+    let first_state = StudioState::new(config()).unwrap();
+    let first_token = bootstrap_token(&first_state).await;
+    let created = response_json(
+        post_for(
+            &first_state,
+            &first_token,
+            "/api/v1/projects",
+            json!({"schemaVersion":"1","template":"blank"}),
+        )
+        .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let targets_uri = format!("/api/v1/projects/{project_id}/targets");
+    let contexts_uri = format!("/api/v1/projects/{project_id}/contexts");
+
+    let protected = response_json(
+        post_for(
+            &first_state,
+            &first_token,
+            &targets_uri,
+            element_target_request(&revision_id, 1, "hero-heading"),
+        )
+        .await,
+    )
+    .await;
+    let protected_context = post_for(
+        &first_state,
+        &first_token,
+        &contexts_uri,
+        context_request(&revision_id, &protected, "retain referenced target"),
+    )
+    .await;
+    assert_eq!(protected_context.status(), StatusCode::CREATED);
+
+    let mut recyclable = Value::Null;
+    let mut retained_unreferenced = Vec::new();
+    for seed in 2..=MAX_TARGETS_PER_PROJECT as u128 {
+        let response = post_for(
+            &first_state,
+            &first_token,
+            &targets_uri,
+            element_target_request(&revision_id, seed, "hero-heading"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "seed {seed}");
+        let response = response_json(response).await;
+        if seed == 2 {
+            recyclable = response;
+        } else {
+            retained_unreferenced.push(response);
+        }
+    }
+    assert_ne!(recyclable, Value::Null);
+
+    let targets_root = root
+        .path()
+        .join("managed-v1/projects")
+        .join(&project_id)
+        .join("targets");
+    let recyclable_path = targets_root.join(format!("{}.json", test_target_id(2)));
+    let recyclable_bytes = std::fs::read(&recyclable_path).unwrap();
+    let oversized_response = post_for(
+        &first_state,
+        &first_token,
+        &targets_uri,
+        oversized_canonical_target_request(&revision_id, 99),
+    )
+    .await;
+    assert_eq!(oversized_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(&recyclable_path).unwrap(), recyclable_bytes);
+    {
+        let store = first_state.store().unwrap();
+        let project = store.projects.get(&project_id).unwrap();
+        assert!(project.targets.contains_key(&test_target_id(2)));
+        assert!(!project.targets.contains_key(&test_target_id(99)));
+    }
+
+    let replacement_response = post_for(
+        &first_state,
+        &first_token,
+        &targets_uri,
+        element_target_request(&revision_id, 33, "hero-heading"),
+    )
+    .await;
+    assert_eq!(replacement_response.status(), StatusCode::CREATED);
+    let replacement = response_json(replacement_response).await;
+    retained_unreferenced.push(replacement.clone());
+
+    {
+        let store = first_state.store().unwrap();
+        let project = store.projects.get(&project_id).unwrap();
+        assert_eq!(project.targets.len(), MAX_TARGETS_PER_PROJECT);
+        assert!(project.targets.contains_key(&test_target_id(1)));
+        assert!(!project.targets.contains_key(&test_target_id(2)));
+        assert!(project.targets.contains_key(&test_target_id(33)));
+        assert!(
+            project
+                .contexts
+                .values()
+                .any(|context| context.target_id == test_target_id(1))
+        );
+    }
+    assert!(
+        targets_root
+            .join(format!("{}.json", test_target_id(1)))
+            .is_file()
+    );
+    assert!(
+        !targets_root
+            .join(format!("{}.json", test_target_id(2)))
+            .exists()
+    );
+    assert!(
+        targets_root
+            .join(format!("{}.json", test_target_id(33)))
+            .is_file()
+    );
+
+    let evicted_context = post_for(
+        &first_state,
+        &first_token,
+        &contexts_uri,
+        context_request(&revision_id, &recyclable, "evicted target must be detached"),
+    )
+    .await;
+    assert_eq!(evicted_context.status(), StatusCode::NOT_FOUND);
+
+    for target in &retained_unreferenced {
+        let context = post_for(
+            &first_state,
+            &first_token,
+            &contexts_uri,
+            context_request(&revision_id, target, "protect retained target"),
+        )
+        .await;
+        assert_eq!(context.status(), StatusCode::CREATED);
+    }
+    let fully_referenced_overflow = post_for(
+        &first_state,
+        &first_token,
+        &targets_uri,
+        element_target_request(&revision_id, 34, "hero-heading"),
+    )
+    .await;
+    assert_eq!(
+        fully_referenced_overflow.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        response_json(fully_referenced_overflow).await["error"]["code"],
+        "local_capacity_reached"
+    );
+    assert!(
+        !targets_root
+            .join(format!("{}.json", test_target_id(34)))
+            .exists()
+    );
+
+    drop(first_state);
+    let restarted = StudioState::new(config()).unwrap();
+    let restarted_token = bootstrap_token(&restarted).await;
+    let restored_protected = post_for(
+        &restarted,
+        &restarted_token,
+        &contexts_uri,
+        context_request(
+            &revision_id,
+            &protected,
+            "protected target survives restart",
+        ),
+    )
+    .await;
+    assert_eq!(restored_protected.status(), StatusCode::CREATED);
+    let restored_replacement = post_for(
+        &restarted,
+        &restarted_token,
+        &contexts_uri,
+        context_request(&revision_id, &replacement, "replacement survives restart"),
+    )
+    .await;
+    assert_eq!(restored_replacement.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn restart_rejects_a_target_whose_filename_and_canonical_id_disagree() {
     let root = tempfile::tempdir().unwrap();
     let config = || {
@@ -1396,7 +1658,13 @@ async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserv
     let source = tempfile::tempdir().unwrap();
     std::fs::write(
         source.path().join("index.html"),
-        b"<!doctype html><h1>Imported</h1>",
+        br#"<!doctype html><h1>Imported</h1><a href="docs/">Nested documentation</a>"#,
+    )
+    .unwrap();
+    std::fs::create_dir(source.path().join("docs")).unwrap();
+    std::fs::write(
+        source.path().join("docs/index.html"),
+        br#"<!doctype html><h1 data-lp-id="nested-heading">Nested documentation</h1><a href="../">Back to project root</a>"#,
     )
     .unwrap();
     std::fs::write(source.path().join("styles.css"), b"h1 { color: navy; }").unwrap();
@@ -1437,7 +1705,7 @@ async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserv
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
     assert_eq!(
         preview["importPreview"]["excluded"]
@@ -1537,7 +1805,18 @@ async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserv
     assert_eq!(confirmed.status(), StatusCode::CREATED);
     let confirmed = response_json(confirmed).await;
     let project_id = string_at(&confirmed, "/project/id");
-    assert_eq!(confirmed["project"]["files"].as_array().unwrap().len(), 2);
+    assert_eq!(confirmed["project"]["files"].as_array().unwrap().len(), 3);
+    let preview_url = string_at(&confirmed, "/project/previewUrl");
+    let nested_response = get_preview_for(&harness.state, &format!("{preview_url}docs/")).await;
+    assert_eq!(nested_response.status(), StatusCode::OK);
+    assert_eq!(
+        nested_response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/html"
+    );
+    let nested_html = String::from_utf8(response_bytes(nested_response).await).unwrap();
+    assert!(nested_html.contains("Nested documentation"));
+    assert!(nested_html.contains("href=\"../\""));
+    assert!(nested_html.contains(",\"docs/index.html\");</script>"));
     let replay = harness
         .post(
             &format!("/api/v1/imports/{final_id}/confirm"),
@@ -1564,6 +1843,15 @@ async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserv
     let listed =
         response_json(get_for(&restarted, &restarted_token, "/api/v1/projects").await).await;
     assert_eq!(listed["projects"][0]["id"], project_id);
+    let restarted_preview_url = string_at(&listed, "/projects/0/previewUrl");
+    let restarted_nested =
+        get_preview_for(&restarted, &format!("{restarted_preview_url}docs/")).await;
+    assert_eq!(restarted_nested.status(), StatusCode::OK);
+    assert!(
+        String::from_utf8(response_bytes(restarted_nested).await)
+            .unwrap()
+            .contains("Nested documentation")
+    );
 }
 
 #[tokio::test]
@@ -2352,6 +2640,86 @@ async fn redacted_instruction_with_clean_site_files_can_generate_a_proposal() {
 }
 
 #[test]
+fn target_page_path_matches_contract_safety_and_utf8_boundaries() {
+    let ascii_boundary = format!("{}.html", "a".repeat(STORAGE_MAX_PATH_BYTES - 5));
+    let multibyte_boundary = format!("{}.html", "界".repeat(169));
+    assert_eq!(ascii_boundary.len(), STORAGE_MAX_PATH_BYTES);
+    assert_eq!(multibyte_boundary.len(), STORAGE_MAX_PATH_BYTES);
+    for accepted in [
+        "index.html",
+        "INDEX.HTML",
+        "pages/Café/ランディング.HtM",
+        "docs/a#b.html",
+        &ascii_boundary,
+        &multibyte_boundary,
+    ] {
+        assert!(is_safe_page_path(accepted), "{accepted}");
+        assert_eq!(
+            mime_guess::from_path(accepted)
+                .first_or_octet_stream()
+                .essence_str(),
+            "text/html",
+            "{accepted}",
+        );
+    }
+
+    let over_ascii_boundary = format!("{}.html", "a".repeat(STORAGE_MAX_PATH_BYTES - 4));
+    let over_multibyte_boundary = format!("{}.html", "界".repeat(170));
+    for rejected in [
+        "",
+        "/",
+        "/index.html",
+        "C:/index.html",
+        "pages/",
+        "pages//index.html",
+        "pages/./index.html",
+        "pages/../index.html",
+        "index.html?draft=1",
+        "pages\\index.html",
+        "bad./index.html",
+        "con/index.html",
+        "C:index.html",
+        "pages/line\nbreak.html",
+        ".html",
+        "docs/.html",
+        "index.css",
+        "pages/Cafe\u{301}.HTML",
+        &over_ascii_boundary,
+        &over_multibyte_boundary,
+    ] {
+        assert!(!is_safe_page_path(rejected), "{rejected}");
+    }
+}
+
+#[test]
+fn preview_directory_route_resolves_only_one_safe_trailing_slash() {
+    assert_eq!(
+        canonical_preview_file_path("docs/"),
+        Some("docs/index.html".into())
+    );
+    assert_eq!(
+        canonical_preview_file_path("docs/guide.html"),
+        Some("docs/guide.html".into())
+    );
+    for rejected in [
+        "",
+        "/",
+        "/docs/",
+        "docs//",
+        "docs///",
+        "docs/./",
+        "docs/../",
+        "../docs/",
+        "docs\\",
+        "docs\\index.html",
+    ] {
+        assert_eq!(canonical_preview_file_path(rejected), None, "{rejected}");
+    }
+    let oversized_directory = format!("{}/", "a".repeat(STORAGE_MAX_PATH_BYTES - 1));
+    assert_eq!(canonical_preview_file_path(&oversized_directory), None);
+}
+
+#[test]
 fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshake() {
     let source = br#"<!doctype html><!-- <script src="comment.js"></script><header> --><html><head><meta charset="utf-8"><script src="app.js"></script></head><body><header>source</header></body></html>"#;
     let original = source.to_vec();
@@ -2362,6 +2730,7 @@ fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshak
         "prj_fixed",
         "pro_fixed",
         "rev_fixed",
+        "docs/index.html",
     )
     .unwrap();
     assert_eq!(
@@ -2395,6 +2764,7 @@ fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshak
     assert!(injected.contains("Object.defineProperty(owner,name"));
     assert!(injected.contains("RTCPeerConnection"));
     assert!(injected.contains("function previewTargetRuntime"));
+    assert!(injected.contains(",\"docs/index.html\");</script>"));
     assert!(
         injected.contains("\n}))(") && !injected.contains("\n});)("),
         "the extracted target runtime must remain a callable expression"
@@ -2418,6 +2788,7 @@ fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshak
         "prj_fixed",
         "rev_fixed",
         "rev_fixed",
+        "index.html",
     )
     .unwrap();
     assert!(injected_no_doctype.starts_with(b"<script nonce=\"second-nonce\">"));

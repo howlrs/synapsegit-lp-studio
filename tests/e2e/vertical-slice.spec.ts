@@ -30,6 +30,7 @@ import {
   type ExportResponse,
   type ImportPreviewResponse,
   type PreviewDiagnosticMessage,
+  type PreviewTargetMessage,
   type Project,
   type ProjectResponse,
 } from "../../packages/contracts/src/index";
@@ -1211,7 +1212,13 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
   expect(previewPayload.importPreview.entryPoint).toBe("index.html");
   expect(
     previewPayload.importPreview.included.map((file) => file.path),
-  ).toEqual(["about.html", "assets/app.js", "assets/theme.css", "index.html"]);
+  ).toEqual([
+    "about.html",
+    "assets/app.js",
+    "assets/theme.css",
+    "docs/index.html",
+    "index.html",
+  ]);
   expect(previewPayload.importPreview.excluded).toEqual([
     { path: ".env", reason: "credential_material" },
   ]);
@@ -1224,6 +1231,7 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
   await expect(dialog).toContainText("assets/theme.css");
   await expect(dialog).toContainText("assets/app.js");
   await expect(dialog).toContainText("about.html");
+  await expect(dialog).toContainText("docs/index.html");
   await expect(dialog).toContainText("index.html");
   await expect(dialog).toContainText(".env");
   await expect(dialog).toContainText("credential_material");
@@ -1353,6 +1361,57 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
   await expect(
     importedPreview.getByRole("heading", { name: "同じLP内の詳細ページ" }),
   ).toBeVisible();
+  await importedPreview.getByRole("link", { name: "トップへ戻る" }).click();
+  await expect(
+    importedPreview.getByRole("heading", { name: "登録ルートから始めるLP" }),
+  ).toBeVisible();
+  await importedPreview
+    .getByRole("link", { name: "同じLP内のディレクトリ詳細へ" })
+    .click();
+  const nestedHeading = importedPreview.getByRole("heading", {
+    name: "同じLP内のディレクトリ詳細ページ",
+  });
+  await expect(nestedHeading).toBeVisible();
+  expect(
+    await importedPreview.locator("body").evaluate(() => location.pathname),
+  ).toMatch(/\/docs\/$/);
+
+  const nestedTargetResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /^\/api\/v1\/projects\/[^/]+\/targets$/.test(
+        new URL(response.url()).pathname,
+      ),
+  );
+  await page.getByRole("button", { name: "選択モード" }).click();
+  await nestedHeading.click();
+  const nestedTargetResponse = await nestedTargetResponsePromise;
+  expect(nestedTargetResponse.status()).toBe(201);
+  const nestedTargetPayload = (await nestedTargetResponse.json()) as unknown;
+  expect(isTargetResponse(nestedTargetPayload)).toBe(true);
+  if (!isTargetResponse(nestedTargetPayload)) {
+    throw new Error("Nested directory target response was invalid");
+  }
+  expect(nestedTargetPayload.target.pagePath).toBe("docs/index.html");
+  await expect
+    .poll(async () => {
+      const envelopes = await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __LP_STUDIO_E2E_BRIDGE_ENVELOPES__?: unknown[];
+            }
+          ).__LP_STUDIO_E2E_BRIDGE_ENVELOPES__ ?? [],
+      );
+      return envelopes
+        .filter((value): value is PreviewTargetMessage =>
+          isPreviewTargetMessage(value),
+        )
+        .map((envelope) => envelope.target.pagePath);
+    })
+    .toContain("docs/index.html");
+
+  await page.getByRole("button", { name: "操作モード" }).click();
   await importedPreview.getByRole("link", { name: "トップへ戻る" }).click();
   await expect(
     importedPreview.getByRole("heading", { name: "登録ルートから始めるLP" }),

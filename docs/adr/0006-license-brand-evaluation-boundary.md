@@ -27,8 +27,9 @@ the SynapseGit name/logo/trademarks without separate written permission.
 
 ## Consequences
 
-- The private development branch/draft PR is progress evidence, not a product
-  distribution.
+- The Public development repository, checkpoint branches/PRs, and an explicitly
+  approved `main` development baseline are progress evidence, not a product
+  distribution or license grant.
 - C11 reports license/brand status; it does not silently grant permission.
 - Any later release action requires a dedicated review of the exact artifact,
   destination, and terms.

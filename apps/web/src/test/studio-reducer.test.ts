@@ -9,6 +9,19 @@ import {
 } from "./fixtures";
 
 describe("studio reducer Accepted invariant", () => {
+  it("keeps Decision adoption locked after an outcome-unknown failure", () => {
+    const failed = studioReducer(initialStudioState, {
+      type: "FAILED",
+      message: "Decision outcome unknown",
+      requiresDecisionReconciliation: true,
+    });
+    const dismissed = studioReducer(failed, { type: "DISMISS_ERROR" });
+
+    expect(failed.decisionReconciliationRequired).toBe(true);
+    expect(dismissed.decisionReconciliationRequired).toBe(true);
+    expect(dismissed.error).toBeNull();
+  });
+
   it("does not infer an Accepted revision from Decision completion", () => {
     const before = {
       ...initialStudioState,

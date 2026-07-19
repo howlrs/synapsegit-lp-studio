@@ -3,6 +3,7 @@
   projectId,
   snapshotId,
   revisionId,
+  pagePath,
 ) {
   "use strict";
 
@@ -29,8 +30,6 @@
   const elementsFromPoint = document.elementsFromPoint.bind(document);
   const randomUuid = crypto.randomUUID.bind(crypto);
   const postToEditor = parent.postMessage.bind(parent);
-  const decode = decodeURIComponent;
-  const encode = encodeURIComponent;
   const minimum = Math.min.bind(Math);
   const maximum = Math.max.bind(Math);
   const round = Math.round.bind(Math);
@@ -38,9 +37,6 @@
   const encoder = new TextEncoder();
   const blockSelector =
     "header,nav,main,section,article,aside,footer,[role='banner'],[role='navigation'],[role='main'],[role='region'],[role='complementary'],[role='contentinfo']";
-  const basePath =
-    "/preview/" + encode(projectId) + "/" + encode(snapshotId) + "/";
-  const allowedPrefix = location.origin + basePath;
   const handles = new WeakMap();
   const nodesByHandle = new Map();
   const blockElements = new Set();
@@ -221,19 +217,7 @@
       },
     };
   };
-  const currentPagePath = () => {
-    if (!location.href.startsWith(allowedPrefix)) return "index.html";
-    const encodedPath = location.pathname.slice(basePath.length);
-    if (!encodedPath) return "index.html";
-    try {
-      return encodedPath
-        .split("/")
-        .map((segment) => decode(segment))
-        .join("/");
-    } catch {
-      return "index.html";
-    }
-  };
+  const currentPagePath = () => pagePath;
   const commonTarget = (kind, label) => ({
     schemaVersion: 1,
     targetId: "tgt_" + randomUuid().replaceAll("-", ""),

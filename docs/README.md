@@ -63,6 +63,7 @@
 
 - Status date: 2026-07-19
 - Completed: C0–C6、65%
+- C0–C6 integration: merged PR #1 commit `c9a22b1`, contained in `main`
 - Next: C7 Review / Decision / recovery
 - Product status: local evaluation build、not production-ready
 - Browser evidence: Chromium

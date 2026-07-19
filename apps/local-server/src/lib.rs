@@ -50,8 +50,10 @@ use change_set::{
 use storage::{
     ImportExcluded, ImportIncluded, MAX_DEPTH as STORAGE_MAX_DEPTH,
     MAX_FILE_BYTES as STORAGE_MAX_FILE_BYTES, MAX_FILES as STORAGE_MAX_FILES,
-    MAX_PATH_BYTES as STORAGE_MAX_PATH_BYTES, MAX_TOTAL_BYTES as STORAGE_MAX_TOTAL_BYTES,
-    ManagedStorage, StorageError, scan_import,
+    MAX_PATH_BYTES as STORAGE_MAX_PATH_BYTES,
+    MAX_TARGET_METADATA_BYTES as STORAGE_MAX_TARGET_METADATA_BYTES,
+    MAX_TOTAL_BYTES as STORAGE_MAX_TOTAL_BYTES, ManagedStorage, StorageError, scan_import,
+    validate_canonical_path,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -1678,10 +1680,28 @@ async fn create_target(
     if project.targets.contains_key(&target.target_id) {
         return Err(ApiError::conflict("target_id_exists"));
     }
-    ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
     let resolution = resolve_target(project, &target)?;
     let resolution_id = target_resolution_id(&resolution)?;
     let canonical_target = serde_json::to_vec(&target).map_err(|_| ApiError::internal())?;
+    if canonical_target.len() > STORAGE_MAX_TARGET_METADATA_BYTES {
+        return Err(ApiError::invalid());
+    }
+    if project.targets.len() >= MAX_TARGETS_PER_PROJECT {
+        let recyclable_id = recyclable_target_id(project).ok_or_else(ApiError::capacity)?;
+        let recyclable_target = project
+            .targets
+            .get(&recyclable_id)
+            .ok_or_else(ApiError::internal)?;
+        let expected_bytes =
+            serde_json::to_vec(recyclable_target).map_err(|_| ApiError::internal())?;
+        state
+            .0
+            .storage
+            .remove_target(&project.id, &recyclable_id, &expected_bytes)
+            .map_err(storage_api_error)?;
+        project.targets.remove(&recyclable_id);
+    }
+    ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
     state
         .0
         .storage
@@ -2421,14 +2441,7 @@ async fn serve_preview(
     snapshot_id: String,
     path: String,
 ) -> Result<Response, PreviewError> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path
-            .split('/')
-            .any(|part| part.is_empty() || matches!(part, "." | ".."))
-    {
-        return Err(PreviewError::not_found());
-    }
+    let path = canonical_preview_file_path(&path).ok_or_else(PreviewError::not_found)?;
     let (bytes, revision_id) = {
         let mut store = state.store()?;
         sweep_expired_sessions(&mut store, now_unix());
@@ -2474,6 +2487,7 @@ async fn serve_preview(
             &project_id,
             &snapshot_id,
             &revision_id,
+            &path,
         )?;
         nonce = Some(script_nonce);
     }
@@ -2493,6 +2507,33 @@ async fn serve_preview(
         );
     }
     Ok(response)
+}
+
+fn canonical_preview_file_path(path: &str) -> Option<String> {
+    if path.is_empty()
+        || path.len() > STORAGE_MAX_PATH_BYTES
+        || path.starts_with('/')
+        || path.contains('\\')
+    {
+        return None;
+    }
+    let (base, directory_route) = match path.strip_suffix('/') {
+        Some(base) => (base, true),
+        None => (path, false),
+    };
+    if base.is_empty()
+        || base
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        return None;
+    }
+    let resolved = if directory_route {
+        format!("{base}/index.html")
+    } else {
+        base.to_owned()
+    };
+    (resolved.len() <= STORAGE_MAX_PATH_BYTES).then_some(resolved)
 }
 
 async fn api_not_found() -> ApiError {
@@ -2624,6 +2665,17 @@ fn ensure_capacity(current: usize, maximum: usize) -> Result<(), ApiError> {
     } else {
         Err(ApiError::capacity())
     }
+}
+
+fn recyclable_target_id(project: &Project) -> Option<String> {
+    let mut candidates = project.targets.keys().cloned().collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().find(|target_id| {
+        !project
+            .contexts
+            .values()
+            .any(|context| context.target_id == *target_id)
+    })
 }
 
 fn ensure_byte_capacity(current: usize, additional: usize, maximum: usize) -> Result<(), ApiError> {
@@ -2796,17 +2848,17 @@ fn is_opaque_identifier(value: &str, prefix: &str) -> bool {
 }
 
 fn is_safe_page_path(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= STORAGE_MAX_PATH_BYTES
-        && !value.starts_with('/')
-        && !value.contains('\\')
-        && !value.contains('\0')
-        && value
-            .split('/')
-            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
-        && value
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| matches!(extension, "html" | "htm"))
+    if validate_canonical_path(value).is_err() {
+        return false;
+    }
+    value
+        .rsplit('/')
+        .next()
+        .and_then(|file_name| file_name.rsplit_once('.'))
+        .is_some_and(|(stem, extension)| {
+            !stem.is_empty()
+                && (extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm"))
+        })
 }
 
 fn validate_target_text(value: &str, max_length: usize, allow_empty: bool) -> Result<(), ApiError> {
@@ -3898,6 +3950,7 @@ fn inject_preview_bridge(
     project_id: &str,
     snapshot_id: &str,
     revision_id: &str,
+    page_path: &str,
 ) -> Result<Vec<u8>, ApiError> {
     let html = std::str::from_utf8(html).map_err(|_| {
         ApiError::new(
@@ -3911,6 +3964,7 @@ fn inject_preview_bridge(
     let project = serde_json::to_string(project_id).map_err(|_| ApiError::internal())?;
     let snapshot = serde_json::to_string(snapshot_id).map_err(|_| ApiError::internal())?;
     let revision = serde_json::to_string(revision_id).map_err(|_| ApiError::internal())?;
+    let page_path = serde_json::to_string(page_path).map_err(|_| ApiError::internal())?;
     let mut script = format!(
         r##"<script nonce="{nonce}">(()=>{{"use strict";window.name="";const O={origin},P={project},S={snapshot},R={revision},V=location.origin,B="/preview/"+encodeURIComponent(P)+"/"+encodeURIComponent(S)+"/",A=V+B,startsWith=Function.call.bind(String.prototype.startsWith),cancel=Function.call.bind(Event.prototype.preventDefault),seen=new Set(),pending=[];let mode="interact",channel="";const valid=s=>typeof s==="string"&&s.length>0&&s.length<=128,send=code=>{{try{{parent.postMessage({{type:"synapsegit-lp.diagnostic",schemaVersion:"1",channelId:channel,projectId:P,snapshotId:S,revisionId:R,severity:code==="csp_blocked"?"warning":"error",code,sourceUnavailable:true}},O);}}catch{{}}}},diagnose=code=>{{if(seen.has(code))return;seen.add(code);channel?send(code):pending.push(code);}},deny=()=>{{diagnose("csp_blocked");throw new DOMException("Blocked","SecurityError");}},lock=(owner,name)=>{{try{{Object.defineProperty(owner,name,{{value:deny,writable:false,configurable:false}});return true;}}catch{{return false;}}}};["open","write","writeln"].forEach(name=>{{const prototypeSafe=lock(Document.prototype,name),documentSafe=lock(document,name);if(!prototypeSafe||!documentSafe)diagnose("csp_blocked");}});const getter=(owner,name)=>{{try{{const value=Object.getOwnPropertyDescriptor(owner,name)?.get;return typeof value==="function"?Function.call.bind(value):null;}}catch{{return null;}}}},nav=window.navigation,getDestination=typeof NavigateEvent==="function"?getter(NavigateEvent.prototype,"destination"):null,getUrl=typeof NavigationDestination==="function"?getter(NavigationDestination.prototype,"url"):null;if(!nav||typeof nav.addEventListener!=="function")diagnose("csp_blocked");else nav.addEventListener("navigate",e=>{{let destination="";try{{destination=getDestination&&getUrl?getUrl(getDestination(e)):"";}}catch{{}}if(typeof destination!=="string"||!startsWith(destination,A)){{try{{cancel(e);}}catch{{}}diagnose("csp_blocked");}}}});addEventListener("securitypolicyviolation",()=>diagnose("csp_blocked"));addEventListener("error",()=>diagnose("site_error"),true);addEventListener("unhandledrejection",()=>diagnose("unhandled_rejection"));addEventListener("message",e=>{{const m=e.data;if(e.origin!==O||e.source!==parent||!m||m.type!=="synapsegit-lp.action"||m.schemaVersion!=="1"||m.projectId!==P||m.snapshotId!==S||m.revisionId!==R||!valid(m.channelId))return;if(m.action==="set_mode"&&(m.mode==="select"||m.mode==="interact")){{channel=m.channelId;mode=m.mode;pending.splice(0).forEach(send);}}else if(m.action==="clear_selection"&&channel===m.channelId){{document.querySelectorAll("[data-lp-selected]").forEach(n=>n.removeAttribute("data-lp-selected"));}}}});addEventListener("click",e=>{{if(mode!=="select"||!channel)return;const n=e.target instanceof Element?e.target.closest("[data-lp-id]"):null;if(!n)return;e.preventDefault();e.stopPropagation();const id=n.getAttribute("data-lp-id"),r=n.getBoundingClientRect();if(!id||id.length>128)return;parent.postMessage({{type:"synapsegit-lp.selection",schemaVersion:"1",channelId:channel,projectId:P,snapshotId:S,revisionId:R,elementId:id,rect:{{x:r.x,y:r.y,width:r.width,height:r.height}}}},O);}},true);}})();</script>"##
     );
@@ -3918,7 +3972,7 @@ fn inject_preview_bridge(
         r#"<script nonce="{nonce}">(()=>{{"use strict";const blocked=()=>{{dispatchEvent(new Event("securitypolicyviolation"));throw new DOMException("Blocked","SecurityError");}};for(const name of ["RTCPeerConnection","webkitRTCPeerConnection"]){{try{{Object.defineProperty(window,name,{{value:blocked,writable:false,configurable:false}});}}catch{{dispatchEvent(new Event("securitypolicyviolation"));}}}}}})();</script>"#
     ));
     script.push_str(&format!(
-        r#"<script nonce="{nonce}">({runtime})({origin},{project},{snapshot},{revision});</script>"#,
+        r#"<script nonce="{nonce}">({runtime})({origin},{project},{snapshot},{revision},{page_path});</script>"#,
         runtime = PREVIEW_TARGET_RUNTIME.trim().trim_end_matches(';')
     ));
     let mut output = String::with_capacity(html.len() + script.len());

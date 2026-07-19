@@ -138,7 +138,7 @@ const throwResponseError = (response: Response, value: unknown): never => {
     });
   }
   throw new ApiError(
-    `リクエストに失敗しました（HTTP ${String(response.status)}）。Accepted LPは変更されていません。`,
+    `リクエストに失敗しました（HTTP ${String(response.status)}）。`,
     { code: "http_error", retryable: response.status >= 500 },
   );
 };

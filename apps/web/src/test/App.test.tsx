@@ -152,6 +152,112 @@ const openRetainedProjectAndSelectTarget = async (): Promise<void> => {
   expect(await screen.findByText("#hero-heading")).toBeInTheDocument();
 };
 
+type DecisionFailureScenario =
+  "approval" | "decision_response" | "accepted_refresh";
+
+const renderReadyProposalForDecisionFailure = async (
+  scenario: DecisionFailureScenario,
+) => {
+  let reviewedAttemptId = "";
+  let decisionCommitted = false;
+  const fetchMock = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const path = String(input);
+      const method = init?.method ?? "GET";
+      if (path === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture(window.location.origin));
+      }
+      if (method === "GET" && path === "/api/v1/projects") {
+        return jsonResponse(projectsResponseFixture());
+      }
+      if (method === "GET" && path === "/api/v1/projects/project-001") {
+        if (scenario === "accepted_refresh" && decisionCommitted) {
+          throw new Error("Accepted状態を再取得できませんでした。");
+        }
+        return jsonResponse(projectResponseFixture());
+      }
+      if (path.endsWith("/targets")) {
+        return jsonResponse(targetResponseFixture);
+      }
+      if (path.endsWith("/contexts")) {
+        const request = JSON.parse(String(init?.body)) as {
+          attemptId: string;
+          instruction: string;
+          providerId: string;
+          requestedModel: string;
+        };
+        reviewedAttemptId = request.attemptId;
+        return jsonResponse({
+          ...contextResponseFixture,
+          context: {
+            ...contextResponseFixture.context,
+            attemptId: request.attemptId,
+            providerId: request.providerId,
+            requestedModel: request.requestedModel,
+            instruction: request.instruction,
+            provider: {
+              ...contextResponseFixture.context.provider,
+              providerId: request.providerId,
+              requestedModel: request.requestedModel,
+            },
+          },
+        });
+      }
+      if (path.endsWith("/proposals")) {
+        return jsonResponse(proposalResponseForAttempt(reviewedAttemptId));
+      }
+      if (path.endsWith("/approvals")) {
+        if (scenario === "approval") {
+          throw new Error("承認サービスへ接続できませんでした。");
+        }
+        return jsonResponse({
+          schemaVersion: "1",
+          approval: {
+            token: "one-shot-host-approval",
+            expiresAt: "2026-07-19T12:01:00Z",
+            intentId: "11111111-2222-4333-8444-555555555555",
+          },
+        });
+      }
+      if (path.endsWith("/decisions")) {
+        if (scenario === "decision_response") {
+          throw new Error("Decision応答を受信できませんでした。");
+        }
+        decisionCommitted = true;
+        return jsonResponse({
+          schemaVersion: "1",
+          decision: {
+            reviewId: "review-001",
+            proposalId: "proposal-001",
+            disposition: "adopted_unchanged",
+            status: "committed",
+            revisionId: "revision-accepted-002",
+            artifactManifestSha256: HASH_C,
+          },
+          project: projectResponseFixture("revision-accepted-002").project,
+        });
+      }
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    },
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  await openRetainedProjectAndSelectTarget();
+  fireEvent.click(screen.getByRole("button", { name: "送信内容を確認" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "送信内容を確認",
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "変更案を作成" }));
+  const review = await screen.findByRole("heading", { name: "変更案を確認" });
+  const drawer = review.closest("section");
+  expect(drawer).not.toBeNull();
+  fireEvent.click(
+    within(drawer as HTMLElement).getByRole("button", { name: "変更を採用" }),
+  );
+  return fetchMock;
+};
+
 describe("C2 browser vertical slice", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -458,6 +564,46 @@ describe("C2 browser vertical slice", () => {
       );
       expect(init?.credentials).toBe("omit");
     }
+  });
+
+  it("keeps the fail-closed retry message when approval fails before Decision", async () => {
+    const fetchMock = await renderReadyProposalForDecisionFailure("approval");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Accepted LPは変更されていません");
+    expect(alert).toHaveTextContent("安全に再試行できます");
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/decisions"),
+      ),
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: "変更を採用" })).toBeEnabled();
+  });
+
+  it("reports an unknown outcome when the Decision response is lost", async () => {
+    await renderReadyProposalForDecisionFailure("decision_response");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Human Decisionの結果は不明です");
+    expect(alert).toHaveTextContent("Accepted LPが変更された可能性があります");
+    expect(alert).toHaveTextContent("画面を再読み込み");
+    expect(alert).toHaveTextContent("Accepted revisionを照合してください");
+    expect(alert).not.toHaveTextContent("Accepted LPは変更されていません");
+    expect(alert).not.toHaveTextContent("安全に再試行できます");
+    expect(screen.getByRole("button", { name: "変更を採用" })).toBeDisabled();
+  });
+
+  it("requires reload and reconciliation when Accepted refresh fails after Decision", async () => {
+    await renderReadyProposalForDecisionFailure("accepted_refresh");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Human Decisionは記録されました");
+    expect(alert).toHaveTextContent("現在の確認結果は不明です");
+    expect(alert).toHaveTextContent("画面を再読み込み");
+    expect(alert).toHaveTextContent("Accepted revisionを照合してください");
+    expect(alert).not.toHaveTextContent("Accepted LPは変更されていません");
+    expect(alert).not.toHaveTextContent("安全に再試行できます");
+    expect(screen.getByRole("button", { name: "変更を採用" })).toBeDisabled();
   });
 
   it("rejects an external context binding that suppresses provider disclosure", async () => {

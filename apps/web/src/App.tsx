@@ -125,7 +125,24 @@ const homeOperationLabel: Record<Exclude<HomeOperation, null>, string> = {
   importing_project: "検査済みファイルのコピーを取り込んでいます",
 };
 
+class DecisionOutcomeError extends Error {
+  readonly phase: "decision" | "refresh";
+
+  constructor(phase: "decision" | "refresh", cause: unknown) {
+    super(cause instanceof Error ? cause.message : "");
+    this.name = "DecisionOutcomeError";
+    this.phase = phase;
+  }
+}
+
 const errorMessage = (error: unknown): string => {
+  if (error instanceof DecisionOutcomeError) {
+    const detail = error.message.trim();
+    const prefix = detail.length === 0 ? "" : `${detail} `;
+    return error.phase === "decision"
+      ? `${prefix}Human Decisionの結果は不明です。Accepted LPが変更された可能性があります。Decisionを再実行せず、画面を再読み込みしてAccepted revisionを照合してください。`
+      : `${prefix}Human Decisionは記録されましたが、Accepted状態を再取得できず、現在の確認結果は不明です。Decisionを再実行せず、画面を再読み込みしてAccepted revisionを照合してください。`;
+  }
   if (error instanceof ApiError) {
     const retry = error.retryable
       ? "安全に再試行できます。"
@@ -1003,6 +1020,7 @@ interface ReviewDrawerProps {
   target: TargetV1 | null;
   prompt: string;
   busy: boolean;
+  decisionReconciliationRequired: boolean;
   rationale: string;
   onRationale: (value: string) => void;
   onAdopt: () => void;
@@ -1014,6 +1032,7 @@ function ReviewDrawer({
   target,
   prompt,
   busy,
+  decisionReconciliationRequired,
   rationale,
   onRationale,
   onAdopt,
@@ -1184,7 +1203,7 @@ function ReviewDrawer({
             type="text"
             maxLength={2000}
             value={rationale}
-            disabled={busy}
+            disabled={busy || decisionReconciliationRequired}
             onChange={(event) => onRationale(event.currentTarget.value)}
             aria-describedby="rationale-limit"
           />
@@ -1196,12 +1215,22 @@ function ReviewDrawer({
           type="button"
           className="button button-adopt"
           disabled={
-            busy || hardError || blockingWarning || rationaleBytes > 2000
+            busy ||
+            decisionReconciliationRequired ||
+            hardError ||
+            blockingWarning ||
+            rationaleBytes > 2000
           }
           onClick={onAdopt}
         >
           変更を採用
         </button>
+        {decisionReconciliationRequired ? (
+          <p className="blocking-decision-note" role="status">
+            Decision結果を再照合するまで採用操作はロックされています。画面を再読み込みし、Accepted
+            revisionを確認してください。
+          </p>
+        ) : null}
         {blockingWarning ? (
           <p className="blocking-decision-note" role="alert">
             新しいactive
@@ -1503,7 +1532,13 @@ function Studio({ session }: StudioProps) {
     try {
       await task();
     } catch (error) {
-      dispatch({ type: "FAILED", message: errorMessage(error) });
+      dispatch({
+        type: "FAILED",
+        message: errorMessage(error),
+        ...(error instanceof DecisionOutcomeError
+          ? { requiresDecisionReconciliation: true }
+          : {}),
+      });
     }
   }, []);
 
@@ -1794,7 +1829,12 @@ function Studio({ session }: StudioProps) {
   };
 
   const adopt = () => {
-    if (state.project === null || state.proposal === null) return;
+    if (
+      state.project === null ||
+      state.proposal === null ||
+      state.decisionReconciliationRequired
+    )
+      return;
     const project = state.project;
     const proposal = state.proposal;
     void run(async () => {
@@ -1807,22 +1847,31 @@ function Studio({ session }: StudioProps) {
         disposition: "adopted_unchanged",
         intentId,
       });
-      await session.api.decide({
-        reviewId: proposal.reviewId,
-        approvalToken: approval.token,
-        proposalId: proposal.id,
-        expectedRevisionId: project.revisionId,
-        disposition: "adopted_unchanged",
-        intentId,
-        ...(rationale.trim().length === 0
-          ? {}
-          : { rationale: rationale.trim() }),
-      });
+      try {
+        await session.api.decide({
+          reviewId: proposal.reviewId,
+          approvalToken: approval.token,
+          proposalId: proposal.id,
+          expectedRevisionId: project.revisionId,
+          disposition: "adopted_unchanged",
+          intentId,
+          ...(rationale.trim().length === 0
+            ? {}
+            : { rationale: rationale.trim() }),
+        });
+      } catch (error) {
+        throw new DecisionOutcomeError("decision", error);
+      }
       dispatch({
         type: "DECISION_COMMITTED",
         disposition: "adopted_unchanged",
       });
-      const refreshed = await session.api.getProject(project.id);
+      let refreshed: Project;
+      try {
+        refreshed = await session.api.getProject(project.id);
+      } catch (error) {
+        throw new DecisionOutcomeError("refresh", error);
+      }
       dispatch({
         type: "PROJECT_REFRESHED",
         project: refreshed,
@@ -2072,6 +2121,7 @@ function Studio({ session }: StudioProps) {
           target={state.proposalTarget}
           prompt={state.proposalInstruction ?? ""}
           busy={busy}
+          decisionReconciliationRequired={state.decisionReconciliationRequired}
           rationale={rationale}
           onRationale={setRationale}
           onAdopt={adopt}
