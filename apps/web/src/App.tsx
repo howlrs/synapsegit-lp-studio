@@ -10,6 +10,8 @@ import {
 import type {
   ArtifactDisposition,
   ExportReceipt,
+  ImportLimits,
+  ImportPreview,
   PreviewMode,
   PreviewSource,
   Project,
@@ -57,6 +59,20 @@ const operationLabel: Record<Exclude<StudioOperation, null>, string> = {
   committing_decision: "一回限りの承認を取得しDecisionを記録しています",
   refreshing_project: "Accepted状態を再取得しています",
   exporting: "Accepted revisionをエクスポートしています",
+};
+
+type HomeOperation =
+  | "loading_projects"
+  | "opening_project"
+  | "previewing_import"
+  | "importing_project"
+  | null;
+
+const homeOperationLabel: Record<Exclude<HomeOperation, null>, string> = {
+  loading_projects: "保存済みプロジェクトを確認しています",
+  opening_project: "保存済みプロジェクトを開いています",
+  previewing_import: "登録済みディレクトリを検査しています",
+  importing_project: "検査済みファイルのコピーを取り込んでいます",
 };
 
 const errorMessage = (error: unknown): string => {
@@ -812,18 +828,237 @@ function ExportReceiptCard({
   );
 }
 
+interface ImportReviewDialogProps {
+  preview: ImportPreview;
+  limits: ImportLimits;
+  busy: boolean;
+  returnFocus: React.RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+  onConfirm: () => void;
+}
+
+function ImportReviewDialog({
+  preview,
+  limits,
+  busy,
+  returnFocus,
+  onClose,
+  onConfirm,
+}: ImportReviewDialogProps) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+    const listener = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", listener);
+    return () => {
+      window.removeEventListener("keydown", listener);
+      returnFocus.current?.focus();
+    };
+  }, [busy, onClose, returnFocus]);
+
+  return (
+    <div className="dialog-backdrop">
+      <section
+        className="dialog-card import-review-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-dialog-title"
+        aria-describedby="import-dialog-description"
+      >
+        <div className="dialog-heading">
+          <div>
+            <p className="eyebrow">REGISTERED ROOT · EXACT COPY REVIEW</p>
+            <h2 id="import-dialog-title">取り込むファイルを確認</h2>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            className="icon-button"
+            aria-label="取り込み確認を閉じる"
+            disabled={busy}
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <p id="import-dialog-description">
+          登録済みディレクトリから、下記のファイルだけを新しいプロジェクトへコピーします。取り込み元のファイルは変更しません。
+        </p>
+
+        <dl className="import-summary">
+          <div>
+            <dt>表示名</dt>
+            <dd>{preview.displayName}</dd>
+          </div>
+          <div>
+            <dt>Entry point</dt>
+            <dd>
+              {preview.entryPoint === null ? (
+                <span className="import-entry-missing">未検出</span>
+              ) : (
+                <code>{preview.entryPoint}</code>
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>合計</dt>
+            <dd>
+              {preview.included.length.toLocaleString("ja-JP")} files ·{" "}
+              {preview.totalBytes.toLocaleString("ja-JP")} bytes
+            </dd>
+          </div>
+          <div className="import-summary-digest">
+            <dt>Manifest SHA-256</dt>
+            <dd>
+              <code>{preview.manifestSha256}</code>
+            </dd>
+          </div>
+        </dl>
+
+        <section aria-labelledby="import-included-title">
+          <h3 id="import-included-title">
+            コピー対象（{preview.included.length}）
+          </h3>
+          <div className="import-table-scroll">
+            <table className="import-file-table">
+              <thead>
+                <tr>
+                  <th scope="col">相対path</th>
+                  <th scope="col">Bytes</th>
+                  <th scope="col">SHA-256</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.included.map((file) => (
+                  <tr key={`${file.path}:${file.sha256}`}>
+                    <td>
+                      <code>{file.path}</code>
+                    </td>
+                    <td>{file.byteLength.toLocaleString("ja-JP")}</td>
+                    <td>
+                      <code>{file.sha256}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div className="import-review-columns">
+          <section aria-labelledby="import-excluded-title">
+            <h3 id="import-excluded-title">
+              コピーしないファイル（{preview.excluded.length}）
+            </h3>
+            {preview.excluded.length === 0 ? (
+              <p className="import-empty">ありません</p>
+            ) : (
+              <ul className="import-excluded-list">
+                {preview.excluded.map((file) => (
+                  <li key={`${file.path}:${file.reason}`}>
+                    <code>{file.path}</code>
+                    <span>{file.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section aria-labelledby="import-limits-title">
+            <h3 id="import-limits-title">適用した上限</h3>
+            <dl className="import-limits">
+              <div>
+                <dt>ファイル数</dt>
+                <dd>{limits.maxFiles.toLocaleString("ja-JP")}</dd>
+              </div>
+              <div>
+                <dt>合計bytes</dt>
+                <dd>{limits.maxTotalBytes.toLocaleString("ja-JP")}</dd>
+              </div>
+              <div>
+                <dt>1ファイルbytes</dt>
+                <dd>{limits.maxFileBytes.toLocaleString("ja-JP")}</dd>
+              </div>
+              <div>
+                <dt>path bytes</dt>
+                <dd>{limits.maxPathBytes.toLocaleString("ja-JP")}</dd>
+              </div>
+              <div>
+                <dt>階層</dt>
+                <dd>{limits.maxDepth.toLocaleString("ja-JP")}</dd>
+              </div>
+            </dl>
+          </section>
+        </div>
+
+        {preview.warnings.length > 0 ? (
+          <section className="import-warnings" aria-labelledby="warnings-title">
+            <h3 id="warnings-title">確認事項</h3>
+            <ul>
+              {preview.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {preview.entryPoint !== "index.html" ? (
+          <p className="error-card import-entry-error" role="alert">
+            ルート直下の index.html
+            を確認できないため、このプレビューは取り込めません。登録済みディレクトリを修正してから、もう一度検査してください。
+          </p>
+        ) : null}
+
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="button button-quiet"
+            disabled={busy}
+            onClick={onClose}
+          >
+            キャンセル
+          </button>
+          <button
+            type="button"
+            className="button button-primary"
+            disabled={busy || preview.entryPoint !== "index.html"}
+            onClick={onConfirm}
+          >
+            この内容をコピーして取り込む
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 interface StudioProps {
   session: BootstrappedApi;
 }
 
 function Studio({ session }: StudioProps) {
   const [state, dispatch] = useReducer(studioReducer, initialStudioState);
+  const [retainedProjects, setRetainedProjects] = useState<Project[] | null>(
+    null,
+  );
+  const [homeOperation, setHomeOperation] = useState<HomeOperation>(null);
+  const [homeError, setHomeError] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(
+    null,
+  );
   const [prompt, setPrompt] = useState(
     "見出しを、未来への期待が伝わる表現にしてください",
   );
   const [rationale, setRationale] = useState("");
   const reviewButtonRef = useRef<HTMLButtonElement>(null);
-  const busy = state.operation !== null;
+  const importButtonRef = useRef<HTMLButtonElement>(null);
+  const busy = state.operation !== null || homeOperation !== null;
 
   const run = useCallback(async (task: () => Promise<void>) => {
     try {
@@ -833,11 +1068,80 @@ function Studio({ session }: StudioProps) {
     }
   }, []);
 
+  const runHome = useCallback(
+    async (
+      operation: Exclude<HomeOperation, null>,
+      task: () => Promise<void>,
+    ) => {
+      setHomeOperation(operation);
+      setHomeError(null);
+      try {
+        await task();
+      } catch (error) {
+        setHomeError(errorMessage(error));
+      } finally {
+        setHomeOperation(null);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let active = true;
+    setHomeOperation("loading_projects");
+    setHomeError(null);
+    void session.api
+      .listProjects()
+      .then((projects) => {
+        if (active) setRetainedProjects(projects);
+      })
+      .catch((error: unknown) => {
+        if (active) setHomeError(errorMessage(error));
+      })
+      .finally(() => {
+        if (active) setHomeOperation(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [session.api]);
+
   const createProject = () => {
     void run(async () => {
       dispatch({ type: "OPERATION_STARTED", operation: "creating_project" });
       const project = await session.api.createBlankProject();
-      dispatch({ type: "PROJECT_LOADED", project });
+      dispatch({ type: "PROJECT_LOADED", project, origin: "created" });
+    });
+  };
+
+  const openProject = (projectId: string) => {
+    void runHome("opening_project", async () => {
+      const project = await session.api.getProject(projectId);
+      dispatch({ type: "PROJECT_LOADED", project, origin: "opened" });
+    });
+  };
+
+  const previewRegisteredImport = () => {
+    void runHome("previewing_import", async () => {
+      const preview = await session.api.previewRegisteredImport();
+      setImportPreview(preview);
+    });
+  };
+
+  const closeImportPreview = useCallback(() => {
+    if (homeOperation === null) setImportPreview(null);
+  }, [homeOperation]);
+
+  const confirmRegisteredImport = () => {
+    if (importPreview === null) return;
+    const preview = importPreview;
+    void runHome("importing_project", async () => {
+      const project = await session.api.confirmRegisteredImport(
+        preview.id,
+        preview.manifestSha256,
+      );
+      setImportPreview(null);
+      dispatch({ type: "PROJECT_LOADED", project, origin: "imported" });
     });
   };
 
@@ -971,41 +1275,120 @@ function Studio({ session }: StudioProps) {
 
   if (state.project === null) {
     return (
-      <main className="project-home">
-        <div className="home-glow" aria-hidden="true" />
-        <section className="home-card" aria-labelledby="home-title">
-          <div className="home-brand" aria-hidden="true">
-            SG
-          </div>
-          <p className="eyebrow">SYNAPSEGIT · LOCAL LP WORKSPACE</p>
-          <h1 id="home-title">対話から、採用可能なLPへ。</h1>
-          <p>
-            ブラウザ上で要素を選び、AIへ要望を伝え、変更案をHuman
-            Reviewしてから採用します。すべてのAccepted状態はローカルに保持されます。
-          </p>
-          <ul className="home-boundaries">
-            <li>AIの出力はProposal。自動採用しません</li>
-            <li>caller-supplied / execution未検証を明示</li>
-            <li>静的exportには会話・tokenを含めません</li>
-          </ul>
-          <button
-            type="button"
-            className="button button-primary home-create"
-            disabled={busy}
-            onClick={createProject}
-          >
-            空のLPを作成
-          </button>
-          {state.operation !== null ? (
-            <p role="status">{operationLabel[state.operation]}…</p>
-          ) : null}
-          {state.error !== null ? (
-            <p className="error-card" role="alert">
-              {state.error}
+      <>
+        <main className="project-home">
+          <div className="home-glow" aria-hidden="true" />
+          <section className="home-card" aria-labelledby="home-title">
+            <div className="home-brand" aria-hidden="true">
+              SG
+            </div>
+            <p className="eyebrow">SYNAPSEGIT · LOCAL LP WORKSPACE</p>
+            <h1 id="home-title">対話から、採用可能なLPへ。</h1>
+            <p>
+              ブラウザ上で要素を選び、AIへ要望を伝え、変更案をHuman
+              Reviewしてから採用します。すべてのAccepted状態はローカルに保持されます。
             </p>
-          ) : null}
-        </section>
-      </main>
+            <ul className="home-boundaries">
+              <li>AIの出力はProposal。自動採用しません</li>
+              <li>caller-supplied / execution未検証を明示</li>
+              <li>静的exportには会話・tokenを含めません</li>
+            </ul>
+
+            <div className="home-actions">
+              <button
+                type="button"
+                className="button button-primary home-create"
+                disabled={busy}
+                onClick={createProject}
+              >
+                空のLPを作成
+              </button>
+              {session.bootstrap.capabilities.importAvailable ? (
+                <button
+                  ref={importButtonRef}
+                  type="button"
+                  className="button button-secondary home-import"
+                  disabled={busy}
+                  onClick={previewRegisteredImport}
+                >
+                  登録済みディレクトリを取り込む
+                </button>
+              ) : null}
+            </div>
+            {session.bootstrap.capabilities.importAvailable ? (
+              <p className="home-import-boundary">
+                取り込み前にファイル・除外理由・上限・digestを確認します。選んだファイルはプロジェクトへコピーされ、取り込み元は変更されません。
+              </p>
+            ) : null}
+
+            <section
+              className="retained-projects"
+              aria-labelledby="retained-projects-title"
+              aria-busy={homeOperation === "loading_projects"}
+            >
+              <div className="retained-projects-heading">
+                <div>
+                  <p className="eyebrow">RETAINED LOCALLY</p>
+                  <h2 id="retained-projects-title">保存済みプロジェクト</h2>
+                </div>
+                <span>{retainedProjects?.length ?? 0}</span>
+              </div>
+              {retainedProjects === null ? (
+                <p className="retained-empty">一覧を読み込んでいます…</p>
+              ) : retainedProjects.length === 0 ? (
+                <p className="retained-empty">
+                  保存済みプロジェクトはまだありません。
+                </p>
+              ) : (
+                <ul className="retained-project-list">
+                  {retainedProjects.map((project) => (
+                    <li key={project.id}>
+                      <div>
+                        <strong>{project.displayName}</strong>
+                        <span>
+                          {project.files.length} files · revision{" "}
+                          <code>{shortIdentity(project.revisionId)}</code>
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="button button-quiet"
+                        disabled={busy}
+                        onClick={() => openProject(project.id)}
+                        aria-label={`${project.displayName}を開く`}
+                      >
+                        開く
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {state.operation !== null ? (
+              <p role="status">{operationLabel[state.operation]}…</p>
+            ) : homeOperation !== null ? (
+              <p role="status">{homeOperationLabel[homeOperation]}…</p>
+            ) : null}
+            {state.error !== null || homeError !== null ? (
+              <p className="error-card" role="alert">
+                {state.error ?? homeError}
+              </p>
+            ) : null}
+          </section>
+        </main>
+
+        {importPreview !== null ? (
+          <ImportReviewDialog
+            preview={importPreview}
+            limits={session.bootstrap.capabilities.limits}
+            busy={homeOperation === "importing_project"}
+            returnFocus={importButtonRef}
+            onClose={closeImportPreview}
+            onConfirm={confirmRegisteredImport}
+          />
+        ) : null}
+      </>
     );
   }
 

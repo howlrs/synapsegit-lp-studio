@@ -10,7 +10,9 @@ import {
   HASH_C,
   bootstrapFixture,
   contextResponseFixture,
+  importPreviewResponseFixture,
   projectResponseFixture,
+  projectsResponseFixture,
   proposalResponseFixture,
   targetResponseFixture,
 } from "./fixtures";
@@ -39,6 +41,9 @@ describe("C2 browser vertical slice", () => {
 
         if (path === "/api/v1/bootstrap") {
           return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture([]));
         }
         if (method === "POST" && path === "/api/v1/projects") {
           return jsonResponse(projectResponseFixture());
@@ -93,9 +98,11 @@ describe("C2 browser vertical slice", () => {
 
     render(<App />);
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "空のLPを作成" }),
-    );
+    const createButton = await screen.findByRole("button", {
+      name: "空のLPを作成",
+    });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    fireEvent.click(createButton);
     const acceptedRevision = await screen.findByLabelText("Accepted revision");
     const beforeDecision = acceptedRevision.textContent;
 
@@ -167,5 +174,155 @@ describe("C2 browser vertical slice", () => {
       );
       expect(init?.credentials).toBe("omit");
     }
+  });
+
+  it("lists retained projects and reopens the selected Accepted state", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    const openButton = await screen.findByRole("button", {
+      name: "Untitled landing pageを開く",
+    });
+    fireEvent.click(openButton);
+
+    expect(await screen.findByLabelText("Accepted revision")).toHaveTextContent(
+      "revision-a…ed-001",
+    );
+    expect(screen.getByText("Untitled landing page")).toBeInTheDocument();
+  });
+
+  it("reviews an exact registered-root copy before explicit import", async () => {
+    const requestBodies: unknown[] = [];
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (init?.body !== undefined) {
+          requestBodies.push(JSON.parse(String(init.body)) as unknown);
+        }
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture([]));
+        }
+        if (method === "POST" && path === "/api/v1/imports/previews") {
+          return jsonResponse(importPreviewResponseFixture);
+        }
+        if (
+          method === "POST" &&
+          path === "/api/v1/imports/import-preview-001/confirm"
+        ) {
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    const importButton = await screen.findByRole("button", {
+      name: "登録済みディレクトリを取り込む",
+    });
+    await waitFor(() => expect(importButton).toBeEnabled());
+    fireEvent.click(importButton);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "取り込むファイルを確認",
+    });
+    expect(within(dialog).getAllByText("index.html")).toHaveLength(2);
+    expect(within(dialog).getByText("styles.css")).toBeInTheDocument();
+    expect(within(dialog).getByText("notes/draft.txt")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        importPreviewResponseFixture.importPreview.manifestSha256,
+      ),
+    ).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("取り込み元のファイルは変更しません");
+    expect(dialog.textContent).not.toMatch(/(?:\/home\/|\/tmp\/|[A-Za-z]:\\)/);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "この内容をコピーして取り込む",
+      }),
+    );
+    expect(await screen.findByLabelText("Accepted revision")).toBeVisible();
+    expect(requestBodies).toContainEqual({ schemaVersion: "1" });
+    expect(requestBodies).toContainEqual({
+      schemaVersion: "1",
+      expectedManifestSha256:
+        importPreviewResponseFixture.importPreview.manifestSha256,
+    });
+    expect(JSON.stringify(requestBodies)).not.toContain("/home/");
+  });
+
+  it("blocks import when the registered root has no root index.html", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture([]));
+        }
+        if (path === "/api/v1/imports/previews") {
+          return jsonResponse({
+            ...importPreviewResponseFixture,
+            importPreview: {
+              ...importPreviewResponseFixture.importPreview,
+              entryPoint: null,
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    const importButton = await screen.findByRole("button", {
+      name: "登録済みディレクトリを取り込む",
+    });
+    await waitFor(() => expect(importButton).toBeEnabled());
+    fireEvent.click(importButton);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "取り込むファイルを確認",
+    });
+    expect(within(dialog).getByText(/ルート直下の index.html/)).toBeVisible();
+    expect(
+      within(dialog).getByRole("button", {
+        name: "この内容をコピーして取り込む",
+      }),
+    ).toBeDisabled();
   });
 });

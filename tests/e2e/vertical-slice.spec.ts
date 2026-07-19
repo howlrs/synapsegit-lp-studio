@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { lstat, readFile, readdir } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 import {
   expect,
@@ -15,13 +17,16 @@ import {
   isContextResponse,
   isDecisionResponse,
   isExportResponse,
+  isImportPreviewResponse,
   isPreviewActionMessage,
   isPreviewSelectionMessage,
   isProjectResponse,
+  isProjectsResponse,
   isProposalResponse,
   isTargetResponse,
   type BootstrapResponse,
   type ExportResponse,
+  type ImportPreviewResponse,
 } from "../../packages/contracts/src/index";
 import apiSchema from "../../packages/contracts/schemas/api-v1.schema.json";
 
@@ -87,9 +92,19 @@ function responseContract(response: BrowserResponse): ResponseContract | null {
   }
   if (
     (method === "POST" && path === "/api/v1/projects") ||
-    (method === "GET" && /^\/api\/v1\/projects\/[^/]+$/.test(path))
+    (method === "GET" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
+    (method === "POST" && /^\/api\/v1\/imports\/[^/]+\/confirm$/.test(path))
   ) {
     return { definition: "projectResponse", guard: isProjectResponse };
+  }
+  if (method === "GET" && path === "/api/v1/projects") {
+    return { definition: "projectsResponse", guard: isProjectsResponse };
+  }
+  if (method === "POST" && path === "/api/v1/imports/previews") {
+    return {
+      definition: "importPreviewResponse",
+      guard: isImportPreviewResponse,
+    };
   }
   if (method === "POST" && path.endsWith("/targets")) {
     return { definition: "targetResponse", guard: isTargetResponse };
@@ -214,6 +229,33 @@ async function downloadExport(
   expect(response.ok()).toBeTruthy();
   expect(response.headers()["content-type"]).toContain("application/zip");
   return response.body();
+}
+
+async function importSourceSnapshot(
+  root: string,
+): Promise<{ sha256: string; byteLength: number }> {
+  const hash = createHash("sha256");
+  let byteLength = 0;
+  const paths = await readdir(root, { recursive: true });
+  paths.sort();
+  for (const path of paths) {
+    const metadata = await lstat(join(root, path));
+    const kind = metadata.isDirectory()
+      ? "directory"
+      : metadata.isFile()
+        ? "file"
+        : metadata.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    hash.update(`${kind}:${path}`, "utf8");
+    hash.update(new Uint8Array([0]));
+    if (metadata.isFile()) {
+      const bytes = await readFile(join(root, path));
+      hash.update(bytes);
+      byteLength += bytes.byteLength;
+    }
+  }
+  return { sha256: hash.digest("hex"), byteLength };
 }
 
 test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを得る", async ({
@@ -528,4 +570,121 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   await Promise.all(apiValidationTasks);
   expect(capturedApiResponseCount).toBeGreaterThanOrEqual(10);
   expect(apiValidationErrors).toEqual([]);
+});
+
+test("登録済みルートを正確にレビューしてコピーし、元sourceを変更しない", async ({
+  page,
+}) => {
+  const editorOrigin = process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
+  const importRoot = process.env.LP_STUDIO_E2E_IMPORT_ROOT;
+  const expectedSourceSha256 = process.env.LP_STUDIO_E2E_IMPORT_SOURCE_SHA256;
+  const expectedSourceBytes = process.env.LP_STUDIO_E2E_IMPORT_SOURCE_BYTES;
+  if (
+    editorOrigin === undefined ||
+    importRoot === undefined ||
+    expectedSourceSha256 === undefined ||
+    expectedSourceBytes === undefined
+  ) {
+    throw new Error("E2E import fixture was not initialized by global setup");
+  }
+
+  const before = await importSourceSnapshot(importRoot);
+  expect(before).toEqual({
+    sha256: expectedSourceSha256,
+    byteLength: Number(expectedSourceBytes),
+  });
+
+  await page.goto(`${editorOrigin}/`);
+  const previewResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/v1/imports/previews",
+  );
+  await page
+    .getByRole("button", { name: "登録済みディレクトリを取り込む" })
+    .click();
+  const previewResponse = await previewResponsePromise;
+  expect(previewResponse.ok()).toBeTruthy();
+  const previewPayload =
+    (await previewResponse.json()) as ImportPreviewResponse;
+  expectSchemaValid("importPreviewResponse", previewPayload);
+  expect(isImportPreviewResponse(previewPayload)).toBe(true);
+  expect(previewPayload.importPreview.entryPoint).toBe("index.html");
+  expect(
+    previewPayload.importPreview.included.map((file) => file.path),
+  ).toEqual(["assets/theme.css", "index.html"]);
+  expect(previewPayload.importPreview.excluded).toEqual([
+    { path: ".env", reason: "credential_material" },
+  ]);
+
+  const dialog = page.getByRole("dialog", {
+    name: "取り込むファイルを確認",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("取り込み元のファイルは変更しません");
+  await expect(dialog).toContainText("assets/theme.css");
+  await expect(dialog).toContainText("index.html");
+  await expect(dialog).toContainText(".env");
+  await expect(dialog).toContainText("credential_material");
+  await expect(dialog).toContainText(
+    previewPayload.importPreview.manifestSha256,
+  );
+  await expect(dialog).toContainText("適用した上限");
+  await expect(page.locator("body")).not.toContainText(importRoot);
+
+  const confirmResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /^\/api\/v1\/imports\/[^/]+\/confirm$/.test(
+        new URL(response.url()).pathname,
+      ),
+  );
+  const confirmRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /^\/api\/v1\/imports\/[^/]+\/confirm$/.test(
+        new URL(request.url()).pathname,
+      ),
+  );
+  await dialog
+    .getByRole("button", { name: "この内容をコピーして取り込む" })
+    .click();
+  const [confirmRequest, confirmResponse] = await Promise.all([
+    confirmRequestPromise,
+    confirmResponsePromise,
+  ]);
+  expect(confirmResponse.status()).toBe(201);
+  expect(confirmRequest.postDataJSON()).toEqual({
+    schemaVersion: "1",
+    expectedManifestSha256: previewPayload.importPreview.manifestSha256,
+  });
+  expect(confirmRequest.postData()).not.toContain(importRoot);
+  await expect(page.getByLabel("Accepted revision")).toBeVisible();
+  await expect(page.getByTitle("LPプレビュー")).toBeVisible();
+  await expect(
+    page
+      .frameLocator('iframe[title="LPプレビュー"]')
+      .getByRole("heading", { name: "登録ルートから始めるLP" }),
+  ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(importRoot);
+
+  const afterImport = await importSourceSnapshot(importRoot);
+  expect(afterImport).toEqual(before);
+
+  await page.reload();
+  const displayName = basename(importRoot);
+  const openRetained = page.getByRole("button", {
+    name: `${displayName}を開く`,
+  });
+  await expect(openRetained).toBeVisible();
+  await openRetained.click();
+  await expect(
+    page
+      .frameLocator('iframe[title="LPプレビュー"]')
+      .getByRole("heading", { name: "登録ルートから始めるLP" }),
+  ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(importRoot);
+
+  const afterReopen = await importSourceSnapshot(importRoot);
+  expect(afterReopen).toEqual(before);
 });

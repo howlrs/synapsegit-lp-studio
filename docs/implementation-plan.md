@@ -1,6 +1,6 @@
 # SynapseGit LP Studio 実装計画
 
-Status: active; C2 complete at 30%
+Status: active; C3 complete at 38%
 
 Last updated: 2026-07-19
 

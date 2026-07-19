@@ -10,6 +10,8 @@
   sequential generic artifact Proposals in one project
 - [Issue #27](https://github.com/howlrs/synapsegit/issues/27):
   bounded verified checkout of the selected generic site Tree
+- [Issue #28](https://github.com/howlrs/synapsegit/issues/28):
+  canonical timestamp construction and early artifact-config validation
 - [Draft PR #25](https://github.com/howlrs/synapsegit/pull/25):
   pinned C1 generic artifact source contract and primitives
 - [Issue #17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363):

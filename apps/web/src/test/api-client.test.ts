@@ -1,5 +1,11 @@
 import { bootstrapApi } from "../api/client";
-import { bootstrapFixture, projectResponseFixture } from "./fixtures";
+import {
+  HASH_C,
+  bootstrapFixture,
+  importPreviewResponseFixture,
+  projectResponseFixture,
+  projectsResponseFixture,
+} from "./fixtures";
 
 const jsonResponse = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -123,6 +129,82 @@ describe("authenticated API client", () => {
     );
 
     await expect(session.api.getProject("project-001")).rejects.toMatchObject({
+      code: "invalid_response_schema",
+    });
+  });
+
+  it("lists retained projects and confirms only the reviewed import digest", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture("http://editor.test"));
+        }
+        if (path === "/api/v1/projects" && init?.method === "GET") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (path === "/api/v1/imports/previews") {
+          expect(JSON.parse(String(init?.body))).toEqual({
+            schemaVersion: "1",
+          });
+          return jsonResponse(importPreviewResponseFixture);
+        }
+        if (path === "/api/v1/imports/import-preview-001/confirm") {
+          expect(JSON.parse(String(init?.body))).toEqual({
+            schemaVersion: "1",
+            expectedManifestSha256: HASH_C,
+          });
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request ${path}`);
+      },
+    );
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(session.api.listProjects()).resolves.toHaveLength(1);
+    const preview = await session.api.previewRegisteredImport();
+    await expect(
+      session.api.confirmRegisteredImport(preview.id, preview.manifestSha256),
+    ).resolves.toMatchObject({ id: "project-001" });
+
+    for (const [, init] of fetchMock.mock.calls.slice(1)) {
+      expect(new Headers(init?.headers).get("Authorization")).toBe(
+        "Bearer secret-only-in-api-closure",
+      );
+      expect(init?.credentials).toBe("omit");
+    }
+  });
+
+  it("rejects an import preview that leaks an absolute server path", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture("http://editor.test"));
+      }
+      return jsonResponse({
+        ...importPreviewResponseFixture,
+        importPreview: {
+          ...importPreviewResponseFixture.importPreview,
+          included: [
+            {
+              ...importPreviewResponseFixture.importPreview.included[0]!,
+              path: "/srv/private/index.html",
+            },
+          ],
+        },
+      });
+    });
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(session.api.previewRegisteredImport()).rejects.toMatchObject({
       code: "invalid_response_schema",
     });
   });

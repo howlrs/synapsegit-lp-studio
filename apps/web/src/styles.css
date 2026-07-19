@@ -189,7 +189,8 @@ button:disabled {
 .home-card {
   position: relative;
   z-index: 1;
-  width: min(680px, 100%);
+  width: min(860px, 100%);
+  padding-block: 2rem;
 }
 .home-card h1 {
   margin: 1.2rem 0 0.8rem;
@@ -214,7 +215,85 @@ button:disabled {
   text-align: left;
 }
 .home-create {
+  min-width: min(260px, 100%);
+}
+.home-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+}
+.home-import {
   min-width: min(300px, 100%);
+}
+.home-import-boundary {
+  max-width: 680px;
+  margin: 0.75rem auto 0;
+  font-size: 0.72rem;
+}
+.retained-projects {
+  max-width: 720px;
+  margin: 2rem auto 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(17, 21, 25, 0.9);
+  text-align: left;
+}
+.retained-projects-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.retained-projects-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+.retained-projects-heading > span {
+  display: grid;
+  min-width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 99px;
+  color: var(--lime);
+  font-size: 0.72rem;
+}
+.retained-empty {
+  margin: 1rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.retained-project-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.retained-project-list li {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+.retained-project-list li > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+}
+.retained-project-list strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.84rem;
+}
+.retained-project-list span {
+  color: var(--quiet);
+  font-size: 0.68rem;
 }
 
 .studio-header {
@@ -886,6 +965,128 @@ kbd {
   font-size: 0.78rem;
   line-height: 1.6;
 }
+.import-review-dialog {
+  width: min(1040px, 100%);
+}
+.import-review-dialog h3 {
+  margin: 1rem 0 0.55rem;
+  font-size: 0.8rem;
+}
+.import-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 1rem 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.import-summary div {
+  min-width: 0;
+  padding: 0.75rem;
+  border-right: 1px solid var(--line);
+}
+.import-summary div:nth-child(3) {
+  border-right: 0;
+}
+.import-summary .import-summary-digest {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+  border-right: 0;
+}
+.import-summary dt,
+.import-limits dt {
+  color: var(--quiet);
+  font-size: 0.66rem;
+}
+.import-summary dd,
+.import-limits dd {
+  overflow-wrap: anywhere;
+  margin: 0.3rem 0 0;
+  font-size: 0.74rem;
+}
+.import-summary-digest code {
+  color: var(--cyan);
+}
+.import-entry-missing,
+.import-entry-error {
+  color: var(--danger);
+  font-weight: 750;
+}
+.import-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.import-file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.7rem;
+  text-align: left;
+}
+.import-file-table th,
+.import-file-table td {
+  padding: 0.55rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.import-file-table th {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.import-file-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.import-file-table td:last-child code {
+  font-size: 0.58rem;
+  overflow-wrap: anywhere;
+}
+.import-review-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+.import-excluded-list,
+.import-warnings ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.import-excluded-list li {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.55rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.7rem;
+}
+.import-excluded-list span,
+.import-empty {
+  color: var(--muted);
+}
+.import-limits {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.import-limits div {
+  padding: 0.55rem;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.import-warnings {
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 196, 95, 0.35);
+  border-radius: 7px;
+  background: rgba(255, 196, 95, 0.05);
+}
+.import-warnings h3 {
+  margin-top: 0;
+  color: var(--amber);
+}
+.import-warnings li {
+  color: #e4cfa8;
+  font-size: 0.72rem;
+}
 .digest-line {
   display: grid;
   gap: 0.2rem;
@@ -989,6 +1190,7 @@ kbd {
   }
   .review-summary-grid,
   .review-columns,
+  .import-review-columns,
   .decision-bar,
   .export-receipt {
     grid-template-columns: 1fr;
@@ -996,6 +1198,19 @@ kbd {
 }
 
 @media (max-width: 620px) {
+  .project-home {
+    padding: 1rem;
+  }
+  .home-actions {
+    flex-direction: column;
+  }
+  .home-actions .button {
+    width: 100%;
+  }
+  .retained-project-list li {
+    align-items: stretch;
+    flex-direction: column;
+  }
   .studio-header {
     padding: 0.75rem;
   }
@@ -1069,6 +1284,18 @@ kbd {
   }
   .dialog-actions .button {
     width: 100%;
+  }
+  .import-summary {
+    grid-template-columns: 1fr;
+  }
+  .import-summary div,
+  .import-summary div:nth-child(3) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .import-summary .import-summary-digest {
+    grid-column: 1;
+    border-top: 0;
   }
 }
 

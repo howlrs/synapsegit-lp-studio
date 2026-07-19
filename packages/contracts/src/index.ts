@@ -20,7 +20,17 @@ export interface BootstrapResponse {
     targetKinds: ["element"];
     dispositions: ArtifactDisposition[];
     singleProposalPerProject: true;
+    importAvailable: boolean;
+    limits: ImportLimits;
   };
+}
+
+export interface ImportLimits {
+  maxFiles: number;
+  maxTotalBytes: number;
+  maxFileBytes: number;
+  maxPathBytes: number;
+  maxDepth: number;
 }
 
 export interface ProjectFile {
@@ -41,6 +51,47 @@ export interface Project {
 export interface ProjectResponse {
   schemaVersion: SchemaVersion;
   project: Project;
+}
+
+export interface ProjectsResponse {
+  schemaVersion: SchemaVersion;
+  projects: Project[];
+}
+
+export interface ImportPreviewFile {
+  path: string;
+  byteLength: number;
+  sha256: string;
+}
+
+export interface ImportPreviewExclusion {
+  path: string;
+  reason: string;
+}
+
+export interface ImportPreview {
+  id: string;
+  displayName: string;
+  manifestSha256: string;
+  totalBytes: number;
+  entryPoint: string | null;
+  included: ImportPreviewFile[];
+  excluded: ImportPreviewExclusion[];
+  warnings: string[];
+}
+
+export interface ImportPreviewResponse {
+  schemaVersion: SchemaVersion;
+  importPreview: ImportPreview;
+}
+
+export interface CreateImportPreviewRequest {
+  schemaVersion: SchemaVersion;
+}
+
+export interface ConfirmImportRequest {
+  schemaVersion: SchemaVersion;
+  expectedManifestSha256: string;
 }
 
 export interface CreateProjectRequest {
@@ -245,6 +296,36 @@ const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 const isNonNegativeInteger = (value: unknown): value is number =>
   isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
+const isSafeRelativePath = (value: unknown): value is string => {
+  if (
+    !isNonEmptyString(value) ||
+    value.includes("\0") ||
+    value.includes("\\")
+  ) {
+    return false;
+  }
+  if (
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    /^[A-Za-z]:[\\/]/.test(value)
+  ) {
+    return false;
+  }
+  const segments = value.split("/");
+  return segments.every(
+    (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+  );
+};
+const containsAbsolutePath = (value: string): boolean =>
+  /(?:^|[\s("'=])\/(?!\/)/.test(value) ||
+  /[A-Za-z]:[\\/]/.test(value) ||
+  /(?:^|[\s("'=])\\\\/.test(value);
+const isPathPrivateString = (value: unknown): value is string =>
+  isString(value) && !value.includes("\0") && !containsAbsolutePath(value);
+const isPathPrivateNonEmptyString = (value: unknown): value is string =>
+  isNonEmptyString(value) &&
+  !value.includes("\0") &&
+  !containsAbsolutePath(value);
 const isExactArrayOf = <T>(
   value: unknown,
   guard: (item: unknown) => item is T,
@@ -295,7 +376,7 @@ export const isProject = (value: unknown): value is Project => {
       (file): file is ProjectFile =>
         isRecord(file) &&
         hasExactKeys(file, ["path", "byteLength"]) &&
-        isNonEmptyString(file.path) &&
+        isSafeRelativePath(file.path) &&
         isNonNegativeInteger(file.byteLength),
     )
   ) {
@@ -303,7 +384,7 @@ export const isProject = (value: unknown): value is Project => {
   }
   return (
     isNonEmptyString(value.id) &&
-    isNonEmptyString(value.displayName) &&
+    isPathPrivateNonEmptyString(value.displayName) &&
     isNonEmptyString(value.revisionId) &&
     isSha256(value.acceptedManifestSha256) &&
     value.status === "ready" &&
@@ -338,6 +419,8 @@ export const isBootstrapResponse = (
       "targetKinds",
       "dispositions",
       "singleProposalPerProject",
+      "importAvailable",
+      "limits",
     ])
   ) {
     return false;
@@ -358,15 +441,92 @@ export const isBootstrapResponse = (
     capabilities.dispositions.every((item) =>
       ["adopted_unchanged", "rejected", "deferred"].includes(item),
     ) &&
-    capabilities.singleProposalPerProject === true
+    capabilities.singleProposalPerProject === true &&
+    typeof capabilities.importAvailable === "boolean" &&
+    isImportLimits(capabilities.limits)
   );
 };
+
+const isImportLimits = (value: unknown): value is ImportLimits =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "maxFiles",
+    "maxTotalBytes",
+    "maxFileBytes",
+    "maxPathBytes",
+    "maxDepth",
+  ]) &&
+  isNonNegativeInteger(value.maxFiles) &&
+  value.maxFiles > 0 &&
+  isNonNegativeInteger(value.maxTotalBytes) &&
+  value.maxTotalBytes > 0 &&
+  isNonNegativeInteger(value.maxFileBytes) &&
+  value.maxFileBytes > 0 &&
+  isNonNegativeInteger(value.maxPathBytes) &&
+  value.maxPathBytes > 0 &&
+  isNonNegativeInteger(value.maxDepth) &&
+  value.maxDepth > 0;
 
 export const isProjectResponse = (value: unknown): value is ProjectResponse =>
   isRecord(value) &&
   hasExactKeys(value, ["schemaVersion", "project"]) &&
   hasVersion(value) &&
   isProject(value.project);
+
+export const isProjectsResponse = (value: unknown): value is ProjectsResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "projects"]) &&
+  hasVersion(value) &&
+  isExactArrayOf(value.projects, isProject);
+
+const isImportPreviewFile = (value: unknown): value is ImportPreviewFile =>
+  isRecord(value) &&
+  hasExactKeys(value, ["path", "byteLength", "sha256"]) &&
+  isSafeRelativePath(value.path) &&
+  isNonNegativeInteger(value.byteLength) &&
+  isSha256(value.sha256);
+
+const isImportPreviewExclusion = (
+  value: unknown,
+): value is ImportPreviewExclusion =>
+  isRecord(value) &&
+  hasExactKeys(value, ["path", "reason"]) &&
+  isSafeRelativePath(value.path) &&
+  isPathPrivateNonEmptyString(value.reason);
+
+export const isImportPreviewResponse = (
+  value: unknown,
+): value is ImportPreviewResponse => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["schemaVersion", "importPreview"]) ||
+    !hasVersion(value) ||
+    !isRecord(value.importPreview) ||
+    !hasExactKeys(value.importPreview, [
+      "id",
+      "displayName",
+      "manifestSha256",
+      "totalBytes",
+      "entryPoint",
+      "included",
+      "excluded",
+      "warnings",
+    ])
+  ) {
+    return false;
+  }
+  const preview = value.importPreview;
+  return (
+    isNonEmptyString(preview.id) &&
+    isPathPrivateNonEmptyString(preview.displayName) &&
+    isSha256(preview.manifestSha256) &&
+    isNonNegativeInteger(preview.totalBytes) &&
+    (preview.entryPoint === null || isSafeRelativePath(preview.entryPoint)) &&
+    isExactArrayOf(preview.included, isImportPreviewFile) &&
+    isExactArrayOf(preview.excluded, isImportPreviewExclusion) &&
+    isExactArrayOf(preview.warnings, isPathPrivateString)
+  );
+};
 
 export const isTargetResponse = (value: unknown): value is TargetResponse => {
   if (

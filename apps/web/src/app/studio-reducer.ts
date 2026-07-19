@@ -56,7 +56,11 @@ export const initialStudioState: StudioState = {
 
 export type StudioAction =
   | { type: "OPERATION_STARTED"; operation: Exclude<StudioOperation, null> }
-  | { type: "PROJECT_LOADED"; project: Project }
+  | {
+      type: "PROJECT_LOADED";
+      project: Project;
+      origin?: "created" | "opened" | "imported";
+    }
   | { type: "PROJECT_REFRESHED"; project: Project; afterDecision: boolean }
   | { type: "TARGET_SELECTED"; target: Target }
   | { type: "TARGET_CLEARED" }
@@ -85,7 +89,13 @@ export const studioReducer = (
       return {
         ...initialStudioState,
         project: action.project,
-        announcement: `プロジェクトを作成しました。Accepted revision ${action.project.revisionId}`,
+        announcement: `${
+          action.origin === "opened"
+            ? "保存済みプロジェクトを開きました。"
+            : action.origin === "imported"
+              ? "登録済みディレクトリのコピーを取り込みました。"
+              : "プロジェクトを作成しました。"
+        }Accepted revision ${action.project.revisionId}`,
       };
     case "PROJECT_REFRESHED":
       return {

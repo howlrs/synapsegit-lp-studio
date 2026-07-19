@@ -56,14 +56,27 @@ IPv4 loopback ports for the Editor/API and the isolated Preview. Omitting
 `LP_STUDIO_STATE_ROOT` uses a private process-owned temporary directory and
 removes it at shutdown.
 
-The current C2 slice supports a blank project, element selection, exact context
-review, deterministic fake-AI Proposal, explicit adopt, and deterministic
-Accepted ZIP export. It deliberately exposes caller-supplied attribution and
-`execution未検証`; SynapseGit did not execute or verify the model.
+To review and copy-import a built static LP from a server-owned directory, set
+an optional, real directory that is disjoint from the state root:
+
+```bash
+LP_STUDIO_STATE_ROOT=.studio-data \
+LP_STUDIO_IMPORT_ROOT=/absolute/path/to/built-lp \
+pnpm dev:server
+```
+
+The current C3 slice persists blank/imported projects in the explicit state
+root, previews the exact included/excluded import set before confirmation,
+keeps the source directory unchanged, and blocks Accepted-manifest drift before
+Proposal, Decision, and export. It also supports element selection, exact
+context review, deterministic fake-AI Proposal, explicit adopt, and
+deterministic Accepted ZIP export. It deliberately exposes caller-supplied
+attribution and `execution未検証`; SynapseGit did not execute or verify the
+model.
 
 ## Status
 
-Real-boundary vertical slice complete: 30%. Not production-ready. SynapseGit
+Managed project/revision/import checkpoint complete: 38%. Not production-ready. SynapseGit
 draft PR #25 is source-level evaluation work, not a released dependency or
 permission for production/distribution.
 

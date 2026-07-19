@@ -6,7 +6,9 @@ import {
   isContextResponse,
   isDecisionResponse,
   isExportResponse,
+  isImportPreviewResponse,
   isProjectResponse,
+  isProjectsResponse,
   isProposalResponse,
   isTargetResponse,
   type ApprovalRequest,
@@ -15,6 +17,7 @@ import {
   type ContextReview,
   type DecisionResponse,
   type ExportReceipt,
+  type ImportPreview,
   type Project,
   type Proposal,
   type Target,
@@ -47,7 +50,13 @@ export interface PublicBootstrap {
 
 export interface AuthenticatedApi {
   createBlankProject(): Promise<Project>;
+  listProjects(): Promise<Project[]>;
   getProject(projectId: string): Promise<Project>;
+  previewRegisteredImport(): Promise<ImportPreview>;
+  confirmRegisteredImport(
+    previewId: string,
+    expectedManifestSha256: string,
+  ): Promise<Project>;
   createTarget(
     projectId: string,
     revisionId: string,
@@ -241,12 +250,45 @@ export const bootstrapApi = async (
       return result.project;
     },
 
+    async listProjects() {
+      const result = await requestJson(
+        "/api/v1/projects",
+        { method: "GET" },
+        isProjectsResponse,
+        "保存済みプロジェクト一覧",
+      );
+      return result.projects;
+    },
+
     async getProject(projectId) {
       const result = await requestJson(
         `/api/v1/projects/${encodeURIComponent(projectId)}`,
         { method: "GET" },
         isProjectResponse,
         "プロジェクト",
+      );
+      return result.project;
+    },
+
+    async previewRegisteredImport() {
+      const result = await postJson(
+        "/api/v1/imports/previews",
+        { schemaVersion: SCHEMA_VERSION },
+        isImportPreviewResponse,
+        "取り込みプレビュー",
+      );
+      return result.importPreview;
+    },
+
+    async confirmRegisteredImport(previewId, expectedManifestSha256) {
+      const result = await postJson(
+        `/api/v1/imports/${encodeURIComponent(previewId)}/confirm`,
+        {
+          schemaVersion: SCHEMA_VERSION,
+          expectedManifestSha256,
+        },
+        isProjectResponse,
+        "取り込み結果",
       );
       return result.project;
     },

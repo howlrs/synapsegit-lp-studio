@@ -5,8 +5,10 @@ import type {
   ContextResponse,
   DecisionResponse,
   ExportResponse,
+  ImportPreviewResponse,
   Project,
   ProjectResponse,
+  ProjectsResponse,
   ProposalResponse,
   TargetResponse,
 } from "@synapsegit-lp/contracts";
@@ -30,6 +32,14 @@ export const bootstrapFixture = (
     targetKinds: ["element"],
     dispositions: ["adopted_unchanged", "rejected", "deferred"],
     singleProposalPerProject: true,
+    importAvailable: true,
+    limits: {
+      maxFiles: 500,
+      maxTotalBytes: 50_000_000,
+      maxFileBytes: 5_000_000,
+      maxPathBytes: 240,
+      maxDepth: 12,
+    },
   },
 });
 
@@ -54,6 +64,35 @@ export const projectResponseFixture = (
   schemaVersion: "1",
   project: projectFixture(revisionId),
 });
+
+export const projectsResponseFixture = (
+  projects: Project[] = [projectFixture()],
+): ProjectsResponse => ({
+  schemaVersion: "1",
+  projects,
+});
+
+export const importPreviewResponseFixture: ImportPreviewResponse = {
+  schemaVersion: "1",
+  importPreview: {
+    id: "import-preview-001",
+    displayName: "Registered campaign LP",
+    manifestSha256: HASH_C,
+    totalBytes: 1840,
+    entryPoint: "index.html",
+    included: [
+      { path: "index.html", byteLength: 1200, sha256: HASH_A },
+      { path: "styles.css", byteLength: 640, sha256: HASH_B },
+    ],
+    excluded: [
+      {
+        path: "notes/draft.txt",
+        reason: "静的LPの許可対象外です。",
+      },
+    ],
+    warnings: ["外部リンクは取り込み後もネットワークを参照します。"],
+  },
+};
 
 export const targetResponseFixture: TargetResponse = {
   schemaVersion: "1",

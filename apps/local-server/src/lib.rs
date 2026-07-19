@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod storage;
+
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -35,11 +37,19 @@ use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
+use storage::{
+    ImportExcluded, ImportIncluded, MAX_DEPTH as STORAGE_MAX_DEPTH,
+    MAX_FILE_BYTES as STORAGE_MAX_FILE_BYTES, MAX_FILES as STORAGE_MAX_FILES,
+    MAX_PATH_BYTES as STORAGE_MAX_PATH_BYTES, MAX_TOTAL_BYTES as STORAGE_MAX_TOTAL_BYTES,
+    ManagedStorage, StorageError, scan_import,
+};
+
 pub const API_VERSION: &str = "v1";
 pub const SCHEMA_VERSION: &str = "1";
 
 const SESSION_TTL_SECONDS: i64 = 30 * 60;
 const APPROVAL_TTL_SECONDS: i64 = 5 * 60;
+const IMPORT_PREVIEW_TTL_SECONDS: i64 = 10 * 60;
 const MAX_INSTRUCTION_BYTES: usize = 2_000;
 const MAX_RATIONALE_BYTES: usize = 2_000;
 const MAX_PREVIEW_HTML_BYTES: usize = 2 * 1024 * 1024;
@@ -61,6 +71,7 @@ pub struct ServerConfig {
     pub preview_origin: String,
     pub state_root: PathBuf,
     pub web_dist: PathBuf,
+    pub import_root: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -77,7 +88,13 @@ impl ServerConfig {
             preview_origin: preview_origin.into(),
             state_root: state_root.into(),
             web_dist: web_dist.into(),
+            import_root: None,
         }
+    }
+
+    pub fn with_import_root(mut self, import_root: Option<PathBuf>) -> Self {
+        self.import_root = import_root;
+        self
     }
 }
 
@@ -86,6 +103,7 @@ pub struct StudioState(Arc<InnerState>);
 
 struct InnerState {
     config: ServerConfig,
+    storage: ManagedStorage,
     store: Mutex<Store>,
 }
 
@@ -98,9 +116,47 @@ impl fmt::Debug for StudioState {
 impl StudioState {
     pub fn new(config: ServerConfig) -> std::io::Result<Self> {
         std::fs::create_dir_all(&config.state_root)?;
+        let (storage, persisted) =
+            ManagedStorage::open(&config.state_root).map_err(storage_initialization_error)?;
+        if persisted.len() > MAX_PROJECTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed storage contains too many projects",
+            ));
+        }
+        let mut store = Store::default();
+        for persisted in persisted {
+            let calculated_artifact_manifest_sha256 =
+                manifest_digest(&persisted.files).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "persisted artifact manifest does not validate",
+                    )
+                })?;
+            if calculated_artifact_manifest_sha256 != persisted.artifact_manifest_sha256 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "persisted artifact manifest digest does not match its files",
+                ));
+            }
+            store.projects.insert(
+                persisted.id.clone(),
+                Project {
+                    id: persisted.id,
+                    display_name: persisted.display_name,
+                    revision_id: persisted.revision_id,
+                    accepted_files: persisted.files,
+                    accepted_manifest_sha256: persisted.artifact_manifest_sha256,
+                    targets: HashMap::new(),
+                    contexts: HashMap::new(),
+                    proposal: None,
+                },
+            );
+        }
         Ok(Self(Arc::new(InnerState {
             config,
-            store: Mutex::new(Store::default()),
+            storage,
+            store: Mutex::new(store),
         })))
     }
 
@@ -116,6 +172,13 @@ struct Store {
     reviews: HashMap<String, String>,
     approvals: HashMap<[u8; 32], ApprovalGrant>,
     exports: HashMap<String, ExportArtifact>,
+    import_previews: HashMap<String, ImportPreviewRecord>,
+}
+
+struct ImportPreviewRecord {
+    manifest_sha256: String,
+    session_id: String,
+    expires_at: i64,
 }
 
 struct Session {
@@ -164,7 +227,7 @@ struct ProposalRecord {
     status: ProposalStatus,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProposalStatus {
     PendingReview,
     Committed,
@@ -242,6 +305,18 @@ struct CapabilitiesDto {
     target_kinds: [&'static str; 1],
     dispositions: [&'static str; 3],
     single_proposal_per_project: bool,
+    import_available: bool,
+    limits: StorageLimitsDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageLimitsDto {
+    max_files: usize,
+    max_total_bytes: usize,
+    max_file_bytes: usize,
+    max_path_bytes: usize,
+    max_depth: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -268,11 +343,48 @@ struct ProjectPayload {
     project: ProjectDto,
 }
 
+#[derive(Serialize)]
+struct ProjectsPayload {
+    projects: Vec<ProjectDto>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateProjectRequest {
     schema_version: String,
     template: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateImportPreviewRequest {
+    schema_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConfirmImportRequest {
+    schema_version: String,
+    expected_manifest_sha256: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreviewDto {
+    id: String,
+    display_name: String,
+    manifest_sha256: String,
+    total_bytes: usize,
+    entry_point: Option<String>,
+    included: Vec<ImportIncluded>,
+    excluded: Vec<ImportExcluded>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreviewPayload {
+    import_preview: ImportPreviewDto,
 }
 
 #[derive(Deserialize)]
@@ -597,6 +709,50 @@ impl IntoResponse for ApiError {
     }
 }
 
+fn storage_initialization_error(error: StorageError) -> std::io::Error {
+    match error {
+        StorageError::Io(error) => error,
+        StorageError::Corrupt
+        | StorageError::Drift
+        | StorageError::UnsafeImport
+        | StorageError::ImportLimit => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "managed local state is invalid",
+        ),
+    }
+}
+
+fn storage_api_error(error: StorageError) -> ApiError {
+    match error {
+        StorageError::Drift => ApiError::new(
+            StatusCode::CONFLICT,
+            "external_changes_detected",
+            "The materialized site differs from its accepted revision.",
+            false,
+        ),
+        StorageError::UnsafeImport => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "import_source_unsafe",
+            "The import source contains an unsafe file or path.",
+            false,
+        ),
+        StorageError::ImportLimit => ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "import_limit_exceeded",
+            "The import source exceeds a local safety limit.",
+            false,
+        ),
+        StorageError::Io(error) => {
+            tracing::warn!(kind = ?error.kind(), "managed storage I/O failed");
+            ApiError::internal()
+        }
+        StorageError::Corrupt => {
+            tracing::warn!("managed storage validation failed");
+            ApiError::internal()
+        }
+    }
+}
+
 pub fn editor_router(state: StudioState) -> Router {
     let web_dist = state.0.config.web_dist.clone();
     let editor_csp = HeaderValue::from_str(&format!(
@@ -608,8 +764,13 @@ pub fn editor_router(state: StudioState) -> Router {
         ServeDir::new(&web_dist).not_found_service(ServeFile::new(web_dist.join("index.html")));
     let api = Router::new()
         .route("/bootstrap", get(bootstrap))
-        .route("/projects", post(create_project))
+        .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{project_id}", get(get_project))
+        .route("/imports/previews", post(create_import_preview))
+        .route(
+            "/imports/{preview_id}/confirm",
+            post(confirm_import_preview),
+        )
         .route("/projects/{project_id}/targets", post(create_target))
         .route("/projects/{project_id}/contexts", post(create_context))
         .route("/projects/{project_id}/proposals", post(create_proposal))
@@ -694,6 +855,14 @@ async fn bootstrap(
             target_kinds: ["element"],
             dispositions: ["adopted_unchanged", "rejected", "deferred"],
             single_proposal_per_project: true,
+            import_available: state.0.config.import_root.is_some(),
+            limits: StorageLimitsDto {
+                max_files: STORAGE_MAX_FILES,
+                max_total_bytes: STORAGE_MAX_TOTAL_BYTES,
+                max_file_bytes: STORAGE_MAX_FILE_BYTES,
+                max_path_bytes: STORAGE_MAX_PATH_BYTES,
+                max_depth: STORAGE_MAX_DEPTH,
+            },
         },
     })))
 }
@@ -723,9 +892,195 @@ async fn create_project(
         contexts: HashMap::new(),
         proposal: None,
     };
-    let dto = project_dto(&state, &project);
     let mut store = state.store()?;
     ensure_capacity(store.projects.len(), MAX_PROJECTS)?;
+    state
+        .0
+        .storage
+        .create_project(
+            &project.id,
+            &project.display_name,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+            &project.accepted_files,
+        )
+        .map_err(storage_api_error)?;
+    let dto = project_dto(&state, &project);
+    store.projects.insert(id, project);
+    Ok((
+        StatusCode::CREATED,
+        Json(Versioned::new(ProjectPayload { project: dto })),
+    ))
+}
+
+async fn list_projects(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+) -> Result<Json<Versioned<ProjectsPayload>>, ApiError> {
+    authorize_read(&state, &headers)?;
+    let store = state.store()?;
+    let mut projects = store
+        .projects
+        .values()
+        .map(|project| project_dto(&state, project))
+        .collect::<Vec<_>>();
+    projects.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(Json(Versioned::new(ProjectsPayload { projects })))
+}
+
+async fn create_import_preview(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateImportPreviewRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Versioned<ImportPreviewPayload>>), ApiError> {
+    let session_id = authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    let import_root = state
+        .0
+        .config
+        .import_root
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("import_unavailable"))?;
+    let scan = scan_import(import_root).map_err(storage_api_error)?;
+    let id = opaque_id("imp");
+    let dto = ImportPreviewDto {
+        id: id.clone(),
+        display_name: scan.display_name,
+        manifest_sha256: scan.manifest_sha256.clone(),
+        total_bytes: scan.total_bytes,
+        entry_point: scan.entry_point,
+        included: scan.included,
+        excluded: scan.excluded,
+        warnings: scan.warnings,
+    };
+    let mut store = state.store()?;
+    store
+        .import_previews
+        .retain(|_, preview| preview.expires_at >= now_unix());
+    ensure_capacity(store.import_previews.len(), MAX_PROJECTS)?;
+    store.import_previews.insert(
+        id,
+        ImportPreviewRecord {
+            manifest_sha256: scan.manifest_sha256,
+            session_id,
+            expires_at: now_unix().saturating_add(IMPORT_PREVIEW_TTL_SECONDS),
+        },
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(Versioned::new(ImportPreviewPayload {
+            import_preview: dto,
+        })),
+    ))
+}
+
+async fn confirm_import_preview(
+    State(state): State<StudioState>,
+    Path(preview_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<ConfirmImportRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Versioned<ProjectPayload>>), ApiError> {
+    let session_id = authorize_mutation(&state, &headers)?;
+    let Json(request) = valid_json(payload)?;
+    require_schema(&request.schema_version)?;
+    if request.expected_manifest_sha256.len() != 64
+        || !request
+            .expected_manifest_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ApiError::invalid());
+    }
+    let preview_digest = {
+        let mut store = state.store()?;
+        let preview = store
+            .import_previews
+            .get(&preview_id)
+            .ok_or_else(ApiError::not_found)?;
+        if preview.session_id != session_id {
+            return Err(ApiError::conflict("import_preview_binding_mismatch"));
+        }
+        if preview.expires_at < now_unix() {
+            store.import_previews.remove(&preview_id);
+            return Err(ApiError::conflict("import_preview_expired"));
+        }
+        preview.manifest_sha256.clone()
+    };
+    if preview_digest != request.expected_manifest_sha256 {
+        return Err(ApiError::conflict("import_preview_binding_mismatch"));
+    }
+    let import_root = state
+        .0
+        .config
+        .import_root
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("import_unavailable"))?;
+    let scan = scan_import(import_root).map_err(storage_api_error)?;
+    {
+        let mut store = state.store()?;
+        let preview = store
+            .import_previews
+            .get(&preview_id)
+            .ok_or_else(ApiError::not_found)?;
+        if preview.session_id != session_id || preview.manifest_sha256 != preview_digest {
+            return Err(ApiError::conflict("import_preview_binding_mismatch"));
+        }
+        if preview.expires_at < now_unix() {
+            store.import_previews.remove(&preview_id);
+            return Err(ApiError::conflict("import_preview_expired"));
+        }
+    }
+    if scan.manifest_sha256 != preview_digest {
+        return Err(ApiError::conflict("import_source_changed"));
+    }
+    if scan.files.is_empty() || scan.entry_point.as_deref() != Some("index.html") {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "import_entry_point_missing",
+            "The import source does not contain an HTML entry point.",
+            false,
+        ));
+    }
+    let id = opaque_id("prj");
+    let revision_id = opaque_id("rev");
+    let artifact_manifest_sha256 = manifest_digest(&scan.files)?;
+    let project = Project {
+        id: id.clone(),
+        display_name: scan.display_name,
+        revision_id,
+        accepted_files: scan.files,
+        accepted_manifest_sha256: artifact_manifest_sha256,
+        targets: HashMap::new(),
+        contexts: HashMap::new(),
+        proposal: None,
+    };
+    let mut store = state.store()?;
+    ensure_capacity(store.projects.len(), MAX_PROJECTS)?;
+    let preview = store
+        .import_previews
+        .get(&preview_id)
+        .ok_or_else(ApiError::not_found)?;
+    if preview.session_id != session_id || preview.manifest_sha256 != preview_digest {
+        return Err(ApiError::conflict("import_preview_binding_mismatch"));
+    }
+    if preview.expires_at < now_unix() {
+        store.import_previews.remove(&preview_id);
+        return Err(ApiError::conflict("import_preview_expired"));
+    }
+    state
+        .0
+        .storage
+        .create_project(
+            &project.id,
+            &project.display_name,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+            &project.accepted_files,
+        )
+        .map_err(storage_api_error)?;
+    store.import_previews.remove(&preview_id);
+    let dto = project_dto(&state, &project);
     store.projects.insert(id, project);
     Ok((
         StatusCode::CREATED,
@@ -768,6 +1123,15 @@ async fn create_target(
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
     require_revision(project, &request.revision_id)?;
+    state
+        .0
+        .storage
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
     ensure_capacity(project.targets.len(), MAX_TARGETS_PER_PROJECT)?;
     if !contains_element(&project.accepted_files, &request.element_id) {
         return Err(ApiError::invalid());
@@ -808,6 +1172,15 @@ async fn create_context(
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
     require_revision(project, &request.revision_id)?;
+    state
+        .0
+        .storage
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
     ensure_capacity(project.contexts.len(), MAX_CONTEXTS_PER_PROJECT)?;
     let target = project
         .targets
@@ -863,6 +1236,15 @@ async fn create_proposal(
         .projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
+    state
+        .0
+        .storage
+        .verify_project(
+            &project.id,
+            &project.revision_id,
+            &project.accepted_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
     if project.proposal.is_some() {
         return Err(ApiError::conflict("artifact_single_proposal_limit"));
     }
@@ -887,12 +1269,15 @@ async fn create_proposal(
     let proposed_files = proposed_files(&project.accepted_files, mutation)?;
     let accepted_manifest = manifest(&project.accepted_files)?;
     let proposed_manifest = manifest(&proposed_files)?;
-    let repository_path = state.0.config.state_root.join(opaque_id("repo"));
+    let proposal_id = opaque_id("pro");
+    let repository_path = state
+        .0
+        .storage
+        .proposal_repository(&project.id, &proposal_id)
+        .map_err(storage_api_error)?;
     let recorded_at = now_rfc3339()?;
-    let grant_expires_at = OffsetDateTime::now_utc()
-        .saturating_add(time::Duration::hours(1))
-        .format(&Rfc3339)
-        .map_err(|_| ApiError::internal())?;
+    let grant_expires_at =
+        canonical_timestamp(OffsetDateTime::now_utc().saturating_add(time::Duration::hours(1)));
     let trusted = TrustedArtifactProjectConfig::new(
         repository_path,
         project.id.trim_start_matches("prj_"),
@@ -923,7 +1308,6 @@ async fn create_proposal(
     {
         return Err(ApiError::internal());
     }
-    let proposal_id = opaque_id("pro");
     let review_id = opaque_id("revw");
     let proposal = ProposalRecord {
         id: proposal_id.clone(),
@@ -967,6 +1351,26 @@ async fn create_approval(
         .get(&review_id)
         .cloned()
         .ok_or_else(ApiError::not_found)?;
+    let (verified_project_id, verified_revision_id, verified_manifest_sha256) = store
+        .projects
+        .get(&project_id)
+        .map(|project| {
+            (
+                project.id.clone(),
+                project.revision_id.clone(),
+                project.accepted_manifest_sha256.clone(),
+            )
+        })
+        .ok_or_else(ApiError::not_found)?;
+    state
+        .0
+        .storage
+        .verify_project(
+            &verified_project_id,
+            &verified_revision_id,
+            &verified_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
     let project = store
         .projects
         .get(&project_id)
@@ -1043,6 +1447,42 @@ async fn create_decision(
         disposition: request.disposition,
         intent_id: request.intent_id.clone(),
     };
+    validate_approval(
+        &mut store.approvals,
+        &request.approval_token,
+        &expected_binding,
+        now_unix(),
+    )?;
+    let (verified_project_id, verified_revision_id, verified_manifest_sha256) = {
+        let project = store
+            .projects
+            .get(&project_id)
+            .ok_or_else(ApiError::not_found)?;
+        if project.revision_id != request.expected_revision_id {
+            return Err(ApiError::conflict("revision_mismatch"));
+        }
+        let proposal = project.proposal.as_ref().ok_or_else(ApiError::not_found)?;
+        if proposal.status != ProposalStatus::PendingReview
+            || proposal.id != request.proposal_id
+            || proposal.review_id != review_id
+        {
+            return Err(ApiError::conflict("decision_binding_mismatch"));
+        }
+        (
+            project.id.clone(),
+            project.revision_id.clone(),
+            project.accepted_manifest_sha256.clone(),
+        )
+    };
+    state
+        .0
+        .storage
+        .verify_project(
+            &verified_project_id,
+            &verified_revision_id,
+            &verified_manifest_sha256,
+        )
+        .map_err(storage_api_error)?;
     consume_approval(
         &mut store.approvals,
         &request.approval_token,
@@ -1054,16 +1494,11 @@ async fn create_decision(
         .projects
         .get_mut(&project_id)
         .ok_or_else(ApiError::not_found)?;
-    if project.revision_id != request.expected_revision_id {
-        return Err(ApiError::conflict("revision_mismatch"));
-    }
     let proposal = project.proposal.as_mut().ok_or_else(ApiError::not_found)?;
-    if proposal.status != ProposalStatus::PendingReview
-        || proposal.id != request.proposal_id
-        || proposal.review_id != review_id
-    {
-        return Err(ApiError::conflict("decision_binding_mismatch"));
-    }
+    debug_assert_eq!(project.revision_id, request.expected_revision_id);
+    debug_assert_eq!(proposal.status, ProposalStatus::PendingReview);
+    debug_assert_eq!(proposal.id, request.proposal_id);
+    debug_assert_eq!(proposal.review_id, review_id);
     let receipt = decide_artifact_proposal(
         &mut proposal.pending,
         &ArtifactDecisionOptions {
@@ -1090,9 +1525,20 @@ async fn create_decision(
         return Err(ApiError::internal());
     }
     if request.disposition == DispositionDto::AdoptedUnchanged {
+        let revision_id = opaque_id("rev");
+        state
+            .0
+            .storage
+            .commit_revision(
+                &project.id,
+                &revision_id,
+                &proposal.artifact_manifest_sha256,
+                &proposal.proposed_files,
+            )
+            .map_err(storage_api_error)?;
         project.accepted_files = proposal.proposed_files.clone();
         project.accepted_manifest_sha256 = proposal.artifact_manifest_sha256.clone();
-        project.revision_id = opaque_id("rev");
+        project.revision_id = revision_id;
     }
     proposal.status = ProposalStatus::Committed;
     let revision_id = project.revision_id.clone();
@@ -1128,6 +1574,15 @@ async fn create_export(
             .get(&project_id)
             .ok_or_else(ApiError::not_found)?;
         require_revision(project, &request.revision_id)?;
+        state
+            .0
+            .storage
+            .verify_project(
+                &project.id,
+                &project.revision_id,
+                &project.accepted_manifest_sha256,
+            )
+            .map_err(storage_api_error)?;
         (project.revision_id.clone(), project.accepted_files.clone())
     };
     let zip = deterministic_zip(&accepted_files)?;
@@ -1618,11 +2073,11 @@ fn manifest(files: &BTreeMap<String, Vec<u8>>) -> Result<RegularFileManifest, Ap
             .iter()
             .map(|(path, bytes)| ArtifactManifestEntry::regular_file(path, bytes.clone())),
         ArtifactLimits {
-            max_files: 32,
-            max_file_bytes: 2 * 1024 * 1024,
-            max_total_bytes: 8 * 1024 * 1024,
-            max_path_bytes: 256,
-            max_depth: 8,
+            max_files: STORAGE_MAX_FILES,
+            max_file_bytes: STORAGE_MAX_FILE_BYTES as u64,
+            max_total_bytes: STORAGE_MAX_TOTAL_BYTES as u64,
+            max_path_bytes: STORAGE_MAX_PATH_BYTES,
+            max_depth: STORAGE_MAX_DEPTH,
         },
     )
     .map_err(|_| ApiError::internal())
@@ -1710,6 +2165,17 @@ fn consume_approval(
     expected: &ApprovalBinding,
     now: i64,
 ) -> Result<(), ApiError> {
+    let hash = validate_approval(approvals, token, expected, now)?;
+    approvals.remove(&hash);
+    Ok(())
+}
+
+fn validate_approval(
+    approvals: &mut HashMap<[u8; 32], ApprovalGrant>,
+    token: &str,
+    expected: &ApprovalBinding,
+    now: i64,
+) -> Result<[u8; 32], ApiError> {
     if token.is_empty() || token.len() > 128 {
         return Err(ApiError::conflict("approval_invalid"));
     }
@@ -1724,8 +2190,7 @@ fn consume_approval(
     if &grant.binding != expected {
         return Err(ApiError::conflict("approval_binding_mismatch"));
     }
-    approvals.remove(&hash);
-    Ok(())
+    Ok(hash)
 }
 
 fn inject_preview_bridge(
@@ -1811,17 +2276,20 @@ fn now_unix() -> i64 {
 }
 
 fn now_rfc3339() -> Result<String, ApiError> {
-    let now = OffsetDateTime::now_utc();
-    Ok(format!(
+    Ok(canonical_timestamp(OffsetDateTime::now_utc()))
+}
+
+fn canonical_timestamp(value: OffsetDateTime) -> String {
+    format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        now.year(),
-        now.month() as u8,
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second(),
-        now.nanosecond()
-    ))
+        value.year(),
+        value.month() as u8,
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.nanosecond()
+    )
 }
 
 fn format_timestamp(seconds: i64) -> Result<String, ApiError> {

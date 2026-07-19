@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://synapsegit-lp-studio.local/schemas/api-v1.schema.json",
   "title": "SynapseGit LP Studio local API v1",
-  "description": "Canonical public DTO schema for the C2 local vertical slice.",
+  "description": "Canonical public DTO schema for the local LP Studio API.",
   "oneOf": [
     { "$ref": "#/$defs/bootstrapResponse" },
     { "$ref": "#/$defs/createProjectRequest" },
+    { "$ref": "#/$defs/projectsResponse" },
     { "$ref": "#/$defs/projectResponse" },
+    { "$ref": "#/$defs/createImportPreviewRequest" },
+    { "$ref": "#/$defs/importPreviewResponse" },
+    { "$ref": "#/$defs/confirmImportRequest" },
     { "$ref": "#/$defs/createTargetRequest" },
     { "$ref": "#/$defs/targetResponse" },
     { "$ref": "#/$defs/createContextRequest" },
@@ -27,6 +31,11 @@
     "version": { "const": "1" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "nonEmptyString": { "type": "string", "minLength": 1 },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:[\\\\/])(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
     "disposition": {
       "enum": ["adopted_unchanged", "rejected", "deferred"]
     },
@@ -35,7 +44,7 @@
       "additionalProperties": false,
       "required": ["path", "byteLength"],
       "properties": {
-        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/relativePath" },
         "byteLength": { "type": "integer", "minimum": 0 }
       }
     },
@@ -95,7 +104,9 @@
           "required": [
             "targetKinds",
             "dispositions",
-            "singleProposalPerProject"
+            "singleProposalPerProject",
+            "importAvailable",
+            "limits"
           ],
           "properties": {
             "targetKinds": {
@@ -110,9 +121,29 @@
               "minItems": 1,
               "uniqueItems": true
             },
-            "singleProposalPerProject": { "const": true }
+            "singleProposalPerProject": { "const": true },
+            "importAvailable": { "type": "boolean" },
+            "limits": { "$ref": "#/$defs/importLimits" }
           }
         }
+      }
+    },
+    "importLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxFiles",
+        "maxTotalBytes",
+        "maxFileBytes",
+        "maxPathBytes",
+        "maxDepth"
+      ],
+      "properties": {
+        "maxFiles": { "type": "integer", "minimum": 1 },
+        "maxTotalBytes": { "type": "integer", "minimum": 1 },
+        "maxFileBytes": { "type": "integer", "minimum": 1 },
+        "maxPathBytes": { "type": "integer", "minimum": 1 },
+        "maxDepth": { "type": "integer", "minimum": 1 }
       }
     },
     "createProjectRequest": {
@@ -131,6 +162,98 @@
       "properties": {
         "schemaVersion": { "$ref": "#/$defs/version" },
         "project": { "$ref": "#/$defs/project" }
+      }
+    },
+    "projectsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "projects"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "projects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/project" }
+        }
+      }
+    },
+    "createImportPreviewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" }
+      }
+    },
+    "importPreviewFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "byteLength", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "importPreviewExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "reason": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "importPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "manifestSha256",
+        "totalBytes",
+        "entryPoint",
+        "included",
+        "excluded",
+        "warnings"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "displayName": { "$ref": "#/$defs/nonEmptyString" },
+        "manifestSha256": { "$ref": "#/$defs/sha256" },
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "entryPoint": {
+          "anyOf": [{ "$ref": "#/$defs/relativePath" }, { "type": "null" }]
+        },
+        "included": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/importPreviewFile" }
+        },
+        "excluded": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/importPreviewExclusion" }
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "importPreviewResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "importPreview"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "importPreview": { "$ref": "#/$defs/importPreview" }
+      }
+    },
+    "confirmImportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "expectedManifestSha256"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "expectedManifestSha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "createTargetRequest": {

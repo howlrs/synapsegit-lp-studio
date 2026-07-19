@@ -6,9 +6,11 @@ import {
   isContextResponse,
   isDecisionResponse,
   isExportResponse,
+  isImportPreviewResponse,
   isPreviewActionMessage,
   isPreviewSelectionMessage,
   isProjectResponse,
+  isProjectsResponse,
   isProposalResponse,
   isTargetResponse,
 } from "@synapsegit-lp/contracts";
@@ -20,7 +22,9 @@ import {
   contextResponseFixture,
   decisionResponseFixture,
   exportResponseFixture,
+  importPreviewResponseFixture,
   projectResponseFixture,
+  projectsResponseFixture,
   proposalResponseFixture,
   targetResponseFixture,
 } from "./fixtures";
@@ -61,6 +65,8 @@ const previewClearSelection = {
 
 const bootstrap = bootstrapFixture();
 const project = projectResponseFixture();
+const projects = projectsResponseFixture();
+const importPreview = importPreviewResponseFixture;
 const proposal = proposalResponseFixture;
 
 const extraFieldCases: ReadonlyArray<
@@ -80,7 +86,27 @@ const extraFieldCases: ReadonlyArray<
       capabilities: { ...bootstrap.capabilities, extra: true },
     },
   ],
+  [
+    "bootstrap import limits",
+    isBootstrapResponse,
+    {
+      ...bootstrap,
+      capabilities: {
+        ...bootstrap.capabilities,
+        limits: { ...bootstrap.capabilities.limits, extra: true },
+      },
+    },
+  ],
   ["project response root", isProjectResponse, { ...project, extra: true }],
+  ["projects response root", isProjectsResponse, { ...projects, extra: true }],
+  [
+    "projects array item",
+    isProjectsResponse,
+    {
+      ...projects,
+      projects: [{ ...projects.projects[0]!, extra: true }],
+    },
+  ],
   [
     "project",
     isProjectResponse,
@@ -94,6 +120,45 @@ const extraFieldCases: ReadonlyArray<
       project: {
         ...project.project,
         files: [{ ...project.project.files[0]!, extra: true }],
+      },
+    },
+  ],
+  [
+    "import preview response root",
+    isImportPreviewResponse,
+    { ...importPreview, extra: true },
+  ],
+  [
+    "import preview",
+    isImportPreviewResponse,
+    {
+      ...importPreview,
+      importPreview: { ...importPreview.importPreview, extra: true },
+    },
+  ],
+  [
+    "import preview included item",
+    isImportPreviewResponse,
+    {
+      ...importPreview,
+      importPreview: {
+        ...importPreview.importPreview,
+        included: [
+          { ...importPreview.importPreview.included[0]!, extra: true },
+        ],
+      },
+    },
+  ],
+  [
+    "import preview excluded item",
+    isImportPreviewResponse,
+    {
+      ...importPreview,
+      importPreview: {
+        ...importPreview.importPreview,
+        excluded: [
+          { ...importPreview.importPreview.excluded[0]!, extra: true },
+        ],
       },
     },
   ],
@@ -256,6 +321,8 @@ describe("canonical API v1 schema", () => {
   it.each([
     ["bootstrap", bootstrap],
     ["project", project],
+    ["projects", projects],
+    ["import preview", importPreview],
     ["target", targetResponseFixture],
     ["context", contextResponseFixture],
     ["proposal", proposal],
@@ -297,12 +364,48 @@ describe("canonical API v1 schema", () => {
       isPreviewActionMessage({ ...previewClearSelection, mode: "select" }),
     ).toBe(false);
   });
+
+  it("rejects zero import limits and non-canonical paths in Draft 2020-12", () => {
+    expect(
+      validate({
+        ...bootstrap,
+        capabilities: {
+          ...bootstrap.capabilities,
+          limits: { ...bootstrap.capabilities.limits, maxFiles: 0 },
+        },
+      }),
+    ).toBe(false);
+    for (const path of [
+      "assets\\private.css",
+      "assets//private.css",
+      "assets/",
+      "./assets.css",
+      "assets/./private.css",
+    ]) {
+      expect(
+        validate({
+          ...importPreview,
+          importPreview: {
+            ...importPreview.importPreview,
+            included: [
+              {
+                ...importPreview.importPreview.included[0]!,
+                path,
+              },
+            ],
+          },
+        }),
+      ).toBe(false);
+    }
+  });
 });
 
 describe("runtime response and bridge guards", () => {
   it("accepts every contract fixture", () => {
     expect(isBootstrapResponse(bootstrap)).toBe(true);
     expect(isProjectResponse(project)).toBe(true);
+    expect(isProjectsResponse(projects)).toBe(true);
+    expect(isImportPreviewResponse(importPreview)).toBe(true);
     expect(isTargetResponse(targetResponseFixture)).toBe(true);
     expect(isContextResponse(contextResponseFixture)).toBe(true);
     expect(isProposalResponse(proposal)).toBe(true);
@@ -358,5 +461,41 @@ describe("runtime response and bridge guards", () => {
         proposal: { ...proposal.proposal, executionVerified: true },
       }),
     ).toBe(false);
+  });
+
+  it("rejects absolute, traversal, and backslash import paths", () => {
+    for (const path of [
+      "/srv/private/index.html",
+      "../index.html",
+      "assets\\secret.css",
+      "C:\\private\\index.html",
+      "assets//secret.css",
+      "assets/",
+      "assets/./secret.css",
+    ]) {
+      expect(
+        isImportPreviewResponse({
+          ...importPreview,
+          importPreview: {
+            ...importPreview.importPreview,
+            included: [{ ...importPreview.importPreview.included[0]!, path }],
+          },
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("requires every advertised import limit to be positive", () => {
+    for (const key of Object.keys(bootstrap.capabilities.limits)) {
+      expect(
+        isBootstrapResponse({
+          ...bootstrap,
+          capabilities: {
+            ...bootstrap.capabilities,
+            limits: { ...bootstrap.capabilities.limits, [key]: 0 },
+          },
+        }),
+      ).toBe(false);
+    }
   });
 });

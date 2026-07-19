@@ -1,5 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -10,6 +19,55 @@ interface ReadyOrigins {
   editorOrigin: string;
   previewOrigin: string;
 }
+
+const importFixture = new Map<string, string>([
+  [
+    "index.html",
+    '<!doctype html><html lang="ja"><head><meta charset="utf-8"><link rel="stylesheet" href="assets/theme.css"><title>Imported E2E LP</title></head><body><main><h1 data-lp-id="hero-heading">登録ルートから始めるLP</h1><p data-lp-id="hero-copy">コピーされたAccepted状態です。</p><a data-lp-id="hero-cta" href="#contact">相談する</a></main></body></html>\n',
+  ],
+  [
+    "assets/theme.css",
+    "body { margin: 0; font-family: sans-serif; background: #f5f7ef; color: #182015; }\n",
+  ],
+  [".env", "LP_STUDIO_E2E_IMPORT_SECRET=must-never-be-copied\n"],
+]);
+
+const writeImportFixture = async (root: string): Promise<void> => {
+  await mkdir(join(root, "assets"), { recursive: true });
+  for (const [path, content] of importFixture) {
+    await writeFile(join(root, path), content, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  }
+};
+
+const importSourceSnapshot = async (
+  root: string,
+): Promise<{ sha256: string; byteLength: number }> => {
+  const hash = createHash("sha256");
+  let byteLength = 0;
+  const paths = await readdir(root, { recursive: true });
+  paths.sort();
+  for (const path of paths) {
+    const metadata = await lstat(join(root, path));
+    const kind = metadata.isDirectory()
+      ? "directory"
+      : metadata.isFile()
+        ? "file"
+        : metadata.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    hash.update(`${kind}:${path}`, "utf8");
+    hash.update(new Uint8Array([0]));
+    if (metadata.isFile()) {
+      const bytes = await readFile(join(root, path));
+      hash.update(bytes);
+      byteLength += bytes.byteLength;
+    }
+  }
+  return { sha256: hash.digest("hex"), byteLength };
+};
 
 const run = async (command: string, args: string[]): Promise<void> => {
   await new Promise<void>((resolveRun, rejectRun) => {
@@ -140,6 +198,11 @@ export default async function globalSetup(
   await run("cargo", ["build", "-p", "synapsegit-lp-local-server", "--locked"]);
 
   const stateRoot = await mkdtemp(join(tmpdir(), "synapsegit-lp-studio-e2e-"));
+  const importRoot = await mkdtemp(
+    join(tmpdir(), "synapsegit-lp-studio-import-e2e-"),
+  );
+  await writeImportFixture(importRoot);
+  const sourceSnapshot = await importSourceSnapshot(importRoot);
   const server = spawn(resolve("target/debug/synapsegit-lp-local-server"), [], {
     cwd: process.cwd(),
     env: {
@@ -148,6 +211,7 @@ export default async function globalSetup(
       LP_STUDIO_PREVIEW_PORT: "0",
       LP_STUDIO_STATE_ROOT: stateRoot,
       LP_STUDIO_WEB_DIST: resolve("apps/web/dist"),
+      LP_STUDIO_IMPORT_ROOT: importRoot,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -165,9 +229,15 @@ export default async function globalSetup(
     ]);
     process.env.LP_STUDIO_E2E_EDITOR_ORIGIN = origins.editorOrigin;
     process.env.LP_STUDIO_E2E_PREVIEW_ORIGIN = origins.previewOrigin;
+    process.env.LP_STUDIO_E2E_IMPORT_ROOT = importRoot;
+    process.env.LP_STUDIO_E2E_IMPORT_SOURCE_SHA256 = sourceSnapshot.sha256;
+    process.env.LP_STUDIO_E2E_IMPORT_SOURCE_BYTES = String(
+      sourceSnapshot.byteLength,
+    );
   } catch (error) {
     await stopServer(server);
     await rm(stateRoot, { recursive: true, force: true });
+    await rm(importRoot, { recursive: true, force: true });
     const detail = stderr.trim();
     throw new Error(
       detail.length === 0
@@ -179,7 +249,11 @@ export default async function globalSetup(
   return async () => {
     await stopServer(server);
     await rm(stateRoot, { recursive: true, force: true });
+    await rm(importRoot, { recursive: true, force: true });
     delete process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
     delete process.env.LP_STUDIO_E2E_PREVIEW_ORIGIN;
+    delete process.env.LP_STUDIO_E2E_IMPORT_ROOT;
+    delete process.env.LP_STUDIO_E2E_IMPORT_SOURCE_SHA256;
+    delete process.env.LP_STUDIO_E2E_IMPORT_SOURCE_BYTES;
   };
 }
