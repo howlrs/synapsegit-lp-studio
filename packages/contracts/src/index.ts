@@ -2,6 +2,25 @@ export const SCHEMA_VERSION = "1" as const;
 export const API_VERSION = "v1" as const;
 export const TARGET_SCHEMA_VERSION = 1 as const;
 export const TARGET_RESOLVER_VERSION = 1 as const;
+export const CHANGE_SET_SCHEMA = "org.synapsegit-lp-studio.change-set" as const;
+export const CHANGE_SET_VERSION = 1 as const;
+
+export const AI_CONTRACT_LIMITS = {
+  providerIdLength: 128,
+  providerLabelLength: 256,
+  modelIdLength: 256,
+  adapterVersionLength: 128,
+  providerRequestIdLength: 512,
+  contextEntries: 32,
+  contextRedactions: 32,
+  mediaTypeLength: 256,
+  changeOperations: 32,
+  changeSummaryLength: 2_000,
+  changeFileBytes: 2 * 1024 * 1024,
+  changeTotalBytes: 8 * 1024 * 1024,
+  validationDestinations: 32,
+  streamDeltaLength: 16 * 1024,
+} as const;
 
 export const TARGET_CONTRACT_LIMITS = {
   idLength: 128,
@@ -27,6 +46,22 @@ export type PreviewSource = "accepted" | "proposed";
 export type ViewportPreset = "desktop" | "tablet" | "mobile" | "custom";
 export type ArtifactDisposition = "adopted_unchanged" | "rejected" | "deferred";
 
+export type AiProviderAvailability = "available" | "not_configured";
+
+export interface AiProviderModelDescriptor {
+  id: string;
+  label: string;
+}
+
+export interface AiProviderDescriptor {
+  id: string;
+  label: string;
+  adapterVersion: string;
+  external: boolean;
+  availability: AiProviderAvailability;
+  models: AiProviderModelDescriptor[];
+}
+
 export interface BootstrapResponse {
   schemaVersion: SchemaVersion;
   apiVersion: typeof API_VERSION;
@@ -41,6 +76,7 @@ export interface BootstrapResponse {
     dispositions: ArtifactDisposition[];
     singleProposalPerProject: true;
     importAvailable: boolean;
+    aiProviders: AiProviderDescriptor[];
     limits: ImportLimits;
   };
 }
@@ -318,7 +354,41 @@ export interface CreateContextRequest {
   revisionId: string;
   targetId: string;
   resolutionId: string;
+  attemptId: string;
+  providerId: string;
+  requestedModel: string;
   instruction: string;
+}
+
+export type ContextManifestPurpose = "entrypoint" | "dependency";
+
+export interface ContextManifestEntryV1 {
+  path: string;
+  mediaType: string;
+  purpose: ContextManifestPurpose;
+  sourceByteLength: number;
+  includedByteLength: number;
+  startLine: number;
+  endLine: number;
+  sha256: string;
+  estimatedTokens: number;
+  redacted: boolean;
+  truncated: boolean;
+  redactions: string[];
+}
+
+export interface ContextManifestV1 {
+  entries: ContextManifestEntryV1[];
+  totalIncludedBytes: number;
+  estimatedTokens: number;
+  screenshotIncluded: false;
+}
+
+export interface ContextProviderBindingV1 {
+  providerId: string;
+  adapterVersion: string;
+  requestedModel: string;
+  external: boolean;
 }
 
 export interface ContextReview {
@@ -326,6 +396,11 @@ export interface ContextReview {
   revisionId: string;
   targetId: string;
   targetResolutionId: string;
+  attemptId: string;
+  providerId: string;
+  requestedModel: string;
+  provider: ContextProviderBindingV1;
+  manifest: ContextManifestV1;
   instruction: string;
   canonicalJson: string;
   sha256: string;
@@ -345,6 +420,124 @@ export interface CreateProposalRequest {
 export interface ProposalChange {
   path: string;
   kind: "created" | "modified" | "renamed" | "deleted";
+  fromPath?: string;
+}
+
+export interface CreateTextOperationV1 {
+  op: "create_text";
+  path: string;
+  mediaType: string;
+  content: string;
+}
+
+export interface ReplaceTextOperationV1 {
+  op: "replace_text";
+  path: string;
+  expectedSha256: string;
+  mediaType: string;
+  content: string;
+}
+
+export interface RenameOperationV1 {
+  op: "rename";
+  from: string;
+  to: string;
+  expectedSha256: string;
+}
+
+export interface DeleteOperationV1 {
+  op: "delete";
+  path: string;
+  expectedSha256: string;
+}
+
+export type ChangeOperationV1 =
+  | CreateTextOperationV1
+  | ReplaceTextOperationV1
+  | RenameOperationV1
+  | DeleteOperationV1;
+
+export interface ChangeSetV1 {
+  schema: typeof CHANGE_SET_SCHEMA;
+  version: typeof CHANGE_SET_VERSION;
+  baseRevisionId: string;
+  summary: string;
+  operations: ChangeOperationV1[];
+}
+
+export interface AiProviderUsageV1 {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+export interface AiProviderAttributionV1 {
+  attemptId: string;
+  providerRequestId: string;
+  providerId: string;
+  adapterVersion: string;
+  requestedModel: string;
+  reportedModel: string;
+  external: boolean;
+  usage?: AiProviderUsageV1;
+}
+
+export type AiAttemptStatus =
+  | "queued"
+  | "running"
+  | "cancelled"
+  | "timed_out"
+  | "provider_failed"
+  | "validation_failed"
+  | "proposal_ready"
+  | "completed";
+
+export interface AiAttemptStatusV1 {
+  schemaVersion: SchemaVersion;
+  attemptId: string;
+  status: AiAttemptStatus;
+}
+
+interface AiProviderStreamEventCommonV1 {
+  schemaVersion: SchemaVersion;
+  attemptId: string;
+  sequence: number;
+}
+
+export type AiProviderStreamEventV1 = AiProviderStreamEventCommonV1 &
+  (
+    | { event: "started" }
+    | { event: "text_delta"; text: string }
+    | { event: "usage"; usage: AiProviderUsageV1 }
+    | { event: "completed" }
+  );
+
+export type AiProviderOutputV1 =
+  | { kind: "consultation"; text: string }
+  | { kind: "change_set"; changeSet: ChangeSetV1 };
+
+export interface AiProviderResultV1 {
+  schemaVersion: SchemaVersion;
+  attemptId: string;
+  attribution: AiProviderAttributionV1;
+  output: AiProviderOutputV1;
+}
+
+export type AiProviderErrorCodeV1 =
+  | "not_configured"
+  | "cancelled"
+  | "timeout"
+  | "rate_limited"
+  | "unavailable"
+  | "invalid_response"
+  | "internal";
+
+export interface AiProviderErrorV1 {
+  schemaVersion: SchemaVersion;
+  attemptId: string;
+  code: AiProviderErrorCodeV1;
+  message: string;
+  retryable: boolean;
 }
 
 export type ValidationStatus = "passed" | "warning" | "failed";
@@ -354,6 +547,8 @@ export interface ValidationCheck {
   label: string;
   status: ValidationStatus;
   message: string;
+  blocking: boolean;
+  destinations: string[];
 }
 
 export interface ProposalValidation {
@@ -369,6 +564,10 @@ export interface Proposal {
   summary: string;
   artifactManifestSha256: string;
   reviewContextSha256: string;
+  providerContextSha256: string;
+  changeSetSha256: string;
+  changeSet: ChangeSetV1;
+  attribution: AiProviderAttributionV1;
   sourceAttribution: "caller_supplied_ai_attributed";
   executionVerified: false;
   previewUrl: string;
@@ -660,6 +859,10 @@ const isSafeRelativePath = (value: unknown): value is string => {
     (segment) => segment.length > 0 && segment !== "." && segment !== "..",
   );
 };
+const isContractRelativePath = (value: unknown): value is string =>
+  isSafeRelativePath(value) &&
+  value.normalize("NFC") === value &&
+  new TextEncoder().encode(value).byteLength <= 512;
 const containsAbsolutePath = (value: string): boolean =>
   /(?:^|[\s("'=])\/(?!\/)/.test(value) ||
   /[A-Za-z]:[\\/]/.test(value) ||
@@ -715,6 +918,16 @@ const isBoundedString = (
     if (length > maximumLength) return false;
   }
   return length >= minimumLength;
+};
+
+const isBoundedUtf8String = (
+  value: unknown,
+  minimumBytes: number,
+  maximumBytes: number,
+): value is string => {
+  if (!isString(value) || value.includes("\0")) return false;
+  const bytes = new TextEncoder().encode(value).byteLength;
+  return bytes >= minimumBytes && bytes <= maximumBytes;
 };
 
 const isBoundedId = (value: unknown): value is string =>
@@ -1256,6 +1469,47 @@ export const isProject = (value: unknown): value is Project => {
   );
 };
 
+const isAiProviderModelDescriptor = (
+  value: unknown,
+): value is AiProviderModelDescriptor =>
+  isRecord(value) &&
+  hasExactKeys(value, ["id", "label"]) &&
+  isBoundedString(value.id, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  isBoundedString(value.label, 1, AI_CONTRACT_LIMITS.providerLabelLength);
+
+export const isAiProviderDescriptor = (
+  value: unknown,
+): value is AiProviderDescriptor => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "id",
+      "label",
+      "adapterVersion",
+      "external",
+      "availability",
+      "models",
+    ]) ||
+    !isBoundedExactArray(value.models, 0, 32, isAiProviderModelDescriptor)
+  ) {
+    return false;
+  }
+  return (
+    isBoundedString(value.id, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
+    isBoundedString(value.label, 1, AI_CONTRACT_LIMITS.providerLabelLength) &&
+    isBoundedString(
+      value.adapterVersion,
+      1,
+      AI_CONTRACT_LIMITS.adapterVersionLength,
+    ) &&
+    typeof value.external === "boolean" &&
+    (value.availability === "available" ||
+      value.availability === "not_configured") &&
+    (value.availability !== "available" || value.models.length > 0) &&
+    new Set(value.models.map((model) => model.id)).size === value.models.length
+  );
+};
+
 export const isBootstrapResponse = (
   value: unknown,
 ): value is BootstrapResponse => {
@@ -1284,6 +1538,7 @@ export const isBootstrapResponse = (
       "dispositions",
       "singleProposalPerProject",
       "importAvailable",
+      "aiProviders",
       "limits",
     ])
   ) {
@@ -1313,6 +1568,14 @@ export const isBootstrapResponse = (
     ) &&
     capabilities.singleProposalPerProject === true &&
     typeof capabilities.importAvailable === "boolean" &&
+    isBoundedExactArray(
+      capabilities.aiProviders,
+      1,
+      32,
+      isAiProviderDescriptor,
+    ) &&
+    new Set(capabilities.aiProviders.map((provider) => provider.id)).size ===
+      capabilities.aiProviders.length &&
     isImportLimits(capabilities.limits)
   );
 };
@@ -1352,7 +1615,7 @@ export const isProjectsResponse = (value: unknown): value is ProjectsResponse =>
 const isImportPreviewFile = (value: unknown): value is ImportPreviewFile =>
   isRecord(value) &&
   hasExactKeys(value, ["path", "byteLength", "sha256"]) &&
-  isSafeRelativePath(value.path) &&
+  isContractRelativePath(value.path) &&
   isNonNegativeInteger(value.byteLength) &&
   isSha256(value.sha256);
 
@@ -1361,7 +1624,7 @@ const isImportPreviewExclusion = (
 ): value is ImportPreviewExclusion =>
   isRecord(value) &&
   hasExactKeys(value, ["path", "reason"]) &&
-  isSafeRelativePath(value.path) &&
+  isContractRelativePath(value.path) &&
   isPathPrivateNonEmptyString(value.reason);
 
 export const isImportPreviewResponse = (
@@ -1416,6 +1679,122 @@ export const isTargetResponse = (value: unknown): value is TargetResponse => {
   );
 };
 
+export const isCreateContextRequest = (
+  value: unknown,
+): value is CreateContextRequest =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "schemaVersion",
+    "revisionId",
+    "targetId",
+    "resolutionId",
+    "attemptId",
+    "providerId",
+    "requestedModel",
+    "instruction",
+  ]) &&
+  hasVersion(value) &&
+  isBoundedId(value.revisionId) &&
+  isBoundedId(value.targetId) &&
+  isBoundedId(value.resolutionId) &&
+  isBoundedId(value.attemptId) &&
+  isBoundedString(value.providerId, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
+  isBoundedString(value.requestedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  isBoundedUtf8String(value.instruction, 1, 2_000);
+
+export const isContextManifestEntryV1 = (
+  value: unknown,
+): value is ContextManifestEntryV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "path",
+    "mediaType",
+    "purpose",
+    "sourceByteLength",
+    "includedByteLength",
+    "startLine",
+    "endLine",
+    "sha256",
+    "estimatedTokens",
+    "redacted",
+    "truncated",
+    "redactions",
+  ]) &&
+  isContractRelativePath(value.path) &&
+  isBoundedString(value.mediaType, 1, AI_CONTRACT_LIMITS.mediaTypeLength) &&
+  (value.purpose === "entrypoint" || value.purpose === "dependency") &&
+  isNonNegativeInteger(value.sourceByteLength) &&
+  isNonNegativeInteger(value.includedByteLength) &&
+  isSafeIntegerRange(value.startLine, 1, 1_000_000) &&
+  isSafeIntegerRange(value.endLine, 0, 1_000_000) &&
+  (value.includedByteLength === 0
+    ? value.endLine === 0
+    : value.endLine >= value.startLine) &&
+  isSha256(value.sha256) &&
+  isNonNegativeInteger(value.estimatedTokens) &&
+  typeof value.redacted === "boolean" &&
+  typeof value.truncated === "boolean" &&
+  isBoundedExactArray(
+    value.redactions,
+    0,
+    AI_CONTRACT_LIMITS.contextRedactions,
+    (redaction): redaction is string => isBoundedString(redaction, 1, 128),
+  ) &&
+  new Set(value.redactions).size === value.redactions.length &&
+  value.redacted === value.redactions.length > 0;
+
+export const isContextManifestV1 = (
+  value: unknown,
+): value is ContextManifestV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "entries",
+      "totalIncludedBytes",
+      "estimatedTokens",
+      "screenshotIncluded",
+    ]) ||
+    !isBoundedExactArray(
+      value.entries,
+      1,
+      AI_CONTRACT_LIMITS.contextEntries,
+      isContextManifestEntryV1,
+    ) ||
+    !isNonNegativeInteger(value.totalIncludedBytes) ||
+    !isNonNegativeInteger(value.estimatedTokens) ||
+    value.screenshotIncluded !== false
+  ) {
+    return false;
+  }
+  return (
+    new Set(value.entries.map((entry) => entry.path)).size ===
+      value.entries.length &&
+    value.entries.reduce(
+      (total, entry) => total + entry.includedByteLength,
+      0,
+    ) === value.totalIncludedBytes
+  );
+};
+
+const isContextProviderBindingV1 = (
+  value: unknown,
+): value is ContextProviderBindingV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "providerId",
+    "adapterVersion",
+    "requestedModel",
+    "external",
+  ]) &&
+  isBoundedString(value.providerId, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
+  isBoundedString(
+    value.adapterVersion,
+    1,
+    AI_CONTRACT_LIMITS.adapterVersionLength,
+  ) &&
+  isBoundedString(value.requestedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  typeof value.external === "boolean";
+
 export const isContextResponse = (value: unknown): value is ContextResponse => {
   if (
     !isRecord(value) ||
@@ -1427,6 +1806,11 @@ export const isContextResponse = (value: unknown): value is ContextResponse => {
       "revisionId",
       "targetId",
       "targetResolutionId",
+      "attemptId",
+      "providerId",
+      "requestedModel",
+      "provider",
+      "manifest",
       "instruction",
       "canonicalJson",
       "sha256",
@@ -1440,30 +1824,309 @@ export const isContextResponse = (value: unknown): value is ContextResponse => {
     isNonEmptyString(context.revisionId) &&
     isNonEmptyString(context.targetId) &&
     isBoundedId(context.targetResolutionId) &&
-    isString(context.instruction) &&
+    isBoundedId(context.attemptId) &&
+    isBoundedString(
+      context.providerId,
+      1,
+      AI_CONTRACT_LIMITS.providerIdLength,
+    ) &&
+    isBoundedString(
+      context.requestedModel,
+      1,
+      AI_CONTRACT_LIMITS.modelIdLength,
+    ) &&
+    isContextProviderBindingV1(context.provider) &&
+    context.provider.providerId === context.providerId &&
+    context.provider.requestedModel === context.requestedModel &&
+    isContextManifestV1(context.manifest) &&
+    isBoundedUtf8String(context.instruction, 1, 2_000) &&
     isString(context.canonicalJson) &&
     isSha256(context.sha256)
   );
 };
 
+const isCreateTextOperationV1 = (
+  value: unknown,
+): value is CreateTextOperationV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["op", "path", "mediaType", "content"]) &&
+  value.op === "create_text" &&
+  isContractRelativePath(value.path) &&
+  isBoundedString(value.mediaType, 1, AI_CONTRACT_LIMITS.mediaTypeLength) &&
+  isBoundedUtf8String(value.content, 0, AI_CONTRACT_LIMITS.changeFileBytes);
+
+const isReplaceTextOperationV1 = (
+  value: unknown,
+): value is ReplaceTextOperationV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "op",
+    "path",
+    "expectedSha256",
+    "mediaType",
+    "content",
+  ]) &&
+  value.op === "replace_text" &&
+  isContractRelativePath(value.path) &&
+  isSha256(value.expectedSha256) &&
+  isBoundedString(value.mediaType, 1, AI_CONTRACT_LIMITS.mediaTypeLength) &&
+  isBoundedUtf8String(value.content, 0, AI_CONTRACT_LIMITS.changeFileBytes);
+
+const isRenameOperationV1 = (value: unknown): value is RenameOperationV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["op", "from", "to", "expectedSha256"]) &&
+  value.op === "rename" &&
+  isContractRelativePath(value.from) &&
+  isContractRelativePath(value.to) &&
+  value.from !== value.to &&
+  isSha256(value.expectedSha256);
+
+const isDeleteOperationV1 = (value: unknown): value is DeleteOperationV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["op", "path", "expectedSha256"]) &&
+  value.op === "delete" &&
+  isContractRelativePath(value.path) &&
+  isSha256(value.expectedSha256);
+
+export const isChangeOperationV1 = (
+  value: unknown,
+): value is ChangeOperationV1 =>
+  isCreateTextOperationV1(value) ||
+  isReplaceTextOperationV1(value) ||
+  isRenameOperationV1(value) ||
+  isDeleteOperationV1(value);
+
+export const isChangeSetV1 = (value: unknown): value is ChangeSetV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "schema",
+      "version",
+      "baseRevisionId",
+      "summary",
+      "operations",
+    ]) ||
+    value.schema !== CHANGE_SET_SCHEMA ||
+    value.version !== CHANGE_SET_VERSION ||
+    !isBoundedId(value.baseRevisionId) ||
+    !isBoundedUtf8String(
+      value.summary,
+      1,
+      AI_CONTRACT_LIMITS.changeSummaryLength,
+    ) ||
+    !isBoundedExactArray(
+      value.operations,
+      1,
+      AI_CONTRACT_LIMITS.changeOperations,
+      isChangeOperationV1,
+    )
+  ) {
+    return false;
+  }
+  const totalContentBytes = value.operations.reduce((total, operation) => {
+    if (operation.op !== "create_text" && operation.op !== "replace_text") {
+      return total;
+    }
+    return total + new TextEncoder().encode(operation.content).byteLength;
+  }, 0);
+  return totalContentBytes <= AI_CONTRACT_LIMITS.changeTotalBytes;
+};
+
+export const isAiProviderUsageV1 = (
+  value: unknown,
+): value is AiProviderUsageV1 => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [], ["inputTokens", "outputTokens", "totalTokens"])
+  ) {
+    return false;
+  }
+  const present = ["inputTokens", "outputTokens", "totalTokens"].filter((key) =>
+    Object.hasOwn(value, key),
+  );
+  return present.every((key) => isNonNegativeInteger(value[key]));
+};
+
+export const isAiProviderAttributionV1 = (
+  value: unknown,
+): value is AiProviderAttributionV1 =>
+  isRecord(value) &&
+  hasExactKeys(
+    value,
+    [
+      "attemptId",
+      "providerRequestId",
+      "providerId",
+      "adapterVersion",
+      "requestedModel",
+      "reportedModel",
+      "external",
+    ],
+    ["usage"],
+  ) &&
+  isBoundedId(value.attemptId) &&
+  isBoundedString(
+    value.providerRequestId,
+    1,
+    AI_CONTRACT_LIMITS.providerRequestIdLength,
+  ) &&
+  isBoundedString(value.providerId, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
+  isBoundedString(
+    value.adapterVersion,
+    1,
+    AI_CONTRACT_LIMITS.adapterVersionLength,
+  ) &&
+  isBoundedString(value.requestedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  isBoundedString(value.reportedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  typeof value.external === "boolean" &&
+  (!Object.hasOwn(value, "usage") || isAiProviderUsageV1(value.usage));
+
+const isAiAttemptStatus = (value: unknown): value is AiAttemptStatus =>
+  value === "queued" ||
+  value === "running" ||
+  value === "cancelled" ||
+  value === "timed_out" ||
+  value === "provider_failed" ||
+  value === "validation_failed" ||
+  value === "proposal_ready" ||
+  value === "completed";
+
+export const isAiAttemptStatusV1 = (
+  value: unknown,
+): value is AiAttemptStatusV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "attemptId", "status"]) &&
+  hasVersion(value) &&
+  isBoundedId(value.attemptId) &&
+  isAiAttemptStatus(value.status);
+
+export const isAiProviderStreamEventV1 = (
+  value: unknown,
+): value is AiProviderStreamEventV1 => {
+  if (
+    !isRecord(value) ||
+    !hasVersion(value) ||
+    !isBoundedId(value.attemptId) ||
+    !isNonNegativeInteger(value.sequence)
+  ) {
+    return false;
+  }
+  if (value.event === "text_delta") {
+    return (
+      hasExactKeys(value, [
+        "schemaVersion",
+        "attemptId",
+        "sequence",
+        "event",
+        "text",
+      ]) && isBoundedString(value.text, 1, AI_CONTRACT_LIMITS.streamDeltaLength)
+    );
+  }
+  if (value.event === "usage") {
+    return (
+      hasExactKeys(value, [
+        "schemaVersion",
+        "attemptId",
+        "sequence",
+        "event",
+        "usage",
+      ]) && isAiProviderUsageV1(value.usage)
+    );
+  }
+  return (
+    (value.event === "started" || value.event === "completed") &&
+    hasExactKeys(value, ["schemaVersion", "attemptId", "sequence", "event"])
+  );
+};
+
+const isAiProviderOutputV1 = (value: unknown): value is AiProviderOutputV1 =>
+  isRecord(value) &&
+  ((hasExactKeys(value, ["kind", "text"]) &&
+    value.kind === "consultation" &&
+    isBoundedUtf8String(value.text, 0, AI_CONTRACT_LIMITS.changeTotalBytes)) ||
+    (hasExactKeys(value, ["kind", "changeSet"]) &&
+      value.kind === "change_set" &&
+      isChangeSetV1(value.changeSet)));
+
+export const isAiProviderResultV1 = (
+  value: unknown,
+): value is AiProviderResultV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "schemaVersion",
+    "attemptId",
+    "attribution",
+    "output",
+  ]) &&
+  hasVersion(value) &&
+  isBoundedId(value.attemptId) &&
+  isAiProviderAttributionV1(value.attribution) &&
+  value.attribution.attemptId === value.attemptId &&
+  isAiProviderOutputV1(value.output);
+
+const isAiProviderErrorCodeV1 = (
+  value: unknown,
+): value is AiProviderErrorCodeV1 =>
+  value === "not_configured" ||
+  value === "cancelled" ||
+  value === "timeout" ||
+  value === "rate_limited" ||
+  value === "unavailable" ||
+  value === "invalid_response" ||
+  value === "internal";
+
+export const isAiProviderErrorV1 = (
+  value: unknown,
+): value is AiProviderErrorV1 =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "schemaVersion",
+    "attemptId",
+    "code",
+    "message",
+    "retryable",
+  ]) &&
+  hasVersion(value) &&
+  isBoundedId(value.attemptId) &&
+  isAiProviderErrorCodeV1(value.code) &&
+  isBoundedString(value.message, 1, 2_048) &&
+  typeof value.retryable === "boolean";
+
 const isProposalChange = (value: unknown): value is ProposalChange =>
   isRecord(value) &&
-  hasExactKeys(value, ["path", "kind"]) &&
-  isNonEmptyString(value.path) &&
-  (value.kind === "created" ||
-    value.kind === "modified" ||
-    value.kind === "renamed" ||
-    value.kind === "deleted");
+  hasExactKeys(value, ["path", "kind"], ["fromPath"]) &&
+  isContractRelativePath(value.path) &&
+  ((value.kind === "renamed" && isContractRelativePath(value.fromPath)) ||
+    ((value.kind === "created" ||
+      value.kind === "modified" ||
+      value.kind === "deleted") &&
+      !Object.hasOwn(value, "fromPath")));
 
 const isValidationCheck = (value: unknown): value is ValidationCheck =>
   isRecord(value) &&
-  hasExactKeys(value, ["id", "label", "status", "message"]) &&
+  hasExactKeys(value, [
+    "id",
+    "label",
+    "status",
+    "message",
+    "blocking",
+    "destinations",
+  ]) &&
   isNonEmptyString(value.id) &&
   isNonEmptyString(value.label) &&
   (value.status === "passed" ||
     value.status === "warning" ||
     value.status === "failed") &&
-  isString(value.message);
+  isString(value.message) &&
+  typeof value.blocking === "boolean" &&
+  isBoundedExactArray(
+    value.destinations,
+    0,
+    AI_CONTRACT_LIMITS.validationDestinations,
+    (destination): destination is string =>
+      isBoundedString(destination, 1, 2_048),
+  ) &&
+  new Set(value.destinations).size === value.destinations.length;
 
 const isProposalValidation = (value: unknown): value is ProposalValidation =>
   isRecord(value) &&
@@ -1489,6 +2152,10 @@ export const isProposalResponse = (
       "summary",
       "artifactManifestSha256",
       "reviewContextSha256",
+      "providerContextSha256",
+      "changeSetSha256",
+      "changeSet",
+      "attribution",
       "sourceAttribution",
       "executionVerified",
       "previewUrl",
@@ -1508,6 +2175,11 @@ export const isProposalResponse = (
     isString(proposal.summary) &&
     isSha256(proposal.artifactManifestSha256) &&
     isSha256(proposal.reviewContextSha256) &&
+    isSha256(proposal.providerContextSha256) &&
+    isSha256(proposal.changeSetSha256) &&
+    isChangeSetV1(proposal.changeSet) &&
+    proposal.changeSet.baseRevisionId === proposal.baseRevisionId &&
+    isAiProviderAttributionV1(proposal.attribution) &&
     proposal.sourceAttribution === "caller_supplied_ai_attributed" &&
     proposal.executionVerified === false &&
     isScopedPreviewUrl(proposal.previewUrl) &&

@@ -808,6 +808,43 @@ kbd {
   font-size: 0.78rem;
   font-weight: 750;
 }
+.provider-fields {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem 0.7rem;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+.provider-fields label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.provider-fields select {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  background: #0c0f12;
+  font: inherit;
+}
+.provider-fields select:disabled {
+  color: var(--quiet);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.provider-disclosure {
+  margin: 0 0 0.8rem;
+  padding: 0.6rem 0.7rem;
+  border-left: 3px solid var(--amber);
+  color: #ffe9bd;
+  background: rgba(255, 196, 95, 0.08);
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
 .prompt-composer textarea,
 .rationale-field input {
   width: 100%;
@@ -913,6 +950,13 @@ kbd {
   color: var(--muted);
   font-size: 0.59rem;
 }
+.attribution-card .provider-usage {
+  grid-column: 1 / -1;
+  padding-top: 0.45rem;
+  border-top: 1px solid rgba(255, 196, 95, 0.25);
+  color: #ffe9bd;
+  font-variant-numeric: tabular-nums;
+}
 .unverified {
   color: var(--amber);
 }
@@ -956,6 +1000,9 @@ kbd {
 .change-deleted {
   color: var(--danger);
 }
+.change-renamed {
+  color: var(--cyan);
+}
 .validation-summary {
   display: inline-block;
   margin: 0 0 0.7rem;
@@ -978,6 +1025,23 @@ kbd {
   gap: 0.15rem;
   padding: 0.5rem 0;
   font-size: 0.7rem;
+}
+.validation-list > .validation-blocking {
+  margin: 0.35rem 0;
+  padding: 0.65rem;
+  border: 1px solid rgba(255, 127, 136, 0.5);
+  border-radius: 7px;
+  background: rgba(255, 127, 136, 0.09);
+}
+.validation-blocking > strong {
+  color: #ffdfe1;
+}
+.validation-blocking ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+.validation-blocking code {
+  overflow-wrap: anywhere;
 }
 .validation-list span,
 .validation-caveat {
@@ -1012,6 +1076,31 @@ kbd {
   max-height: 310px;
   padding: 0.85rem;
 }
+.change-set-details {
+  margin-top: 0.75rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(98, 223, 221, 0.04);
+  font-size: 0.68rem;
+}
+.change-set-details summary {
+  color: var(--cyan);
+  cursor: pointer;
+  font-weight: 750;
+}
+.change-set-details p {
+  overflow-wrap: anywhere;
+}
+.change-set-details ol {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0;
+  padding-left: 1.4rem;
+}
+.change-set-details li {
+  overflow-wrap: anywhere;
+}
 .decision-bar {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(240px, 0.7fr) auto;
@@ -1027,6 +1116,16 @@ kbd {
   margin: 0.25rem 0 0;
   color: var(--muted);
   font-size: 0.7rem;
+}
+.decision-bar .blocking-decision-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(255, 127, 136, 0.5);
+  border-radius: 7px;
+  color: #ffdfe1;
+  background: rgba(255, 127, 136, 0.09);
+  line-height: 1.55;
 }
 .rationale-field span {
   display: block;
@@ -1062,6 +1161,69 @@ kbd {
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.6;
+}
+.context-provider-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  margin: 1rem 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.context-provider-summary div {
+  min-width: 0;
+  padding: 0.7rem;
+  border-right: 1px solid var(--line);
+}
+.context-provider-summary div:last-child {
+  border-right: 0;
+}
+.context-provider-summary dt {
+  color: var(--quiet);
+  font-size: 0.66rem;
+}
+.context-provider-summary dd {
+  overflow-wrap: anywhere;
+  margin: 0.3rem 0 0;
+  font-size: 0.74rem;
+}
+.context-manifest {
+  margin: 1rem 0;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(98, 223, 221, 0.04);
+}
+.context-manifest h3 {
+  margin: 0 0 0.6rem;
+  color: var(--cyan);
+  font-size: 0.78rem;
+}
+.context-manifest ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.context-manifest li {
+  display: grid;
+  gap: 0.15rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--line);
+}
+.context-manifest li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.context-manifest code {
+  overflow-wrap: anywhere;
+}
+.context-manifest span,
+.context-manifest p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
 }
 .import-review-dialog {
   width: min(1040px, 100%);

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod ai_provider;
+mod change_set;
 mod storage;
 
 use axum::body::Body;
@@ -37,6 +39,14 @@ use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
+use ai_provider::{
+    OpenAiConfig, ProviderAttribution, ProviderBinding, ProviderDescriptor, ProviderError,
+    ProviderRequest, ProviderSelectionError, bind_provider, execute_provider, provider_descriptors,
+};
+use change_set::{
+    AppliedChangeKind, AppliedChangeSet, ChangeSetError, ChangeSetV1, StaticCheck,
+    StaticCheckStatus, count_matching_start_tags, parse_and_apply_change_set,
+};
 use storage::{
     ImportExcluded, ImportIncluded, MAX_DEPTH as STORAGE_MAX_DEPTH,
     MAX_FILE_BYTES as STORAGE_MAX_FILE_BYTES, MAX_FILES as STORAGE_MAX_FILES,
@@ -67,6 +77,9 @@ const MAX_CONTEXTS_PER_PROJECT: usize = 32;
 const MAX_PENDING_APPROVALS: usize = 32;
 const MAX_EXPORTS: usize = 16;
 const MAX_RETAINED_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONTEXT_FILES: usize = 10;
+const MAX_CONTEXT_FILE_BYTES: usize = 512 * 1024;
+const MAX_CONTEXT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 
 const BLANK_INDEX: &str = include_str!("../../../templates/blank/index.html");
 const BLANK_STYLES: &str = include_str!("../../../templates/blank/styles.css");
@@ -80,6 +93,7 @@ pub struct ServerConfig {
     pub state_root: PathBuf,
     pub web_dist: PathBuf,
     pub import_root: Option<PathBuf>,
+    openai: Option<OpenAiConfig>,
 }
 
 impl ServerConfig {
@@ -97,12 +111,21 @@ impl ServerConfig {
             state_root: state_root.into(),
             web_dist: web_dist.into(),
             import_root: None,
+            openai: None,
         }
     }
 
     pub fn with_import_root(mut self, import_root: Option<PathBuf>) -> Self {
         self.import_root = import_root;
         self
+    }
+
+    pub fn with_openai(mut self, api_key: String, model: String) -> Result<Self, std::io::Error> {
+        self.openai =
+            Some(OpenAiConfig::new(api_key, model).map_err(|message| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+            })?);
+        Ok(self)
     }
 }
 
@@ -213,6 +236,7 @@ struct Store {
     approvals: HashMap<[u8; 32], ApprovalGrant>,
     exports: HashMap<String, ExportArtifact>,
     import_previews: HashMap<String, ImportPreviewRecord>,
+    active_attempts: HashMap<String, String>,
 }
 
 struct ImportPreviewRecord {
@@ -439,12 +463,52 @@ struct TargetResolution {
 
 struct ContextRecord {
     id: String,
+    attempt_id: String,
     revision_id: String,
     target_id: String,
     target_resolution_id: String,
     instruction: String,
+    provider: ProviderBinding,
+    manifest: ContextManifestDto,
     canonical_json: String,
     sha256: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextManifestEntryDto {
+    path: String,
+    media_type: String,
+    purpose: &'static str,
+    source_byte_length: usize,
+    included_byte_length: usize,
+    start_line: usize,
+    end_line: usize,
+    sha256: String,
+    estimated_tokens: usize,
+    redacted: bool,
+    truncated: bool,
+    redactions: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextManifestDto {
+    entries: Vec<ContextManifestEntryDto>,
+    total_included_bytes: usize,
+    estimated_tokens: usize,
+    screenshot_included: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UntrustedSiteContent {
+    path: String,
+    media_type: String,
+    source_sha256: String,
+    included_sha256: String,
+    content: String,
+    quoted_untrusted_data: bool,
 }
 
 struct ProposalRecord {
@@ -453,9 +517,14 @@ struct ProposalRecord {
     base_revision_id: String,
     artifact_manifest_sha256: String,
     review_context_sha256: String,
-    target_element_id: String,
-    summary: &'static str,
-    unified_diff: &'static str,
+    provider_context_sha256: String,
+    change_set_sha256: String,
+    change_set: ChangeSetV1,
+    attribution: ProviderAttribution,
+    summary: String,
+    changes: Vec<ProposalChangeDto>,
+    unified_diff: String,
+    validation: ProposalValidationDto,
     proposed_files: BTreeMap<String, Vec<u8>>,
     pending: PendingArtifactProposal,
     status: ProposalStatus,
@@ -540,6 +609,7 @@ struct CapabilitiesDto {
     dispositions: [&'static str; 3],
     single_proposal_per_project: bool,
     import_available: bool,
+    ai_providers: Vec<ProviderDescriptor>,
     limits: StorageLimitsDto,
 }
 
@@ -640,9 +710,12 @@ struct TargetPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateContextRequest {
     schema_version: String,
+    attempt_id: String,
     revision_id: String,
     target_id: String,
     resolution_id: String,
+    provider_id: String,
+    requested_model: String,
     instruction: String,
 }
 
@@ -650,10 +723,15 @@ struct CreateContextRequest {
 #[serde(rename_all = "camelCase")]
 struct ContextDto {
     id: String,
+    attempt_id: String,
     revision_id: String,
     target_id: String,
     target_resolution_id: String,
     instruction: String,
+    provider_id: String,
+    requested_model: String,
+    provider: ProviderBinding,
+    manifest: ContextManifestDto,
     canonical_json: String,
     sha256: String,
 }
@@ -678,36 +756,45 @@ struct ProposalDto {
     review_id: String,
     base_revision_id: String,
     status: &'static str,
-    summary: &'static str,
+    summary: String,
     artifact_manifest_sha256: String,
     review_context_sha256: String,
+    provider_context_sha256: String,
+    change_set_sha256: String,
+    change_set: ChangeSetV1,
+    attribution: ProviderAttribution,
     source_attribution: &'static str,
     execution_verified: bool,
     preview_url: String,
     changes: Vec<ProposalChangeDto>,
-    unified_diff: &'static str,
+    unified_diff: String,
     validation: ProposalValidationDto,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProposalChangeDto {
-    path: &'static str,
+    path: String,
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_path: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ProposalValidationDto {
     status: &'static str,
     checks: Vec<ProposalValidationCheckDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProposalValidationCheckDto {
-    id: &'static str,
-    label: &'static str,
+    id: String,
+    label: String,
     status: &'static str,
-    message: &'static str,
+    message: String,
+    blocking: bool,
+    destinations: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1133,6 +1220,57 @@ fn storage_api_error(error: StorageError) -> ApiError {
     }
 }
 
+fn provider_selection_api_error(error: ProviderSelectionError) -> ApiError {
+    match error {
+        ProviderSelectionError::UnsupportedProvider => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "provider_unsupported",
+            "The selected AI provider is not supported.",
+            false,
+        ),
+        ProviderSelectionError::UnsupportedModel => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "provider_model_unsupported",
+            "The selected model is not available for this provider.",
+            false,
+        ),
+        ProviderSelectionError::NotConfigured => ApiError::new(
+            StatusCode::CONFLICT,
+            "provider_not_configured",
+            "The selected external AI provider is not configured on this local server.",
+            false,
+        ),
+    }
+}
+
+fn provider_api_error(error: ProviderError) -> ApiError {
+    let status = match error.code() {
+        "provider_context_invalid" => StatusCode::CONFLICT,
+        "fake_ai_input_unsupported" => StatusCode::UNPROCESSABLE_ENTITY,
+        "provider_timeout" => StatusCode::GATEWAY_TIMEOUT,
+        "provider_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    ApiError::new(status, error.code(), error.message(), error.retryable)
+}
+
+fn change_set_api_error(error: ChangeSetError) -> ApiError {
+    let status = match &error {
+        ChangeSetError::StaleBase
+        | ChangeSetError::PreconditionFailed
+        | ChangeSetError::OperationConflict
+        | ChangeSetError::RenameCycle => StatusCode::CONFLICT,
+        ChangeSetError::LimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    ApiError::new(
+        status,
+        error.code(),
+        "The AI ChangeSet failed bounded validation. Accepted files were not changed.",
+        false,
+    )
+}
+
 pub fn editor_router(state: StudioState) -> Router {
     let web_dist = state.0.config.web_dist.clone();
     let editor_csp = HeaderValue::from_str(&format!(
@@ -1262,6 +1400,7 @@ async fn bootstrap(
             dispositions: ["adopted_unchanged", "rejected", "deferred"],
             single_proposal_per_project: true,
             import_available: state.0.config.import_root.is_some(),
+            ai_providers: provider_descriptors(state.0.config.openai.as_ref()),
             limits: StorageLimitsDto {
                 max_files: STORAGE_MAX_FILES,
                 max_total_bytes: STORAGE_MAX_TOTAL_BYTES,
@@ -1570,7 +1709,14 @@ async fn create_context(
     authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
+    validate_intent(&request.attempt_id)?;
     validate_human_text(&request.instruction, MAX_INSTRUCTION_BYTES)?;
+    let provider = bind_provider(
+        state.0.config.openai.as_ref(),
+        &request.provider_id,
+        &request.requested_model,
+    )
+    .map_err(provider_selection_api_error)?;
     let mut store = state.store()?;
     let project = store
         .projects
@@ -1609,31 +1755,40 @@ async fn create_context(
         return Err(ApiError::conflict("target_resolution_mismatch"));
     }
     let context_id = opaque_id("ctx");
-    let canonical_json = canonical_context_json(
-        &project.id,
-        &request.revision_id,
+    let assembled = assemble_provider_context(
+        project,
         &context_id,
+        &request.attempt_id,
         target,
         &resolution,
         &request.instruction,
+        &provider,
     )?;
-    let sha256 =
-        review_context_sha256(canonical_json.as_bytes()).map_err(|_| ApiError::internal())?;
+    let sha256 = review_context_sha256(assembled.canonical_json.as_bytes())
+        .map_err(|_| ApiError::internal())?;
     let context = ContextRecord {
         id: context_id,
+        attempt_id: request.attempt_id,
         revision_id: request.revision_id,
         target_id: request.target_id,
         target_resolution_id: resolution_id,
-        instruction: request.instruction,
-        canonical_json,
+        instruction: assembled.instruction,
+        provider,
+        manifest: assembled.manifest,
+        canonical_json: assembled.canonical_json,
         sha256,
     };
     let dto = ContextDto {
         id: context.id.clone(),
+        attempt_id: context.attempt_id.clone(),
         revision_id: context.revision_id.clone(),
         target_id: context.target_id.clone(),
         target_resolution_id: context.target_resolution_id.clone(),
         instruction: context.instruction.clone(),
+        provider_id: context.provider.provider_id.clone(),
+        requested_model: context.provider.requested_model.clone(),
+        provider: context.provider.clone(),
+        manifest: context.manifest.clone(),
         canonical_json: context.canonical_json.clone(),
         sha256: context.sha256.clone(),
     };
@@ -1642,6 +1797,67 @@ async fn create_context(
         StatusCode::CREATED,
         Json(Versioned::new(ContextPayload { context: dto })),
     ))
+}
+
+fn claim_ai_attempt(
+    active_attempts: &mut HashMap<String, String>,
+    project_id: &str,
+    attempt_id: &str,
+) -> Result<(), ApiError> {
+    match active_attempts.entry(project_id.to_owned()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(attempt_id.to_owned());
+            Ok(())
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {
+            Err(ApiError::conflict("ai_attempt_in_progress"))
+        }
+    }
+}
+
+/// Clears an in-flight marker even when the request future is cancelled (for
+/// example, because the browser disconnects during a provider call). Keeping
+/// this synchronous makes `Drop` safe with the process-local `std::sync`
+/// store. The compare-before-remove rule prevents an old guard from releasing
+/// a later attempt.
+struct ActiveAttemptGuard {
+    state: StudioState,
+    project_id: String,
+    attempt_id: String,
+    armed: bool,
+}
+
+impl ActiveAttemptGuard {
+    fn new(state: StudioState, project_id: &str, attempt_id: &str) -> Self {
+        Self {
+            state,
+            project_id: project_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            armed: true,
+        }
+    }
+
+    fn release(&mut self, store: &mut Store) -> Result<(), ApiError> {
+        if store.active_attempts.get(&self.project_id) != Some(&self.attempt_id) {
+            return Err(ApiError::conflict("ai_attempt_not_active"));
+        }
+        store.active_attempts.remove(&self.project_id);
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ActiveAttemptGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut store) = self.state.0.store.lock()
+            && store.active_attempts.get(&self.project_id) == Some(&self.attempt_id)
+        {
+            store.active_attempts.remove(&self.project_id);
+        }
+    }
 }
 
 async fn create_proposal(
@@ -1653,7 +1869,68 @@ async fn create_proposal(
     let session_id = authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
+    let provider_request = {
+        let mut store = state.store()?;
+        let project = store
+            .projects
+            .get(&project_id)
+            .ok_or_else(ApiError::not_found)?;
+        state
+            .0
+            .storage
+            .verify_project(
+                &project.id,
+                &project.revision_id,
+                &project.accepted_manifest_sha256,
+            )
+            .map_err(storage_api_error)?;
+        if project.proposal.is_some() {
+            return Err(ApiError::conflict("artifact_single_proposal_limit"));
+        }
+        let context = project
+            .contexts
+            .get(&request.context_id)
+            .ok_or_else(ApiError::not_found)?;
+        if context.sha256 != request.context_sha256
+            || raw_sha256(context.canonical_json.as_bytes()) != context.sha256
+        {
+            return Err(ApiError::conflict("context_digest_mismatch"));
+        }
+        if context.revision_id != project.revision_id {
+            return Err(ApiError::conflict("stale_base"));
+        }
+        if context.manifest.entries.iter().any(|entry| entry.redacted) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "provider_context_redacted_source_unsupported",
+                "Generation is blocked because ChangeSet v1 cannot safely round-trip redacted site bytes.",
+                false,
+            ));
+        }
+        let provider_request = ProviderRequest {
+            attempt_id: context.attempt_id.clone(),
+            base_revision_id: context.revision_id.clone(),
+            provider_context_sha256: context.sha256.clone(),
+            canonical_context_json: context.canonical_json.clone(),
+            binding: context.provider.clone(),
+        };
+        claim_ai_attempt(
+            &mut store.active_attempts,
+            &project_id,
+            &provider_request.attempt_id,
+        )?;
+        provider_request
+    };
+
+    let mut attempt_guard =
+        ActiveAttemptGuard::new(state.clone(), &project_id, &provider_request.attempt_id);
+
+    let provider_result = execute_provider(state.0.config.openai.as_ref(), &provider_request)
+        .await
+        .map_err(provider_api_error)?;
+
     let mut store = state.store()?;
+    attempt_guard.release(&mut store)?;
     let project = store
         .projects
         .get_mut(&project_id)
@@ -1674,27 +1951,50 @@ async fn create_proposal(
         .contexts
         .get(&request.context_id)
         .ok_or_else(ApiError::not_found)?;
-    if context.sha256 != request.context_sha256 {
-        return Err(ApiError::conflict("context_digest_mismatch"));
+    if context.sha256 != request.context_sha256
+        || context.sha256 != provider_request.provider_context_sha256
+        || context.revision_id != project.revision_id
+    {
+        return Err(ApiError::conflict("stale_base"));
     }
-    if context.revision_id != project.revision_id {
-        return Err(ApiError::conflict("revision_mismatch"));
-    }
-
-    let target_element_id = project
+    validate_provider_attribution(context, &provider_result.attribution)?;
+    let mut applied = parse_and_apply_change_set(
+        &provider_result.raw_change_set_json,
+        &project.revision_id,
+        &project.accepted_files,
+    )
+    .map_err(change_set_api_error)?;
+    let change_set_json = applied.change_set.to_json().map_err(change_set_api_error)?;
+    let change_set_sha256 = raw_sha256(change_set_json.as_bytes());
+    let target = project
         .targets
         .get(&context.target_id)
-        .and_then(target_mutation_element_id)
-        .ok_or_else(ApiError::invalid)?;
-    let mutation = fake_ai_mutation(&target_element_id).ok_or_else(ApiError::invalid)?;
-    let proposed_files = proposed_files(&project.accepted_files, mutation)?;
+        .ok_or_else(ApiError::not_found)?;
+    applied.checks.push(proposal_target_reresolution_check(
+        target,
+        &applied.files,
+        &project.revision_id,
+    )?);
+    let synapse_review_context = synapse_review_context_json(
+        context,
+        target,
+        &change_set_sha256,
+        &provider_result.attribution,
+    )?;
+    let synapse_review_context_sha256 = review_context_sha256(synapse_review_context.as_bytes())
+        .map_err(|_| ApiError::internal())?;
     let accepted_manifest = manifest(&project.accepted_files)?;
-    let proposed_manifest = manifest(&proposed_files)?;
+    let proposed_manifest = manifest(&applied.files)?;
     let proposal_id = opaque_id("pro");
     let repository_path = state
         .0
         .storage
         .proposal_repository(&project.id, &proposal_id)
+        .map_err(storage_api_error)?;
+    state
+        .0
+        .storage
+        .persist_proposal_workspace(&project.id, &proposal_id, &applied.files)
         .map_err(storage_api_error)?;
     let recorded_at = now_rfc3339()?;
     let grant_expires_at =
@@ -1703,7 +2003,11 @@ async fn create_proposal(
         repository_path,
         project.id.trim_start_matches("prj_"),
         "Local creator",
-        "Deterministic fake AI",
+        if provider_result.attribution.external {
+            "External AI provider"
+        } else {
+            "Deterministic fake AI"
+        },
         recorded_at,
         grant_expires_at,
     );
@@ -1711,7 +2015,7 @@ async fn create_proposal(
         &trusted,
         &accepted_manifest,
         &proposed_manifest,
-        context.canonical_json.as_bytes(),
+        synapse_review_context.as_bytes(),
         ArtifactSourceAttribution::CallerSuppliedAiAttributed,
     )
     .map_err(|_| {
@@ -1723,23 +2027,30 @@ async fn create_proposal(
         )
     })?;
     let receipt = pending.receipt();
-    if receipt.review_context_sha256() != context.sha256
+    if receipt.review_context_sha256() != synapse_review_context_sha256
         || receipt.artifact_manifest_sha256() != artifact_manifest_sha256(&proposed_manifest)
         || receipt.execution_verified()
     {
         return Err(ApiError::internal());
     }
     let review_id = opaque_id("revw");
+    let (changes, validation) = proposal_review_details(&applied);
+    let summary = applied.change_set.summary.clone();
     let proposal = ProposalRecord {
         id: proposal_id.clone(),
         review_id: review_id.clone(),
         base_revision_id: project.revision_id.clone(),
         artifact_manifest_sha256: receipt.artifact_manifest_sha256().to_owned(),
         review_context_sha256: receipt.review_context_sha256().to_owned(),
-        target_element_id,
-        summary: mutation.summary,
-        unified_diff: mutation.unified_diff,
-        proposed_files,
+        provider_context_sha256: context.sha256.clone(),
+        change_set_sha256,
+        change_set: applied.change_set,
+        attribution: provider_result.attribution,
+        summary,
+        changes,
+        unified_diff: applied.unified_diff,
+        validation,
+        proposed_files: applied.files,
         pending,
         status: ProposalStatus::PendingReview,
     };
@@ -1803,6 +2114,15 @@ async fn create_approval(
         || project.revision_id != request.expected_revision_id
     {
         return Err(ApiError::conflict("approval_binding_mismatch"));
+    }
+    if request.disposition == DispositionDto::AdoptedUnchanged
+        && proposal
+            .validation
+            .checks
+            .iter()
+            .any(|check| check.blocking)
+    {
+        return Err(ApiError::conflict("proposal_blocked_by_validation"));
     }
     let binding = ApprovalBinding {
         session_id,
@@ -2356,7 +2676,12 @@ fn validate_intent(value: &str) -> Result<(), ApiError> {
 }
 
 fn selectable_text(element_id: &str) -> Option<&'static str> {
-    fake_ai_mutation(element_id).map(|mutation| mutation.accepted_text)
+    match element_id {
+        "hero-heading" | "hero-title" | "hero" | "page" => Some("まだ、白紙です。"),
+        "hero-copy" | "next" => Some("伝えたいことを選び、AIとの対話から最初の一歩をつくります。"),
+        "hero-cta" => Some("構想を始める"),
+        _ => None,
+    }
 }
 
 fn validate_target_shape(target: &TargetRecord) -> Result<(), ApiError> {
@@ -2719,48 +3044,43 @@ fn count_anchor_occurrences(html: &str, anchor: &ElementAnchor) -> (usize, bool)
     let Some(identifier) = anchor.unique_element_id.as_deref() else {
         return (0, false);
     };
-    let patterns = [
-        format!("data-lp-id=\"{identifier}\""),
-        format!("data-lp-id='{identifier}'"),
-        format!("data-studio-block=\"{identifier}\""),
-        format!("data-studio-block='{identifier}'"),
-        format!("id=\"{identifier}\""),
-        format!("id='{identifier}'"),
-    ];
-    for pair in patterns.chunks(2) {
-        let mut offsets = pair
-            .iter()
-            .flat_map(|pattern| html.match_indices(pattern).map(|(offset, _)| offset))
-            .collect::<Vec<_>>();
-        offsets.sort_unstable();
-        offsets.dedup();
-        if !offsets.is_empty() {
-            let tag_match = offsets.iter().any(|offset| {
-                let mut start = offset.saturating_sub(192);
-                while start < *offset && !html.is_char_boundary(start) {
-                    start += 1;
-                }
-                html[start..*offset]
-                    .rfind('<')
-                    .and_then(|position| {
-                        html[start + position + 1..*offset]
-                            .split_whitespace()
-                            .next()
-                    })
-                    .is_some_and(|tag| tag.eq_ignore_ascii_case(&anchor.tag_name))
-            });
-            return (offsets.len(), tag_match);
-        }
-    }
-    (0, false)
+    let (identifier_count, matching_tag_count) =
+        count_matching_start_tags(html, &anchor.tag_name, identifier);
+    (identifier_count, matching_tag_count == 1)
 }
 
 fn resolve_target(project: &Project, target: &TargetRecord) -> Result<TargetResolution, ApiError> {
     let files = target_source_files(project, target)?;
-    let html = files
+    if files
         .get(&target.page_path)
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .ok_or_else(|| ApiError::conflict("target_page_detached"))?;
+        .is_none()
+    {
+        return Err(ApiError::conflict("target_page_detached"));
+    }
+    resolve_target_against_files(target, files, &project.revision_id)
+}
+
+fn resolve_target_against_files(
+    target: &TargetRecord,
+    files: &BTreeMap<String, Vec<u8>>,
+    resolved_revision_id: &str,
+) -> Result<TargetResolution, ApiError> {
+    let Some(html) = files
+        .get(&target.page_path)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    else {
+        return Ok(TargetResolution {
+            schema_version: TARGET_SCHEMA_VERSION,
+            resolver_version: TARGET_RESOLVER_VERSION,
+            target_id: target.target_id.clone(),
+            capture_revision_id: target.capture_revision_id.clone(),
+            resolved_revision_id: resolved_revision_id.to_owned(),
+            status: TargetResolutionStatus::Detached,
+            selected_candidate_id: None,
+            candidates: Vec::new(),
+        });
+    };
     let (status, candidates) = if matches!(target.kind, TargetKind::Page) {
         (
             TargetResolutionStatus::Resolved,
@@ -2839,11 +3159,38 @@ fn resolve_target(project: &Project, target: &TargetRecord) -> Result<TargetReso
         resolver_version: TARGET_RESOLVER_VERSION,
         target_id: target.target_id.clone(),
         capture_revision_id: target.capture_revision_id.clone(),
-        resolved_revision_id: project.revision_id.clone(),
+        resolved_revision_id: resolved_revision_id.to_owned(),
         status,
         selected_candidate_id,
         candidates,
     })
+}
+
+fn proposal_target_reresolution_check(
+    target: &TargetRecord,
+    proposed_files: &BTreeMap<String, Vec<u8>>,
+    resolved_revision_id: &str,
+) -> Result<StaticCheck, ApiError> {
+    let resolution = resolve_target_against_files(target, proposed_files, resolved_revision_id)?;
+    match resolution.status {
+        TargetResolutionStatus::Resolved => Ok(StaticCheck {
+            id: "target-reresolution".into(),
+            status: StaticCheckStatus::Passed,
+            message: "The Target resolves uniquely in the fully applied Proposed files.".into(),
+        }),
+        TargetResolutionStatus::Ambiguous => Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "proposal_target_ambiguous",
+            "The AI ChangeSet made the selected Target ambiguous. No Proposal was recorded.",
+            false,
+        )),
+        TargetResolutionStatus::Detached => Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "proposal_target_detached",
+            "The AI ChangeSet detached the selected Target. No Proposal was recorded.",
+            false,
+        )),
+    }
 }
 
 fn target_resolution_id(resolution: &TargetResolution) -> Result<String, ApiError> {
@@ -2852,57 +3199,401 @@ fn target_resolution_id(resolution: &TargetResolution) -> Result<String, ApiErro
     Ok(format!("res_{}", &digest[..32]))
 }
 
-fn target_mutation_element_id(target: &TargetRecord) -> Option<String> {
-    let identifier = target_anchor(target).and_then(|anchor| anchor.unique_element_id.as_deref());
-    match identifier {
-        Some("hero-heading" | "hero-title") => Some("hero-heading".into()),
-        Some("hero-copy") => Some("hero-copy".into()),
-        Some("hero-cta") => Some("hero-cta".into()),
-        Some("hero") => Some("hero-heading".into()),
-        Some("next") => Some("hero-copy".into()),
-        _ if matches!(target.kind, TargetKind::Page) => Some("hero-heading".into()),
-        _ => None,
-    }
+struct AssembledContext {
+    instruction: String,
+    manifest: ContextManifestDto,
+    canonical_json: String,
 }
 
-fn canonical_context_json(
-    project_id: &str,
-    revision_id: &str,
+fn assemble_provider_context(
+    project: &Project,
     context_id: &str,
+    attempt_id: &str,
     target: &TargetRecord,
     resolution: &TargetResolution,
     instruction: &str,
-) -> Result<String, ApiError> {
+    provider: &ProviderBinding,
+) -> Result<AssembledContext, ApiError> {
+    let selected_element_id = context_element_id(target);
+    let selected_text = target
+        .text_anchor
+        .as_ref()
+        .map(|anchor| anchor.exact.as_str())
+        .or_else(|| selectable_text(&selected_element_id))
+        .unwrap_or(&target.label);
+    let (instruction, instruction_redactions) = redact_sensitive_text(instruction);
+    let (selected_text, selected_text_redactions) = redact_sensitive_text(selected_text);
+    let (manifest, untrusted_site_content) = assemble_context_files(project, target)?;
+    let mut target_redactions = Vec::new();
+    let target_value = redact_json_strings(
+        canonical_safe_number_projection(
+            serde_json::to_value(target).map_err(|_| ApiError::internal())?,
+        )?,
+        &mut target_redactions,
+    );
+    let mut resolution_redactions = Vec::new();
+    let resolution_value = redact_json_strings(
+        canonical_safe_number_projection(
+            serde_json::to_value(resolution).map_err(|_| ApiError::internal())?,
+        )?,
+        &mut resolution_redactions,
+    );
     let mut root = BTreeMap::<String, Value>::new();
+    root.insert("attemptId".into(), json!(attempt_id));
+    root.insert("baseRevisionId".into(), json!(project.revision_id));
     root.insert("contextId".into(), json!(context_id));
     root.insert("instruction".into(), json!(instruction));
-    root.insert("projectId".into(), json!(project_id));
-    root.insert("revisionId".into(), json!(revision_id));
-    root.insert("schemaVersion".into(), json!(SCHEMA_VERSION));
+    root.insert(
+        "instructionRedactions".into(),
+        json!(instruction_redactions),
+    );
+    root.insert(
+        "manifest".into(),
+        serde_json::to_value(&manifest).map_err(|_| ApiError::internal())?,
+    );
+    root.insert("mode".into(), json!("change"));
     root.insert(
         "numericEncoding".into(),
         json!("serde-json-shortest-decimal-string-v1"),
     );
     root.insert(
-        "selectedText".into(),
-        json!(
-            selectable_text(&target_mutation_element_id(target).ok_or_else(ApiError::invalid)?)
-                .ok_or_else(ApiError::invalid)?
+        "outputContract".into(),
+        json!({
+            "kind": "change_set",
+            "schema": "org.synapsegit-lp-studio.change-set",
+            "version": 1,
+        }),
+    );
+    root.insert("projectId".into(), json!(project.id));
+    root.insert(
+        "provider".into(),
+        serde_json::to_value(provider).map_err(|_| ApiError::internal())?,
+    );
+    root.insert(
+        "providerContractVersion".into(),
+        json!(ai_provider::PROVIDER_CONTRACT_VERSION),
+    );
+    root.insert(
+        "providerSystemInstruction".into(),
+        json!(ai_provider::PROVIDER_SYSTEM_INSTRUCTION),
+    );
+    root.insert(
+        "schema".into(),
+        json!("org.synapsegit-lp-studio.ai-context"),
+    );
+    root.insert("selectedElementId".into(), json!(selected_element_id));
+    root.insert("selectedText".into(), json!(selected_text));
+    root.insert(
+        "selectedTextRedactions".into(),
+        json!(selected_text_redactions),
+    );
+    root.insert("target".into(), target_value);
+    root.insert("targetId".into(), json!(target.target_id));
+    root.insert("targetRedactions".into(), json!(target_redactions));
+    root.insert("targetResolution".into(), resolution_value);
+    root.insert(
+        "targetResolutionId".into(),
+        json!(target_resolution_id(resolution)?),
+    );
+    root.insert(
+        "targetResolutionRedactions".into(),
+        json!(resolution_redactions),
+    );
+    root.insert(
+        "untrustedSiteContent".into(),
+        serde_json::to_value(untrusted_site_content).map_err(|_| ApiError::internal())?,
+    );
+    root.insert("version".into(), json!(1));
+    Ok(AssembledContext {
+        instruction,
+        manifest,
+        canonical_json: serde_json::to_string(&root).map_err(|_| ApiError::internal())?,
+    })
+}
+
+fn context_element_id(target: &TargetRecord) -> String {
+    target_anchor(target)
+        .and_then(|anchor| anchor.unique_element_id.clone())
+        .or_else(|| {
+            target
+                .region_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.containing_block.as_ref())
+                .and_then(|anchor| anchor.unique_element_id.clone())
+        })
+        .unwrap_or_else(|| match target.kind {
+            TargetKind::Page => "page".into(),
+            TargetKind::Block => "selected-block".into(),
+            TargetKind::Element => "selected-element".into(),
+            TargetKind::Text => "selected-text".into(),
+            TargetKind::Point => "selected-point".into(),
+            TargetKind::Region => "selected-region".into(),
+        })
+}
+
+fn assemble_context_files(
+    project: &Project,
+    target: &TargetRecord,
+) -> Result<(ContextManifestDto, Vec<UntrustedSiteContent>), ApiError> {
+    let entry_path = context_entry_path(&target.page_path, &project.accepted_files)
+        .ok_or_else(ApiError::invalid)?;
+    let mut paths = vec![entry_path.clone()];
+    paths.extend(
+        project
+            .accepted_files
+            .keys()
+            .filter(|path| **path != entry_path && context_media_type(path).is_some())
+            .take(MAX_CONTEXT_FILES.saturating_sub(1))
+            .cloned(),
+    );
+    let mut entries = Vec::new();
+    let mut content_parts = Vec::new();
+    let mut total_included_bytes = 0usize;
+    for (index, path) in paths.into_iter().enumerate() {
+        let bytes = project
+            .accepted_files
+            .get(&path)
+            .ok_or_else(ApiError::invalid)?;
+        if bytes.len() > MAX_CONTEXT_FILE_BYTES
+            || total_included_bytes.saturating_add(bytes.len()) > MAX_CONTEXT_TOTAL_BYTES
+        {
+            if index == 0 {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "ai_context_entrypoint_too_large",
+                    "The selected page is too large for the bounded AI context.",
+                    false,
+                ));
+            }
+            continue;
+        }
+        let source = match std::str::from_utf8(bytes) {
+            Ok(source) => source,
+            Err(_) if index > 0 => continue,
+            Err(_) => {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "ai_context_entrypoint_not_utf8",
+                    "The selected page is not UTF-8 text.",
+                    false,
+                ));
+            }
+        };
+        let media_type = context_media_type(&path).ok_or_else(ApiError::invalid)?;
+        let source_sha256 = raw_sha256(bytes);
+        let (content, redactions) = redact_sensitive_text(source);
+        let included_byte_length = content.len();
+        if total_included_bytes.saturating_add(included_byte_length) > MAX_CONTEXT_TOTAL_BYTES {
+            if index == 0 {
+                return Err(ApiError::capacity());
+            }
+            continue;
+        }
+        total_included_bytes += included_byte_length;
+        let end_line = content.bytes().filter(|byte| *byte == b'\n').count()
+            + usize::from(!content.is_empty());
+        let included_sha256 = raw_sha256(content.as_bytes());
+        entries.push(ContextManifestEntryDto {
+            path: path.clone(),
+            media_type: media_type.into(),
+            purpose: if index == 0 {
+                "entrypoint"
+            } else {
+                "dependency"
+            },
+            source_byte_length: bytes.len(),
+            included_byte_length,
+            start_line: 1,
+            end_line,
+            sha256: included_sha256.clone(),
+            estimated_tokens: included_byte_length.div_ceil(4),
+            redacted: !redactions.is_empty(),
+            truncated: false,
+            redactions,
+        });
+        content_parts.push(UntrustedSiteContent {
+            path,
+            media_type: media_type.into(),
+            source_sha256,
+            included_sha256,
+            content,
+            quoted_untrusted_data: true,
+        });
+    }
+    let estimated_tokens = total_included_bytes.div_ceil(4);
+    Ok((
+        ContextManifestDto {
+            entries,
+            total_included_bytes,
+            estimated_tokens,
+            screenshot_included: false,
+        },
+        content_parts,
+    ))
+}
+
+fn context_entry_path(page_path: &str, files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    let path = page_path.trim_start_matches('/');
+    let candidates = if path.is_empty() {
+        vec!["index.html".into()]
+    } else if path.ends_with('/') {
+        vec![format!("{path}index.html")]
+    } else {
+        vec![path.into(), format!("{path}/index.html")]
+    };
+    candidates
+        .into_iter()
+        .find(|candidate| files.contains_key(candidate))
+}
+
+fn context_media_type(path: &str) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    let extension = lower.rsplit_once('.').map(|(_, extension)| extension)?;
+    match extension {
+        "html" | "htm" => Some("text/html"),
+        "css" => Some("text/css"),
+        "js" | "mjs" => Some("application/javascript"),
+        "json" => Some("application/json"),
+        "svg" => Some("image/svg+xml"),
+        "md" | "markdown" => Some("text/markdown"),
+        "txt" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+fn redact_json_strings(value: Value, redactions: &mut Vec<String>) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_json_strings(value, redactions))
+                .collect(),
         ),
-    );
-    root.insert(
-        "target".into(),
-        canonical_safe_number_projection(
-            serde_json::to_value(target).map_err(|_| ApiError::internal())?,
-        )?,
-    );
-    root.insert(
-        "targetResolution".into(),
-        canonical_safe_number_projection(
-            serde_json::to_value(resolution).map_err(|_| ApiError::internal())?,
-        )?,
-    );
-    serde_json::to_string(&root).map_err(|_| ApiError::internal())
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, redact_json_strings(value, redactions)))
+                .collect(),
+        ),
+        Value::String(value) => {
+            let (value, found) = redact_sensitive_text(&value);
+            redactions.extend(found);
+            redactions.sort();
+            redactions.dedup();
+            Value::String(value)
+        }
+        value => value,
+    }
+}
+
+fn redact_sensitive_text(value: &str) -> (String, Vec<String>) {
+    let mut redactions = Vec::new();
+    let mut output = value.to_owned();
+    for (prefix, minimum_suffix_length, label) in [
+        ("sk-", 5, "openai_key"),
+        ("bearer ", 5, "bearer_token"),
+        ("ghp_", 8, "github_token"),
+        ("github_pat_", 8, "github_token"),
+        ("gho_", 8, "github_token"),
+        ("ghu_", 8, "github_token"),
+        ("ghs_", 8, "github_token"),
+        ("ghr_", 8, "github_token"),
+        ("akia", 16, "aws_access_key"),
+        ("asia", 16, "aws_access_key"),
+        ("/home/", 1, "absolute_path"),
+        ("/users/", 1, "absolute_path"),
+        ("c:\\users\\", 1, "absolute_path"),
+    ] {
+        let (next, replaced) = redact_prefixed_tokens(&output, prefix, minimum_suffix_length);
+        if replaced {
+            redactions.push(label.into());
+            output = next;
+        }
+    }
+    let sensitive_names = [
+        "api_key",
+        "apikey",
+        "api-key",
+        "password",
+        "passwd",
+        "client_secret",
+        "client-secret",
+        "authorization",
+        "access_key",
+        "access-key",
+        "access_key_id",
+        "access-key-id",
+        "secret_access_key",
+        "secret-access-key",
+        "access_token",
+        "access-token",
+        "auth_token",
+        "auth-token",
+        "private_key",
+        "private-key",
+        "github_token",
+        "github-token",
+        "token",
+    ];
+    let mut lines = String::with_capacity(output.len());
+    for line in output.split_inclusive('\n') {
+        let lower = line.to_ascii_lowercase();
+        let sensitive = sensitive_names.iter().any(|name| lower.contains(name));
+        let separator = [lower.find('='), lower.find(':')]
+            .into_iter()
+            .flatten()
+            .min();
+        if sensitive && let Some(separator) = separator {
+            lines.push_str(&line[..=separator]);
+            lines.push_str("[LP_STUDIO_REDACTED]");
+            if line.ends_with('\n') {
+                lines.push('\n');
+            }
+            redactions.push("credential_assignment".into());
+        } else {
+            lines.push_str(line);
+        }
+    }
+    redactions.sort();
+    redactions.dedup();
+    (lines, redactions)
+}
+
+fn redact_prefixed_tokens(
+    value: &str,
+    prefix: &str,
+    minimum_suffix_length: usize,
+) -> (String, bool) {
+    let mut remaining = value;
+    let mut output = String::with_capacity(value.len());
+    let mut replaced = false;
+    let lower_prefix = prefix.to_ascii_lowercase();
+    while let Some(offset) = remaining.to_ascii_lowercase().find(&lower_prefix) {
+        output.push_str(&remaining[..offset]);
+        let token = &remaining[offset..];
+        let end = token
+            .char_indices()
+            .skip(prefix.chars().count())
+            .find(|(_, character)| {
+                character.is_whitespace()
+                    || matches!(
+                        *character,
+                        '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                    )
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(token.len());
+        if end < prefix.len().saturating_add(minimum_suffix_length) {
+            output.push_str(&token[..prefix.len()]);
+            remaining = &remaining[offset + prefix.len()..];
+            continue;
+        }
+        output.push_str("[LP_STUDIO_REDACTED]");
+        remaining = &token[end..];
+        replaced = true;
+    }
+    output.push_str(remaining);
+    (output, replaced)
 }
 
 /// Project JSON fractions into application-defined decimal strings before the
@@ -2945,85 +3636,6 @@ fn blank_files() -> BTreeMap<String, Vec<u8>> {
     ])
 }
 
-#[derive(Clone, Copy)]
-struct FakeAiMutation {
-    element_id: &'static str,
-    accepted_text: &'static str,
-    proposed_text: &'static str,
-    summary: &'static str,
-    unified_diff: &'static str,
-}
-
-fn fake_ai_mutation(element_id: &str) -> Option<FakeAiMutation> {
-    match element_id {
-        "hero-heading" => Some(FakeAiMutation {
-            element_id: "hero-heading",
-            accepted_text: "まだ、白紙です。",
-            proposed_text: "対話から、公開できるLPへ。",
-            summary: "Updated the selected hero heading with deterministic fake AI.",
-            unified_diff: r#"--- a/index.html
-+++ b/index.html
-@@ -16,7 +16,7 @@
-           data-lp-id="hero-heading"
-           data-lp-label="ヒーロー見出し"
-         >
--          まだ、白紙です。
-+          対話から、公開できるLPへ。
-         </h1>
-"#,
-        }),
-        "hero-copy" => Some(FakeAiMutation {
-            element_id: "hero-copy",
-            accepted_text: "伝えたいことを選び、AIとの対話から最初の一歩をつくります。",
-            proposed_text: "要望を選び、AIとの対話から公開できるLPへ育てます。",
-            summary: "Updated the selected hero copy with deterministic fake AI.",
-            unified_diff: r#"--- a/index.html
-+++ b/index.html
-@@ -24,7 +24,7 @@
-           data-lp-id="hero-copy"
-           data-lp-label="ヒーロー説明文"
-         >
--          伝えたいことを選び、AIとの対話から最初の一歩をつくります。
-+          要望を選び、AIとの対話から公開できるLPへ育てます。
-         </p>
-"#,
-        }),
-        "hero-cta" => Some(FakeAiMutation {
-            element_id: "hero-cta",
-            accepted_text: "構想を始める",
-            proposed_text: "公開LPをつくる",
-            summary: "Updated the selected hero CTA with deterministic fake AI.",
-            unified_diff: r##"--- a/index.html
-+++ b/index.html
-@@ -32,7 +32,7 @@
-           href="#next"
-           data-lp-id="hero-cta"
-           data-lp-label="ヒーローCTA"
--          >構想を始める</a
-+          >公開LPをつくる</a
-         >
-"##,
-        }),
-        _ => None,
-    }
-}
-
-fn proposed_files(
-    accepted: &BTreeMap<String, Vec<u8>>,
-    mutation: FakeAiMutation,
-) -> Result<BTreeMap<String, Vec<u8>>, ApiError> {
-    if accepted.get("index.html").map(Vec::as_slice) != Some(BLANK_INDEX.as_bytes()) {
-        return Err(ApiError::conflict("fake_ai_input_unsupported"));
-    }
-    let mut files = accepted.clone();
-    let proposed = BLANK_INDEX.replacen(mutation.accepted_text, mutation.proposed_text, 1);
-    if proposed == BLANK_INDEX {
-        return Err(ApiError::internal());
-    }
-    files.insert("index.html".into(), proposed.into_bytes());
-    Ok(files)
-}
-
 fn manifest(files: &BTreeMap<String, Vec<u8>>) -> Result<RegularFileManifest, ApiError> {
     RegularFileManifest::from_entries(
         files
@@ -3042,6 +3654,161 @@ fn manifest(files: &BTreeMap<String, Vec<u8>>) -> Result<RegularFileManifest, Ap
 
 fn manifest_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String, ApiError> {
     Ok(artifact_manifest_sha256(&manifest(files)?))
+}
+
+fn validate_provider_attribution(
+    context: &ContextRecord,
+    attribution: &ProviderAttribution,
+) -> Result<(), ApiError> {
+    if attribution.attempt_id != context.attempt_id
+        || attribution.provider_id != context.provider.provider_id
+        || attribution.adapter_version != context.provider.adapter_version
+        || attribution.requested_model != context.provider.requested_model
+        || attribution.external != context.provider.external
+        || attribution.provider_request_id.is_empty()
+        || attribution.provider_request_id.len() > 256
+        || attribution.reported_model.is_empty()
+        || attribution.reported_model.len() > 128
+    {
+        Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "provider_attribution_mismatch",
+            "The AI provider result was not bound to the reviewed attempt.",
+            false,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn synapse_review_context_json(
+    context: &ContextRecord,
+    target: &TargetRecord,
+    change_set_sha256: &str,
+    attribution: &ProviderAttribution,
+) -> Result<String, ApiError> {
+    let target_digest = raw_sha256(&serde_json::to_vec(target).map_err(|_| ApiError::internal())?);
+    let mut root = BTreeMap::<String, Value>::new();
+    root.insert("baseRevisionId".into(), json!(context.revision_id));
+    root.insert("changeSetSha256".into(), json!(change_set_sha256));
+    root.insert("executionVerified".into(), json!(false));
+    root.insert(
+        "provenanceTarget".into(),
+        json!({
+            "kind": target_kind_name(target.kind),
+            "pageLabel": target.page_path,
+            "scope": target_kind_name(target.kind),
+        }),
+    );
+    root.insert(
+        "provider".into(),
+        json!({
+            "adapterVersion": attribution.adapter_version,
+            "providerId": attribution.provider_id,
+            "providerRequestId": attribution.provider_request_id,
+            "reportedModel": attribution.reported_model,
+            "requestedModel": attribution.requested_model,
+        }),
+    );
+    root.insert("providerContextSha256".into(), json!(context.sha256));
+    root.insert(
+        "schema".into(),
+        json!("org.synapsegit-lp-studio.synapse-review-context"),
+    );
+    root.insert(
+        "sourceAttribution".into(),
+        json!("caller_supplied_ai_attributed"),
+    );
+    root.insert("targetDigest".into(), json!(target_digest));
+    root.insert("version".into(), json!(1));
+    serde_json::to_string(&root).map_err(|_| ApiError::internal())
+}
+
+fn target_kind_name(kind: TargetKind) -> &'static str {
+    match kind {
+        TargetKind::Page => "page",
+        TargetKind::Block => "block",
+        TargetKind::Element => "element",
+        TargetKind::Text => "text",
+        TargetKind::Point => "point",
+        TargetKind::Region => "region",
+    }
+}
+
+fn proposal_review_details(
+    applied: &AppliedChangeSet,
+) -> (Vec<ProposalChangeDto>, ProposalValidationDto) {
+    let changes = applied
+        .changes
+        .iter()
+        .map(|change| ProposalChangeDto {
+            path: change.path.clone(),
+            kind: match change.kind {
+                AppliedChangeKind::Created => "created",
+                AppliedChangeKind::Modified => "modified",
+                AppliedChangeKind::Renamed => "renamed",
+                AppliedChangeKind::Deleted => "deleted",
+            },
+            from_path: change.from_path.clone(),
+        })
+        .collect();
+    let mut checks = applied
+        .checks
+        .iter()
+        .map(|check| {
+            let blocking = check.status == StaticCheckStatus::BlockingWarning;
+            let destinations = if blocking {
+                applied
+                    .blocking_warnings
+                    .iter()
+                    .map(|warning| format!("{} → {}", warning.path, warning.destination))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            ProposalValidationCheckDto {
+                id: check.id.clone(),
+                label: validation_check_label(&check.id).into(),
+                status: if blocking { "warning" } else { "passed" },
+                message: check.message.clone(),
+                blocking,
+                destinations,
+            }
+        })
+        .collect::<Vec<_>>();
+    checks.push(ProposalValidationCheckDto {
+        id: "synapsegit-recorded".into(),
+        label: "SynapseGit proposal".into(),
+        status: "passed",
+        message: "SynapseGit recorded the isolated caller-supplied AI proposal.".into(),
+        blocking: false,
+        destinations: Vec::new(),
+    });
+    let blocking = checks.iter().any(|check| check.blocking);
+    (
+        changes,
+        ProposalValidationDto {
+            status: if blocking { "warning" } else { "passed" },
+            checks,
+        },
+    )
+}
+
+fn validation_check_label(id: &str) -> &'static str {
+    match id {
+        "protocol-schema" => "Strict ChangeSet v1",
+        "base-revision" => "Accepted base binding",
+        "operation-graph" => "Operation graph",
+        "file-preconditions" => "File hash preconditions",
+        "isolated-apply" => "Isolated atomic apply",
+        "static-syntax" => "Static syntax",
+        "entry-point" => "Entry point",
+        "local-references" => "Local references",
+        "export-deny-list" => "Export deny-list",
+        "active-behavior" => "Active behavior review",
+        "target-reresolution" => "Proposed Target re-resolution",
+        _ => "Bounded validation",
+    }
 }
 
 fn project_dto(state: &StudioState, session_id: &str, project: &Project) -> ProjectDto {
@@ -3069,49 +3836,24 @@ fn proposal_dto(
     project: &Project,
     proposal: &ProposalRecord,
 ) -> ProposalDto {
-    debug_assert_eq!(
-        fake_ai_mutation(&proposal.target_element_id).map(|mutation| mutation.element_id),
-        Some(proposal.target_element_id.as_str())
-    );
     ProposalDto {
         id: proposal.id.clone(),
         review_id: proposal.review_id.clone(),
         base_revision_id: proposal.base_revision_id.clone(),
         status: "pending_review",
-        summary: proposal.summary,
+        summary: proposal.summary.clone(),
         artifact_manifest_sha256: proposal.artifact_manifest_sha256.clone(),
         review_context_sha256: proposal.review_context_sha256.clone(),
+        provider_context_sha256: proposal.provider_context_sha256.clone(),
+        change_set_sha256: proposal.change_set_sha256.clone(),
+        change_set: proposal.change_set.clone(),
+        attribution: proposal.attribution.clone(),
         source_attribution: "caller_supplied_ai_attributed",
         execution_verified: false,
         preview_url: scoped_preview_url(state, session_id, &project.id, &proposal.id),
-        changes: vec![ProposalChangeDto {
-            path: "index.html",
-            kind: "modified",
-        }],
-        unified_diff: proposal.unified_diff,
-        validation: ProposalValidationDto {
-            status: "passed",
-            checks: vec![
-                ProposalValidationCheckDto {
-                    id: "bounded-files",
-                    label: "Bounded regular files",
-                    status: "passed",
-                    message: "The proposal contains two bounded regular files.",
-                },
-                ProposalValidationCheckDto {
-                    id: "target-preserved",
-                    label: "Target preserved",
-                    status: "passed",
-                    message: "The selected element remains addressable.",
-                },
-                ProposalValidationCheckDto {
-                    id: "synapsegit-recorded",
-                    label: "SynapseGit proposal",
-                    status: "passed",
-                    message: "SynapseGit recorded the isolated proposal.",
-                },
-            ],
-        },
+        changes: proposal.changes.clone(),
+        unified_diff: proposal.unified_diff.clone(),
+        validation: proposal.validation.clone(),
     }
 }
 

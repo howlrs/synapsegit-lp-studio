@@ -14,6 +14,8 @@
   source-available license and brand evaluation boundary
 - [ADR-0007](0007-target-v1-capture-and-resolution.md):
   Target v1 capture, coordinate evidence, and fail-closed resolution
+- [ADR-0008](0008-ai-provider-context-and-change-set.md):
+  reviewed AI context, provider boundary, and strict ChangeSet v1
 
 Accepted ADRs are implementation decisions for the current M1 branch, not
 evidence that the 80% local verification or final product review has passed.

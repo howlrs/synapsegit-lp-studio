@@ -17,6 +17,11 @@
     { "$ref": "#/$defs/targetResolverResultV1" },
     { "$ref": "#/$defs/createContextRequest" },
     { "$ref": "#/$defs/contextResponse" },
+    { "$ref": "#/$defs/changeSetV1" },
+    { "$ref": "#/$defs/aiAttemptStatusV1" },
+    { "$ref": "#/$defs/aiProviderStreamEventV1" },
+    { "$ref": "#/$defs/aiProviderResultV1" },
+    { "$ref": "#/$defs/aiProviderErrorV1" },
     { "$ref": "#/$defs/createProposalRequest" },
     { "$ref": "#/$defs/proposalResponse" },
     { "$ref": "#/$defs/approvalRequest" },
@@ -47,6 +52,8 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
+      "maxLength": 512,
+      "x-maxUtf8Bytes": 512,
       "pattern": "^(?![A-Za-z]:[\\\\/])(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
     },
     "disposition": {
@@ -86,6 +93,55 @@
         }
       }
     },
+    "aiProviderModelDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "aiProviderDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "adapterVersion",
+        "external",
+        "availability",
+        "models"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "adapterVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "external": { "type": "boolean" },
+        "availability": { "enum": ["available", "not_configured"] },
+        "models": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/aiProviderModelDescriptor" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "availability": { "const": "available" } }
+          },
+          "then": {
+            "properties": {
+              "models": { "type": "array", "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
     "bootstrapResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -119,6 +175,7 @@
             "dispositions",
             "singleProposalPerProject",
             "importAvailable",
+            "aiProviders",
             "limits"
           ],
           "properties": {
@@ -143,6 +200,12 @@
             },
             "singleProposalPerProject": { "const": true },
             "importAvailable": { "type": "boolean" },
+            "aiProviders": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": { "$ref": "#/$defs/aiProviderDescriptor" }
+            },
             "limits": { "$ref": "#/$defs/importLimits" }
           }
         }
@@ -861,6 +924,9 @@
         "revisionId",
         "targetId",
         "resolutionId",
+        "attemptId",
+        "providerId",
+        "requestedModel",
         "instruction"
       ],
       "properties": {
@@ -868,12 +934,136 @@
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "targetId": { "$ref": "#/$defs/nonEmptyString" },
         "resolutionId": { "$ref": "#/$defs/targetIdV1" },
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
         "instruction": {
           "type": "string",
           "minLength": 1,
           "maxLength": 2000,
           "x-maxUtf8Bytes": 2000
         }
+      }
+    },
+    "contextProviderBindingV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "adapterVersion",
+        "requestedModel",
+        "external"
+      ],
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adapterVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "external": { "type": "boolean" }
+      }
+    },
+    "contextManifestEntryV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "mediaType",
+        "purpose",
+        "sourceByteLength",
+        "includedByteLength",
+        "startLine",
+        "endLine",
+        "sha256",
+        "estimatedTokens",
+        "redacted",
+        "truncated",
+        "redactions"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "purpose": { "enum": ["entrypoint", "dependency"] },
+        "sourceByteLength": { "type": "integer", "minimum": 0 },
+        "includedByteLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2097152
+        },
+        "startLine": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "endLine": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "estimatedTokens": { "type": "integer", "minimum": 0 },
+        "redacted": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "redactions": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "redacted": { "const": true } } },
+          "then": {
+            "properties": {
+              "redactions": { "type": "array", "minItems": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "redactions": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "contextManifestV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "totalIncludedBytes",
+        "estimatedTokens",
+        "screenshotIncluded"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/contextManifestEntryV1" }
+        },
+        "totalIncludedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2097152
+        },
+        "estimatedTokens": { "type": "integer", "minimum": 0 },
+        "screenshotIncluded": { "const": false }
       }
     },
     "context": {
@@ -884,6 +1074,11 @@
         "revisionId",
         "targetId",
         "targetResolutionId",
+        "attemptId",
+        "providerId",
+        "requestedModel",
+        "provider",
+        "manifest",
         "instruction",
         "canonicalJson",
         "sha256"
@@ -893,7 +1088,25 @@
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "targetId": { "$ref": "#/$defs/nonEmptyString" },
         "targetResolutionId": { "$ref": "#/$defs/targetIdV1" },
-        "instruction": { "type": "string" },
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "provider": { "$ref": "#/$defs/contextProviderBindingV1" },
+        "manifest": { "$ref": "#/$defs/contextManifestV1" },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "x-maxUtf8Bytes": 2000
+        },
         "canonicalJson": { "type": "string" },
         "sha256": { "$ref": "#/$defs/sha256" }
       }
@@ -905,6 +1118,290 @@
       "properties": {
         "schemaVersion": { "$ref": "#/$defs/version" },
         "context": { "$ref": "#/$defs/context" }
+      }
+    },
+    "createTextOperationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "path", "mediaType", "content"],
+      "properties": {
+        "op": { "const": "create_text" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "content": { "type": "string", "x-maxUtf8Bytes": 2097152 }
+      }
+    },
+    "replaceTextOperationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "path", "expectedSha256", "mediaType", "content"],
+      "properties": {
+        "op": { "const": "replace_text" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "expectedSha256": { "$ref": "#/$defs/sha256" },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "content": { "type": "string", "x-maxUtf8Bytes": 2097152 }
+      }
+    },
+    "renameOperationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "from", "to", "expectedSha256"],
+      "properties": {
+        "op": { "const": "rename" },
+        "from": { "$ref": "#/$defs/relativePath" },
+        "to": { "$ref": "#/$defs/relativePath" },
+        "expectedSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "deleteOperationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "path", "expectedSha256"],
+      "properties": {
+        "op": { "const": "delete" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "expectedSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "changeOperationV1": {
+      "oneOf": [
+        { "$ref": "#/$defs/createTextOperationV1" },
+        { "$ref": "#/$defs/replaceTextOperationV1" },
+        { "$ref": "#/$defs/renameOperationV1" },
+        { "$ref": "#/$defs/deleteOperationV1" }
+      ]
+    },
+    "changeSetV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "baseRevisionId",
+        "summary",
+        "operations"
+      ],
+      "properties": {
+        "schema": { "const": "org.synapsegit-lp-studio.change-set" },
+        "version": { "const": 1 },
+        "baseRevisionId": { "$ref": "#/$defs/targetIdV1" },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "x-maxUtf8Bytes": 2000
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/changeOperationV1" }
+        }
+      }
+    },
+    "aiProviderUsageV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "aiProviderAttributionV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attemptId",
+        "providerRequestId",
+        "providerId",
+        "adapterVersion",
+        "requestedModel",
+        "reportedModel",
+        "external"
+      ],
+      "properties": {
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "providerRequestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adapterVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "reportedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "external": { "type": "boolean" },
+        "usage": { "$ref": "#/$defs/aiProviderUsageV1" }
+      }
+    },
+    "aiAttemptStatusV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attemptId", "status"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "cancelled",
+            "timed_out",
+            "provider_failed",
+            "validation_failed",
+            "proposal_ready",
+            "completed"
+          ]
+        }
+      }
+    },
+    "aiProviderStreamEventV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "attemptId", "sequence", "event"],
+          "properties": {
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "attemptId": { "$ref": "#/$defs/targetIdV1" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "event": { "const": "started" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schemaVersion",
+            "attemptId",
+            "sequence",
+            "event",
+            "text"
+          ],
+          "properties": {
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "attemptId": { "$ref": "#/$defs/targetIdV1" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "event": { "const": "text_delta" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schemaVersion",
+            "attemptId",
+            "sequence",
+            "event",
+            "usage"
+          ],
+          "properties": {
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "attemptId": { "$ref": "#/$defs/targetIdV1" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "event": { "const": "usage" },
+            "usage": { "$ref": "#/$defs/aiProviderUsageV1" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "attemptId", "sequence", "event"],
+          "properties": {
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "attemptId": { "$ref": "#/$defs/targetIdV1" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "event": { "const": "completed" }
+          }
+        }
+      ]
+    },
+    "aiProviderOutputV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "const": "consultation" },
+            "text": { "type": "string", "x-maxUtf8Bytes": 2097152 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "changeSet"],
+          "properties": {
+            "kind": { "const": "change_set" },
+            "changeSet": { "$ref": "#/$defs/changeSetV1" }
+          }
+        }
+      ]
+    },
+    "aiProviderResultV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "attemptId", "attribution", "output"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "attribution": { "$ref": "#/$defs/aiProviderAttributionV1" },
+        "output": { "$ref": "#/$defs/aiProviderOutputV1" }
+      }
+    },
+    "aiProviderErrorV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "attemptId",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "attemptId": { "$ref": "#/$defs/targetIdV1" },
+        "code": {
+          "enum": [
+            "not_configured",
+            "cancelled",
+            "timeout",
+            "rate_limited",
+            "unavailable",
+            "invalid_response",
+            "internal"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "retryable": { "type": "boolean" }
       }
     },
     "createProposalRequest": {
@@ -920,12 +1417,26 @@
     "validationCheck": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "label", "status", "message"],
+      "required": [
+        "id",
+        "label",
+        "status",
+        "message",
+        "blocking",
+        "destinations"
+      ],
       "properties": {
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "label": { "$ref": "#/$defs/nonEmptyString" },
         "status": { "enum": ["passed", "warning", "failed"] },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "blocking": { "type": "boolean" },
+        "destinations": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 2048 }
+        }
       }
     },
     "proposal": {
@@ -939,6 +1450,10 @@
         "summary",
         "artifactManifestSha256",
         "reviewContextSha256",
+        "providerContextSha256",
+        "changeSetSha256",
+        "changeSet",
+        "attribution",
         "sourceAttribution",
         "executionVerified",
         "previewUrl",
@@ -954,6 +1469,10 @@
         "summary": { "type": "string" },
         "artifactManifestSha256": { "$ref": "#/$defs/sha256" },
         "reviewContextSha256": { "$ref": "#/$defs/sha256" },
+        "providerContextSha256": { "$ref": "#/$defs/sha256" },
+        "changeSetSha256": { "$ref": "#/$defs/sha256" },
+        "changeSet": { "$ref": "#/$defs/changeSetV1" },
+        "attribution": { "$ref": "#/$defs/aiProviderAttributionV1" },
         "sourceAttribution": { "const": "caller_supplied_ai_attributed" },
         "executionVerified": { "const": false },
         "previewUrl": { "$ref": "#/$defs/scopedPreviewUrl" },
@@ -964,11 +1483,28 @@
             "additionalProperties": false,
             "required": ["path", "kind"],
             "properties": {
-              "path": { "$ref": "#/$defs/nonEmptyString" },
+              "path": { "$ref": "#/$defs/relativePath" },
               "kind": {
                 "enum": ["created", "modified", "renamed", "deleted"]
+              },
+              "fromPath": { "$ref": "#/$defs/relativePath" }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "kind": { "const": "renamed" } } },
+                "then": {
+                  "type": "object",
+                  "required": ["fromPath"],
+                  "properties": {
+                    "fromPath": { "$ref": "#/$defs/relativePath" }
+                  }
+                },
+                "else": {
+                  "type": "object",
+                  "properties": { "fromPath": false }
+                }
               }
-            }
+            ]
           }
         },
         "unifiedDiff": { "type": "string" },

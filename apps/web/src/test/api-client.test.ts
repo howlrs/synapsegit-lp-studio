@@ -2,6 +2,7 @@ import { bootstrapApi } from "../api/client";
 import {
   HASH_C,
   bootstrapFixture,
+  contextResponseFixture,
   importPreviewResponseFixture,
   projectResponseFixture,
   projectsResponseFixture,
@@ -47,6 +48,59 @@ describe("authenticated API client", () => {
       "Bearer secret-only-in-api-closure",
     );
     storageWrite.mockRestore();
+  });
+
+  it("binds context creation to the selected attempt, provider, and model", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture("http://editor.test"));
+        }
+        if (path === "/api/v1/projects/project-001/contexts") {
+          expect(JSON.parse(String(init?.body))).toEqual({
+            schemaVersion: "1",
+            revisionId: "revision-accepted-001",
+            targetId: "target-001",
+            resolutionId: "resolution-001",
+            attemptId: "attempt-001",
+            providerId: "fake",
+            requestedModel: "deterministic-v1",
+            instruction: "見出しを力強くしてください",
+          });
+          expect(new Headers(init?.headers).get("Authorization")).toBe(
+            "Bearer secret-only-in-api-closure",
+          );
+          expect(init?.credentials).toBe("omit");
+          return jsonResponse(contextResponseFixture);
+        }
+        throw new Error(`Unexpected request ${path}`);
+      },
+    );
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(
+      session.api.createContext(
+        "project-001",
+        "revision-accepted-001",
+        "target-001",
+        "resolution-001",
+        "attempt-001",
+        "fake",
+        "deterministic-v1",
+        "見出しを力強くしてください",
+      ),
+    ).resolves.toMatchObject({
+      attemptId: "attempt-001",
+      providerId: "fake",
+      requestedModel: "deterministic-v1",
+    });
   });
 
   it("rejects a bootstrap that tries to move bearer authority to another origin", async () => {

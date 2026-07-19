@@ -48,12 +48,36 @@ const implementedRequirements = new Set([
   "FR-RESOLVE-001",
   "FR-RESOLVE-003",
   "FR-RESOLVE-006",
+  "FR-CONV-003",
+  "FR-CTX-002",
+  "FR-CTX-003",
+  "FR-CTX-004",
+  "FR-CTX-005",
+  "FR-CTX-008",
+  "FR-CTX-009",
+  "INT-AI-002",
+  "INT-AI-003",
+  "INT-AI-004",
+  "INT-AI-005",
+  "INT-AI-006",
+  "INT-AI-007",
+  "FR-CHG-001",
+  "FR-CHG-002",
+  "FR-CHG-003",
+  "FR-CHG-004",
+  "FR-CHG-005",
+  "FR-CHG-006",
+  "FR-CHG-007",
+  "FR-CHG-008",
+  "FR-CHG-009",
+  "FR-CHG-010",
+  "FR-CHG-011",
 ]);
 
 function statusFor(id) {
   if (!implementedRequirements.has(id)) return "planned";
   const checkpoint = checkpointFor(id);
-  const evidenceAnchor = checkpoint === "C5" ? "c5" : "c4";
+  const evidenceAnchor = checkpoint.toLowerCase();
   return (
     "implemented — [" +
     checkpoint +

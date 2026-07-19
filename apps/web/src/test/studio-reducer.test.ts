@@ -1,5 +1,6 @@
 import { initialStudioState, studioReducer } from "../app/studio-reducer";
 import {
+  contextResponseFixture,
   elementTargetFixture,
   projectFixture,
   proposalResponseFixture,
@@ -59,7 +60,11 @@ describe("studio reducer Accepted invariant", () => {
           resolutionId: targetResponseFixture.resolutionId,
         },
       },
-      { type: "PROPOSAL_READY", proposal: proposalResponseFixture.proposal },
+      {
+        type: "PROPOSAL_READY",
+        proposal: proposalResponseFixture.proposal,
+        instruction: contextResponseFixture.context.instruction,
+      },
     );
     const nextTarget = {
       target: {
@@ -91,6 +96,31 @@ describe("studio reducer Accepted invariant", () => {
 
     expect(selected.target).toEqual(nextTarget);
     expect(selected.proposalTarget).toEqual(targetResponseFixture.target);
+  });
+
+  it("pins the reviewed instruction when a deferred Proposal resolves", () => {
+    const reviewed = {
+      ...initialStudioState,
+      project: projectFixture(),
+      contextReview: contextResponseFixture.context,
+    };
+    const generating = studioReducer(reviewed, {
+      type: "OPERATION_STARTED",
+      operation: "generating_proposal",
+    });
+    const withoutDialog = studioReducer(generating, {
+      type: "CONTEXT_CLOSED",
+    });
+    const proposed = studioReducer(withoutDialog, {
+      type: "PROPOSAL_READY",
+      proposal: proposalResponseFixture.proposal,
+      instruction: contextResponseFixture.context.instruction,
+    });
+
+    expect(proposed.contextReview).toBeNull();
+    expect(proposed.proposalInstruction).toBe(
+      contextResponseFixture.context.instruction,
+    );
   });
 
   it("invalidates a Target when the preview source changes", () => {

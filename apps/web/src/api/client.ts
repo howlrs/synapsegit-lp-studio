@@ -64,6 +64,9 @@ export interface AuthenticatedApi {
     revisionId: string,
     targetId: string,
     resolutionId: string,
+    attemptId: string,
+    providerId: string,
+    requestedModel: string,
     instruction: string,
   ): Promise<ContextReview>;
   createProposal(
@@ -313,6 +316,9 @@ export const bootstrapApi = async (
       revisionId,
       targetId,
       resolutionId,
+      attemptId,
+      providerId,
+      requestedModel,
       instruction,
     ) {
       const result = await postJson(
@@ -322,6 +328,9 @@ export const bootstrapApi = async (
           revisionId,
           targetId,
           resolutionId,
+          attemptId,
+          providerId,
+          requestedModel,
           instruction,
         },
         isContextResponse,

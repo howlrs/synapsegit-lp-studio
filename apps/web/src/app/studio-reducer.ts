@@ -27,6 +27,7 @@ export interface StudioState {
   contextReview: ContextReview | null;
   proposal: Proposal | null;
   proposalTarget: TargetV1 | null;
+  proposalInstruction: string | null;
   previewMode: PreviewMode;
   previewSource: PreviewSource;
   viewportPreset: ViewportPreset;
@@ -44,6 +45,7 @@ export const initialStudioState: StudioState = {
   contextReview: null,
   proposal: null,
   proposalTarget: null,
+  proposalInstruction: null,
   previewMode: "select",
   previewSource: "accepted",
   viewportPreset: "desktop",
@@ -67,7 +69,7 @@ export type StudioAction =
   | { type: "TARGET_CLEARED" }
   | { type: "CONTEXT_READY"; context: ContextReview }
   | { type: "CONTEXT_CLOSED" }
-  | { type: "PROPOSAL_READY"; proposal: Proposal }
+  | { type: "PROPOSAL_READY"; proposal: Proposal; instruction: string }
   | { type: "DECISION_COMMITTED"; disposition: ArtifactDisposition }
   | { type: "EXPORT_READY"; receipt: ExportReceipt }
   | { type: "SET_PREVIEW_MODE"; mode: PreviewMode }
@@ -111,6 +113,9 @@ export const studioReducer = (
         contextReview: null,
         proposal: action.afterDecision ? null : state.proposal,
         proposalTarget: action.afterDecision ? null : state.proposalTarget,
+        proposalInstruction: action.afterDecision
+          ? null
+          : state.proposalInstruction,
         previewSource: "accepted",
         operation: null,
         announcement: action.afterDecision
@@ -148,6 +153,7 @@ export const studioReducer = (
         contextReview: null,
         proposal: action.proposal,
         proposalTarget: state.target?.target ?? null,
+        proposalInstruction: action.instruction,
         previewSource: "proposed",
         operation: null,
         announcement: "変更案が完成しました。採用前に内容を確認してください。",

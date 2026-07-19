@@ -208,16 +208,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .map(|path| validate_import_root(&path, state_root.path()))
         .transpose()?;
-    let state = StudioState::new(
-        ServerConfig::new(
-            &editor_origin,
-            editor_address.to_string(),
-            &preview_scope_base,
-            state_root.path().to_path_buf(),
-            web_dist,
-        )
-        .with_import_root(import_root),
-    )?;
+    let mut server_config = ServerConfig::new(
+        &editor_origin,
+        editor_address.to_string(),
+        &preview_scope_base,
+        state_root.path().to_path_buf(),
+        web_dist,
+    )
+    .with_import_root(import_root);
+    if let Some(api_key) = std::env::var_os("OPENAI_API_KEY") {
+        let api_key = api_key.into_string().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "OPENAI_API_KEY must be UTF-8")
+        })?;
+        let model =
+            std::env::var("LP_STUDIO_OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
+        server_config = server_config.with_openai(api_key, model)?;
+    }
+    let state = StudioState::new(server_config)?;
 
     println!(
         "LP_STUDIO_READY {}",

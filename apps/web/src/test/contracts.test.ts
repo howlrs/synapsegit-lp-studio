@@ -1,10 +1,18 @@
 import Ajv2020 from "ajv/dist/2020.js";
 import {
   TARGET_CONTRACT_LIMITS,
+  isAiAttemptStatusV1,
+  isAiProviderAttributionV1,
+  isAiProviderErrorV1,
+  isAiProviderResultV1,
+  isAiProviderStreamEventV1,
   isApiErrorResponse,
   isApprovalResponse,
   isBootstrapResponse,
+  isChangeSetV1,
+  isContextManifestV1,
   isContextResponse,
+  isCreateContextRequest,
   isDecisionResponse,
   isExportResponse,
   isImportPreviewResponse,
@@ -26,6 +34,7 @@ import {
 import apiSchema from "../../../../packages/contracts/schemas/api-v1.schema.json";
 import {
   apiErrorResponseFixture,
+  allOperationsChangeSetFixture,
   approvalResponseFixture,
   bootstrapFixture,
   contextResponseFixture,
@@ -301,6 +310,41 @@ const project = projectResponseFixture();
 const projects = projectsResponseFixture();
 const importPreview = importPreviewResponseFixture;
 const proposal = proposalResponseFixture;
+const createContextRequestV1 = {
+  schemaVersion: "1",
+  revisionId: "revision-accepted-001",
+  targetId: "target-001",
+  resolutionId: "resolution-001",
+  attemptId: "attempt-001",
+  providerId: "fake",
+  requestedModel: "deterministic-v1",
+  instruction: "見出しを力強くしてください",
+} as const;
+const attemptStatusV1 = {
+  schemaVersion: "1",
+  attemptId: "attempt-001",
+  status: "proposal_ready",
+} as const;
+const providerStreamEventV1 = {
+  schemaVersion: "1",
+  attemptId: "attempt-001",
+  sequence: 1,
+  event: "text_delta",
+  text: "変更案を生成しています。",
+} as const;
+const providerResultV1 = {
+  schemaVersion: "1",
+  attemptId: "attempt-001",
+  attribution: proposal.proposal.attribution,
+  output: { kind: "change_set", changeSet: allOperationsChangeSetFixture },
+} as const;
+const providerErrorV1 = {
+  schemaVersion: "1",
+  attemptId: "attempt-001",
+  code: "timeout",
+  message: "The provider timed out.",
+  retryable: true,
+} as const;
 
 const extraFieldCases: ReadonlyArray<
   readonly [name: string, guard: Guard, value: unknown]
@@ -327,6 +371,40 @@ const extraFieldCases: ReadonlyArray<
       capabilities: {
         ...bootstrap.capabilities,
         limits: { ...bootstrap.capabilities.limits, extra: true },
+      },
+    },
+  ],
+  [
+    "bootstrap AI provider",
+    isBootstrapResponse,
+    {
+      ...bootstrap,
+      capabilities: {
+        ...bootstrap.capabilities,
+        aiProviders: [
+          { ...bootstrap.capabilities.aiProviders[0]!, extra: true },
+        ],
+      },
+    },
+  ],
+  [
+    "bootstrap AI provider model",
+    isBootstrapResponse,
+    {
+      ...bootstrap,
+      capabilities: {
+        ...bootstrap.capabilities,
+        aiProviders: [
+          {
+            ...bootstrap.capabilities.aiProviders[0]!,
+            models: [
+              {
+                ...bootstrap.capabilities.aiProviders[0]!.models[0]!,
+                extra: true,
+              },
+            ],
+          },
+        ],
       },
     },
   ],
@@ -520,11 +598,62 @@ const extraFieldCases: ReadonlyArray<
     { ...contextResponseFixture, extra: true },
   ],
   [
+    "create context request",
+    isCreateContextRequest,
+    { ...createContextRequestV1, extra: true },
+  ],
+  [
     "context",
     isContextResponse,
     {
       ...contextResponseFixture,
       context: { ...contextResponseFixture.context, extra: true },
+    },
+  ],
+  [
+    "context provider binding",
+    isContextResponse,
+    {
+      ...contextResponseFixture,
+      context: {
+        ...contextResponseFixture.context,
+        provider: { ...contextResponseFixture.context.provider, extra: true },
+      },
+    },
+  ],
+  [
+    "context manifest",
+    isContextResponse,
+    {
+      ...contextResponseFixture,
+      context: {
+        ...contextResponseFixture.context,
+        manifest: { ...contextResponseFixture.context.manifest, extra: true },
+      },
+    },
+  ],
+  [
+    "context manifest entry",
+    isContextResponse,
+    {
+      ...contextResponseFixture,
+      context: {
+        ...contextResponseFixture.context,
+        manifest: {
+          ...contextResponseFixture.context.manifest,
+          entries: [
+            {
+              ...contextResponseFixture.context.manifest.entries[0]!,
+              extra: true,
+            },
+          ],
+          totalIncludedBytes:
+            contextResponseFixture.context.manifest.entries[0]!
+              .includedByteLength,
+          estimatedTokens:
+            contextResponseFixture.context.manifest.entries[0]!.estimatedTokens,
+        },
+      },
     },
   ],
   ["proposal response root", isProposalResponse, { ...proposal, extra: true }],
@@ -541,6 +670,58 @@ const extraFieldCases: ReadonlyArray<
       proposal: {
         ...proposal.proposal,
         changes: [{ ...proposal.proposal.changes[0]!, extra: true }],
+      },
+    },
+  ],
+  [
+    "proposal ChangeSet",
+    isProposalResponse,
+    {
+      ...proposal,
+      proposal: {
+        ...proposal.proposal,
+        changeSet: { ...proposal.proposal.changeSet, extra: true },
+      },
+    },
+  ],
+  [
+    "proposal ChangeSet operation",
+    isProposalResponse,
+    {
+      ...proposal,
+      proposal: {
+        ...proposal.proposal,
+        changeSet: {
+          ...proposal.proposal.changeSet,
+          operations: [
+            { ...proposal.proposal.changeSet.operations[0]!, extra: true },
+          ],
+        },
+      },
+    },
+  ],
+  [
+    "proposal provider attribution",
+    isProposalResponse,
+    {
+      ...proposal,
+      proposal: {
+        ...proposal.proposal,
+        attribution: { ...proposal.proposal.attribution, extra: true },
+      },
+    },
+  ],
+  [
+    "proposal provider usage",
+    isProposalResponse,
+    {
+      ...proposal,
+      proposal: {
+        ...proposal.proposal,
+        attribution: {
+          ...proposal.proposal.attribution,
+          usage: { ...proposal.proposal.attribution.usage, extra: true },
+        },
       },
     },
   ],
@@ -677,7 +858,13 @@ describe("canonical API v1 schema", () => {
     ["target resolver resolved", resolvedTargetV1],
     ["target resolver ambiguous", ambiguousTargetV1],
     ["target resolver detached", detachedTargetV1],
+    ["create context request", createContextRequestV1],
     ["context", contextResponseFixture],
+    ["all ChangeSet v1 operations", allOperationsChangeSetFixture],
+    ["AI attempt status", attemptStatusV1],
+    ["AI provider stream event", providerStreamEventV1],
+    ["AI provider result", providerResultV1],
+    ["AI provider error", providerErrorV1],
     ["proposal", proposal],
     ["approval", approvalResponseFixture],
     ["decision", decisionResponseFixture],
@@ -864,6 +1051,98 @@ describe("canonical API v1 schema", () => {
     }
   });
 
+  it("accepts all four strict ChangeSet v1 operations", () => {
+    expect(validate(allOperationsChangeSetFixture)).toBe(true);
+    expect(isChangeSetV1(allOperationsChangeSetFixture)).toBe(true);
+    expect(
+      allOperationsChangeSetFixture.operations.map(({ op }) => op),
+    ).toEqual(["replace_text", "create_text", "rename", "delete"]);
+  });
+
+  it("rejects unknown or decorated ChangeSet operations", () => {
+    const unknownOperation = {
+      ...allOperationsChangeSetFixture,
+      operations: [{ op: "patch", path: "index.html", content: "unsafe" }],
+    };
+    const decoratedOperation = {
+      ...allOperationsChangeSetFixture,
+      operations: [
+        { ...allOperationsChangeSetFixture.operations[0]!, shell: "echo no" },
+      ],
+    };
+    for (const invalid of [unknownOperation, decoratedOperation]) {
+      expect(validate(invalid)).toBe(false);
+      expect(isChangeSetV1(invalid)).toBe(false);
+    }
+  });
+
+  it("rejects malformed provider attribution", () => {
+    const attribution = proposal.proposal.attribution;
+    const malformed = [
+      { ...attribution, reportedModel: "" },
+      { ...attribution, providerRequestId: "" },
+      { ...attribution, usage: { totalTokens: -1 } },
+      { ...attribution, usage: { totalTokens: 1, credential: "secret" } },
+    ];
+    for (const invalidAttribution of malformed) {
+      const invalidProposal = {
+        ...proposal,
+        proposal: { ...proposal.proposal, attribution: invalidAttribution },
+      };
+      expect(validate(invalidProposal)).toBe(false);
+      expect(isAiProviderAttributionV1(invalidAttribution)).toBe(false);
+      expect(isProposalResponse(invalidProposal)).toBe(false);
+    }
+  });
+
+  it("rejects malformed or internally inconsistent context manifests", () => {
+    const manifest = contextResponseFixture.context.manifest;
+    const firstEntry = manifest.entries[0]!;
+    const malformed = [
+      { ...manifest, totalIncludedBytes: manifest.totalIncludedBytes + 1 },
+      {
+        ...manifest,
+        entries: [
+          firstEntry,
+          { ...manifest.entries[1]!, path: firstEntry.path },
+        ],
+      },
+      {
+        ...manifest,
+        entries: [{ ...firstEntry, endLine: 0 }],
+        totalIncludedBytes: firstEntry.includedByteLength,
+        estimatedTokens: firstEntry.estimatedTokens,
+      },
+      {
+        ...manifest,
+        entries: [{ ...firstEntry, redacted: false, redactions: ["secret"] }],
+        totalIncludedBytes: firstEntry.includedByteLength,
+        estimatedTokens: firstEntry.estimatedTokens,
+      },
+    ];
+    for (const invalidManifest of malformed) {
+      expect(isContextManifestV1(invalidManifest)).toBe(false);
+      expect(
+        isContextResponse({
+          ...contextResponseFixture,
+          context: {
+            ...contextResponseFixture.context,
+            manifest: invalidManifest,
+          },
+        }),
+      ).toBe(false);
+    }
+    expect(
+      validate({
+        ...contextResponseFixture,
+        context: {
+          ...contextResponseFixture.context,
+          manifest: malformed[3],
+        },
+      }),
+    ).toBe(false);
+  });
+
   it.each(extraFieldCases)(
     "rejects an extra field in %s",
     (_name, _guard, value) => {
@@ -962,6 +1241,12 @@ describe("runtime response and bridge guards", () => {
       expect(isTargetResolverResultV1(result)).toBe(true);
     }
     expect(isContextResponse(contextResponseFixture)).toBe(true);
+    expect(isCreateContextRequest(createContextRequestV1)).toBe(true);
+    expect(isChangeSetV1(allOperationsChangeSetFixture)).toBe(true);
+    expect(isAiAttemptStatusV1(attemptStatusV1)).toBe(true);
+    expect(isAiProviderStreamEventV1(providerStreamEventV1)).toBe(true);
+    expect(isAiProviderResultV1(providerResultV1)).toBe(true);
+    expect(isAiProviderErrorV1(providerErrorV1)).toBe(true);
     expect(isProposalResponse(proposal)).toBe(true);
     expect(isApprovalResponse(approvalResponseFixture)).toBe(true);
     expect(isDecisionResponse(decisionResponseFixture)).toBe(true);

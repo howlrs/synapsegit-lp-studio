@@ -376,6 +376,46 @@ impl ManagedStorage {
         Ok(parent.join("repository"))
     }
 
+    pub fn persist_proposal_workspace(
+        &self,
+        project_id: &str,
+        proposal_id: &str,
+        files: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), StorageError> {
+        validate_identifier(project_id, "prj_")?;
+        validate_identifier(proposal_id, "pro_")?;
+        let parent = self
+            .project_root(project_id)
+            .join("proposals")
+            .join(proposal_id);
+        validate_real_directory(&parent)?;
+        let site = parent.join("site");
+        if site.exists() {
+            return Err(StorageError::Corrupt);
+        }
+        let stored = stored_files(files)?;
+        for entry in &stored {
+            let bytes = files.get(&entry.path).ok_or(StorageError::Corrupt)?;
+            self.write_object(&entry.sha256, bytes)?;
+        }
+        let manifest = RevisionManifest {
+            schema_version: STORAGE_SCHEMA.into(),
+            revision_id: proposal_id.into(),
+            artifact_manifest_sha256: sha256(b"proposal-workspace"),
+            files: stored,
+        };
+        let staging = parent.join("site.staging");
+        let result = (|| -> Result<(), StorageError> {
+            self.materialize_to(&staging, &manifest)?;
+            fs::rename(&staging, &site)?;
+            sync_directory(&parent)
+        })();
+        if result.is_err() {
+            let _ = remove_internal_tree_if_present(&staging);
+        }
+        result
+    }
+
     pub fn persist_target(
         &self,
         project_id: &str,

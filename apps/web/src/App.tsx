@@ -8,7 +8,9 @@ import {
   type FormEvent,
 } from "react";
 import type {
+  AiProviderDescriptor,
   ArtifactDisposition,
+  ContextReview,
   ExportReceipt,
   ImportLimits,
   ImportPreview,
@@ -103,7 +105,7 @@ const operationLabel: Record<Exclude<StudioOperation, null>, string> = {
   creating_project: "空のLPを作成しています",
   selecting_target: "ターゲットを検証しています",
   assembling_context: "送信コンテキストを組み立てています",
-  generating_proposal: "fake AIで変更案を生成・検証しています",
+  generating_proposal: "AIで変更案を生成・検証しています",
   committing_decision: "一回限りの承認を取得しDecisionを記録しています",
   refreshing_project: "Accepted状態を再取得しています",
   exporting: "Accepted revisionをエクスポートしています",
@@ -640,8 +642,7 @@ function PreviewPane({
 }
 
 interface ContextDialogProps {
-  canonicalJson: string;
-  sha256: string;
+  context: ContextReview;
   busy: boolean;
   returnFocus: React.RefObject<HTMLButtonElement | null>;
   onClose: () => void;
@@ -649,14 +650,16 @@ interface ContextDialogProps {
 }
 
 function ContextDialog({
-  canonicalJson,
-  sha256,
+  context,
   busy,
   returnFocus,
   onClose,
   onConfirm,
 }: ContextDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const redactedSiteContent = context.manifest.entries.some(
+    (entry) => entry.redacted,
+  );
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -689,15 +692,71 @@ function ContextDialog({
           </button>
         </div>
         <p id="context-dialog-description">
-          以下はローカルfake AIへ渡す正確なcanonical JSONです。session
-          token、ローカル絶対path、Synapse authorityは含みません。
+          {context.provider.external
+            ? "UIとファイルはローカルに残りますが、以下の選択コンテキストは外部AI providerへ送信されます。"
+            : "以下はローカルの決定論的fake AIへ渡す正確なコンテキストです。"}
+          session token、ローカル絶対path、credential、Synapse
+          authorityは含みません。
         </p>
+        <dl className="context-provider-summary">
+          <div>
+            <dt>Provider</dt>
+            <dd>{context.provider.providerId}</dd>
+          </div>
+          <div>
+            <dt>Model</dt>
+            <dd>{context.provider.requestedModel}</dd>
+          </div>
+          <div>
+            <dt>Adapter</dt>
+            <dd>{context.provider.adapterVersion}</dd>
+          </div>
+          <div>
+            <dt>Attempt</dt>
+            <dd>{shortIdentity(context.attemptId)}</dd>
+          </div>
+        </dl>
+        <section
+          className="context-manifest"
+          aria-labelledby="context-manifest-title"
+        >
+          <h3 id="context-manifest-title">
+            送信manifest（{context.manifest.entries.length} files /{" "}
+            {context.manifest.totalIncludedBytes.toLocaleString("ja-JP")}{" "}
+            bytes）
+          </h3>
+          <ul>
+            {context.manifest.entries.map((entry) => (
+              <li key={entry.path}>
+                <code>{entry.path}</code>
+                <span>
+                  {entry.purpose} · lines {entry.startLine}–{entry.endLine} ·{" "}
+                  {entry.includedByteLength.toLocaleString("ja-JP")} bytes
+                  {entry.redacted
+                    ? ` · redacted (${entry.redactions.join(", ")})`
+                    : " · no redaction"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p>
+            Screenshot:{" "}
+            {context.manifest.screenshotIncluded ? "included" : "off"} · token
+            estimate: {context.manifest.estimatedTokens.toLocaleString("ja-JP")}
+          </p>
+        </section>
+        {redactedSiteContent ? (
+          <p className="error-card" role="alert">
+            機密情報を除いた正確なcontextは引き続き確認できますが、C6ではredactionを含むfileから安全なfull-file
+            ChangeSetを生成できないため、変更案の作成は利用できません。
+          </p>
+        ) : null}
         <p className="digest-line">
           <span>Context SHA-256</span>
-          <code>{sha256}</code>
+          <code>{context.sha256}</code>
         </p>
         <pre className="context-code" tabIndex={0}>
-          <code>{canonicalJson}</code>
+          <code>{context.canonicalJson}</code>
         </pre>
         <div className="dialog-actions">
           <button
@@ -711,7 +770,7 @@ function ContextDialog({
           <button
             type="button"
             className="button button-primary"
-            disabled={busy}
+            disabled={busy || redactedSiteContent}
             onClick={onConfirm}
           >
             変更案を作成
@@ -726,9 +785,14 @@ interface TargetComposerProps {
   project: Project;
   target: TargetSelection | null;
   prompt: string;
+  providers: AiProviderDescriptor[];
+  providerId: string;
+  requestedModel: string;
   disabled: boolean;
   reviewButtonRef: React.RefObject<HTMLButtonElement | null>;
   onPrompt: (value: string) => void;
+  onProvider: (providerId: string) => void;
+  onModel: (model: string) => void;
   onReviewContext: () => void;
 }
 
@@ -736,14 +800,20 @@ function TargetComposer({
   project,
   target,
   prompt,
+  providers,
+  providerId,
+  requestedModel,
   disabled,
   reviewButtonRef,
   onPrompt,
+  onProvider,
+  onModel,
   onReviewContext,
 }: TargetComposerProps) {
   const instructionBytes = utf8Bytes(prompt);
   const capturedTarget = target?.target ?? null;
   const resolution = target?.resolution ?? null;
+  const provider = providers.find((candidate) => candidate.id === providerId);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     onReviewContext();
@@ -845,6 +915,45 @@ function TargetComposer({
       ) : null}
 
       <form className="prompt-composer" onSubmit={submit}>
+        <div className="provider-fields">
+          <label htmlFor="ai-provider">AI provider</label>
+          <select
+            id="ai-provider"
+            value={providerId}
+            disabled={disabled}
+            onChange={(event) => onProvider(event.currentTarget.value)}
+          >
+            {providers.map((candidate) => (
+              <option
+                key={candidate.id}
+                value={candidate.id}
+                disabled={candidate.availability !== "available"}
+              >
+                {candidate.label}
+                {candidate.availability === "available" ? "" : "（未設定）"}
+              </option>
+            ))}
+          </select>
+          <label htmlFor="ai-model">Model</label>
+          <select
+            id="ai-model"
+            value={requestedModel}
+            disabled={disabled || provider?.availability !== "available"}
+            onChange={(event) => onModel(event.currentTarget.value)}
+          >
+            {(provider?.models ?? []).map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {provider?.external === true ? (
+          <p className="provider-disclosure">
+            選択したcontextは外部providerへ送信されます。送信前にexact
+            bytesを確認します。契約に応じてprovider料金が発生する場合があります。
+          </p>
+        ) : null}
         <label htmlFor="ai-instruction">AIへの要望</label>
         <textarea
           id="ai-instruction"
@@ -856,7 +965,10 @@ function TargetComposer({
           onChange={(event) => onPrompt(event.currentTarget.value)}
         />
         <div className="composer-meta">
-          <span>fake-ai · deterministic-v1</span>
+          <span>
+            {provider?.id ?? "provider未選択"} ·{" "}
+            {requestedModel || "model未選択"}
+          </span>
           <span>{instructionBytes} / 2000 UTF-8 bytes</span>
         </div>
         <p className="composer-boundary">
@@ -873,6 +985,8 @@ function TargetComposer({
             resolution?.status !== "resolved" ||
             prompt.trim().length === 0 ||
             instructionBytes > 2000 ||
+            provider?.availability !== "available" ||
+            !provider.models.some((model) => model.id === requestedModel) ||
             capturedTarget.captureRevisionId !== project.revisionId ||
             resolution.resolvedRevisionId !== project.revisionId
           }
@@ -906,7 +1020,22 @@ function ReviewDrawer({
   onSource,
 }: ReviewDrawerProps) {
   const hardError = proposal.validation.status === "failed";
+  const blockingWarning = proposal.validation.checks.some(
+    (check) => check.blocking,
+  );
   const rationaleBytes = utf8Bytes(rationale);
+  const reportedUsage = [
+    { label: "input", tokens: proposal.attribution.usage?.inputTokens },
+    { label: "output", tokens: proposal.attribution.usage?.outputTokens },
+    { label: "total", tokens: proposal.attribution.usage?.totalTokens },
+  ]
+    .map(({ label, tokens }) =>
+      tokens === undefined
+        ? null
+        : `${label} ${tokens.toLocaleString("ja-JP")}`,
+    )
+    .filter((value): value is string => value !== null)
+    .join(" · ");
   return (
     <section className="review-drawer" aria-labelledby="review-title">
       <div className="review-heading">
@@ -940,7 +1069,18 @@ function ReviewDrawer({
           <span>Source attribution</span>
           <strong>caller-supplied</strong>
           <code>{proposal.sourceAttribution}</code>
+          <span>
+            {proposal.attribution.providerId} ·{" "}
+            {proposal.attribution.reportedModel}
+          </span>
+          <code>{proposal.attribution.adapterVersion}</code>
+          <span>
+            request {shortIdentity(proposal.attribution.providerRequestId)}
+          </span>
           <span className="unverified">! execution未検証</span>
+          {reportedUsage === "" ? null : (
+            <span className="provider-usage">{reportedUsage} tokens</span>
+          )}
         </div>
       </div>
 
@@ -953,6 +1093,9 @@ function ReviewDrawer({
                 <span className={`change-kind change-${change.kind}`}>
                   {change.kind}
                 </span>
+                {change.fromPath === undefined ? null : (
+                  <code>{change.fromPath} →</code>
+                )}
                 <code>{change.path}</code>
               </li>
             ))}
@@ -966,11 +1109,23 @@ function ReviewDrawer({
           </p>
           <ul className="validation-list">
             {proposal.validation.checks.map((check) => (
-              <li key={check.id}>
+              <li
+                key={check.id}
+                className={check.blocking ? "validation-blocking" : undefined}
+              >
                 <strong>
                   {check.status === "passed" ? "✓" : "!"} {check.label}
                 </strong>
                 <span>{check.message}</span>
+                {check.destinations.length === 0 ? null : (
+                  <ul>
+                    {check.destinations.map((destination) => (
+                      <li key={destination}>
+                        <code>{destination}</code>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             ))}
           </ul>
@@ -993,6 +1148,25 @@ function ReviewDrawer({
           <pre className="diff-view" tabIndex={0}>
             <code>{proposal.unifiedDiff}</code>
           </pre>
+          <details className="change-set-details">
+            <summary>
+              ChangeSet v{proposal.changeSet.version} ·{" "}
+              {proposal.changeSet.operations.length} operations
+            </summary>
+            <p>
+              SHA-256 <code>{proposal.changeSetSha256}</code>
+            </p>
+            <ol>
+              {proposal.changeSet.operations.map((operation, index) => (
+                <li key={`${operation.op}:${String(index)}`}>
+                  <code>{operation.op}</code>{" "}
+                  {"path" in operation
+                    ? operation.path
+                    : `${operation.from} → ${operation.to}`}
+                </li>
+              ))}
+            </ol>
+          </details>
         </section>
       </div>
 
@@ -1021,11 +1195,19 @@ function ReviewDrawer({
         <button
           type="button"
           className="button button-adopt"
-          disabled={busy || hardError || rationaleBytes > 2000}
+          disabled={
+            busy || hardError || blockingWarning || rationaleBytes > 2000
+          }
           onClick={onAdopt}
         >
           変更を採用
         </button>
+        {blockingWarning ? (
+          <p className="blocking-decision-note" role="alert">
+            新しいactive
+            behaviorを含むため、このProposalは採用できません。要望を修正して新しいProposalを作成してください。
+          </p>
+        ) : null}
       </div>
     </section>
   );
@@ -1295,6 +1477,16 @@ function Studio({ session }: StudioProps) {
   const [prompt, setPrompt] = useState(
     "見出しを、未来への期待が伝わる表現にしてください",
   );
+  const providers = session.bootstrap.capabilities.aiProviders;
+  const initialProvider =
+    providers.find(
+      (provider) =>
+        provider.id === "fake" && provider.availability === "available",
+    ) ?? providers.find((provider) => provider.availability === "available");
+  const [providerId, setProviderId] = useState(initialProvider?.id ?? "");
+  const [requestedModel, setRequestedModel] = useState(
+    initialProvider?.models[0]?.id ?? "",
+  );
   const [rationale, setRationale] = useState("");
   const [targetKind, setTargetKind] = useState<TargetKind>("element");
   const [structure, setStructure] = useState<PreviewStructureNode[]>([]);
@@ -1497,7 +1689,7 @@ function Studio({ session }: StudioProps) {
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || state.operation !== null) return;
       if (state.contextReview !== null) {
         event.preventDefault();
         dispatch({ type: "CONTEXT_CLOSED" });
@@ -1508,15 +1700,21 @@ function Studio({ session }: StudioProps) {
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [clearTarget, state.contextReview, state.target]);
+  }, [clearTarget, state.contextReview, state.operation, state.target]);
 
   const reviewContext = () => {
     if (state.project === null || state.target === null) return;
     const project = state.project;
     const selection = state.target;
     const instruction = prompt.trim();
+    const provider = providers.find(
+      (candidate) =>
+        candidate.id === providerId && candidate.availability === "available",
+    );
     if (
       instruction.length === 0 ||
+      provider === undefined ||
+      !provider.models.some((model) => model.id === requestedModel) ||
       selection.resolution.status !== "resolved" ||
       selection.resolution.resolvedRevisionId !== project.revisionId
     ) {
@@ -1524,22 +1722,36 @@ function Studio({ session }: StudioProps) {
     }
     void run(async () => {
       dispatch({ type: "OPERATION_STARTED", operation: "assembling_context" });
+      const attemptId = crypto.randomUUID();
       const context = await session.api.createContext(
         project.id,
         project.revisionId,
         selection.target.targetId,
         selection.resolutionId,
+        attemptId,
+        provider.id,
+        requestedModel,
         instruction,
       );
       if (
         context.revisionId !== project.revisionId ||
         context.targetId !== selection.target.targetId ||
-        context.targetResolutionId !== selection.resolutionId
+        context.targetResolutionId !== selection.resolutionId ||
+        context.attemptId !== attemptId ||
+        context.providerId !== provider.id ||
+        context.requestedModel !== requestedModel ||
+        context.provider.providerId !== provider.id ||
+        context.provider.requestedModel !== requestedModel ||
+        context.provider.adapterVersion !== provider.adapterVersion ||
+        context.provider.external !== provider.external
       ) {
-        throw new ApiError("送信コンテキストのTarget bindingが一致しません。", {
-          code: "context_binding_mismatch",
-          retryable: false,
-        });
+        throw new ApiError(
+          "送信コンテキストのTargetまたはprovider bindingが一致しません。",
+          {
+            code: "context_binding_mismatch",
+            retryable: false,
+          },
+        );
       }
       dispatch({ type: "CONTEXT_READY", context });
     });
@@ -1556,7 +1768,28 @@ function Studio({ session }: StudioProps) {
         contextReview.id,
         contextReview.sha256,
       );
-      dispatch({ type: "PROPOSAL_READY", proposal });
+      if (
+        proposal.baseRevisionId !== project.revisionId ||
+        proposal.changeSet.baseRevisionId !== project.revisionId ||
+        proposal.providerContextSha256 !== contextReview.sha256 ||
+        proposal.attribution.attemptId !== contextReview.attemptId ||
+        proposal.attribution.providerId !== contextReview.provider.providerId ||
+        proposal.attribution.requestedModel !==
+          contextReview.provider.requestedModel ||
+        proposal.attribution.adapterVersion !==
+          contextReview.provider.adapterVersion ||
+        proposal.attribution.external !== contextReview.provider.external
+      ) {
+        throw new ApiError(
+          "変更案のAccepted revisionまたはreviewed provider context bindingが一致しません。",
+          { code: "proposal_binding_mismatch", retryable: false },
+        );
+      }
+      dispatch({
+        type: "PROPOSAL_READY",
+        proposal,
+        instruction: contextReview.instruction,
+      });
     });
   };
 
@@ -1813,9 +2046,22 @@ function Studio({ session }: StudioProps) {
           project={state.project}
           target={state.target}
           prompt={prompt}
-          disabled={busy || state.proposal !== null}
+          providers={providers}
+          providerId={providerId}
+          requestedModel={requestedModel}
+          disabled={
+            busy || state.proposal !== null || state.contextReview !== null
+          }
           reviewButtonRef={reviewButtonRef}
           onPrompt={setPrompt}
+          onProvider={(nextProviderId) => {
+            const next = providers.find(
+              (provider) => provider.id === nextProviderId,
+            );
+            setProviderId(nextProviderId);
+            setRequestedModel(next?.models[0]?.id ?? "");
+          }}
+          onModel={setRequestedModel}
           onReviewContext={reviewContext}
         />
       </div>
@@ -1824,7 +2070,7 @@ function Studio({ session }: StudioProps) {
         <ReviewDrawer
           proposal={state.proposal}
           target={state.proposalTarget}
-          prompt={prompt}
+          prompt={state.proposalInstruction ?? ""}
           busy={busy}
           rationale={rationale}
           onRationale={setRationale}
@@ -1844,8 +2090,7 @@ function Studio({ session }: StudioProps) {
 
       {state.contextReview !== null ? (
         <ContextDialog
-          canonicalJson={state.contextReview.canonicalJson}
-          sha256={state.contextReview.sha256}
+          context={state.contextReview}
           busy={busy}
           returnFocus={reviewButtonRef}
           onClose={() => dispatch({ type: "CONTEXT_CLOSED" })}

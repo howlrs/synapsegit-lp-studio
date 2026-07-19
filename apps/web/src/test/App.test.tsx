@@ -5,6 +5,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { ProposalResponse } from "@synapsegit-lp/contracts";
 import { App } from "../App";
 import {
   ACCEPTED_PREVIEW_ORIGIN,
@@ -25,6 +26,132 @@ const jsonResponse = (value: unknown): Response =>
     headers: { "Content-Type": "application/json" },
   });
 
+const proposalResponseForAttempt = (attemptId: string): ProposalResponse => ({
+  ...proposalResponseFixture,
+  proposal: {
+    ...proposalResponseFixture.proposal,
+    attribution: {
+      ...proposalResponseFixture.proposal.attribution,
+      attemptId,
+    },
+  },
+});
+
+const proposalBindingMismatchCases: Array<
+  [string, (response: ProposalResponse) => ProposalResponse]
+> = [
+  [
+    "Accepted base revision",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        baseRevisionId: "revision-foreign",
+        changeSet: {
+          ...response.proposal.changeSet,
+          baseRevisionId: "revision-foreign",
+        },
+      },
+    }),
+  ],
+  [
+    "reviewed context digest",
+    (response) => ({
+      ...response,
+      proposal: { ...response.proposal, providerContextSha256: HASH_C },
+    }),
+  ],
+  [
+    "attempt",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        attribution: {
+          ...response.proposal.attribution,
+          attemptId: "attempt-foreign",
+        },
+      },
+    }),
+  ],
+  [
+    "provider",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        attribution: {
+          ...response.proposal.attribution,
+          providerId: "openai",
+        },
+      },
+    }),
+  ],
+  [
+    "requested model",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        attribution: {
+          ...response.proposal.attribution,
+          requestedModel: "other-model",
+        },
+      },
+    }),
+  ],
+  [
+    "adapter version",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        attribution: {
+          ...response.proposal.attribution,
+          adapterVersion: "other-adapter/1",
+        },
+      },
+    }),
+  ],
+  [
+    "external-provider flag",
+    (response) => ({
+      ...response,
+      proposal: {
+        ...response.proposal,
+        attribution: { ...response.proposal.attribution, external: true },
+      },
+    }),
+  ],
+];
+
+const openRetainedProjectAndSelectTarget = async (): Promise<void> => {
+  const openButton = await screen.findByRole("button", {
+    name: "Untitled landing pageを開く",
+  });
+  fireEvent.click(openButton);
+  const frame = (await screen.findByTitle("LPプレビュー")) as HTMLIFrameElement;
+  await waitFor(() => expect(frame).toHaveAttribute("aria-busy", "false"));
+  fireEvent.load(frame);
+  fireEvent(
+    window,
+    new MessageEvent("message", {
+      origin: ACCEPTED_PREVIEW_ORIGIN,
+      source: frame.contentWindow,
+      data: {
+        type: "synapsegit-lp.target-draft",
+        schemaVersion: "1",
+        channelId: "11111111-2222-4333-8444-555555555555",
+        projectId: "project-001",
+        snapshotId: "revision-accepted-001",
+        revisionId: "revision-accepted-001",
+        target: targetResponseFixture.target,
+      },
+    }),
+  );
+  expect(await screen.findByText("#hero-heading")).toBeInTheDocument();
+};
+
 describe("C2 browser vertical slice", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -33,6 +160,11 @@ describe("C2 browser vertical slice", () => {
   it("creates, targets, reviews exact context, adopts, and refreshes Accepted state", async () => {
     const requestLog: string[] = [];
     const requestBodies: unknown[] = [];
+    let reviewedAttemptId = "";
+    let resolveProposalResponse: ((response: Response) => void) | undefined;
+    const deferredProposalResponse = new Promise<Response>((resolve) => {
+      resolveProposalResponse = resolve;
+    });
     const fetchMock = vi.fn(
       async (
         input: RequestInfo | URL,
@@ -58,17 +190,31 @@ describe("C2 browser vertical slice", () => {
           return jsonResponse(targetResponseFixture);
         }
         if (path.endsWith("/contexts")) {
-          return jsonResponse(contextResponseFixture);
-        }
-        if (path.endsWith("/proposals")) {
+          const request = JSON.parse(String(init?.body)) as {
+            attemptId: string;
+            instruction: string;
+            providerId: string;
+            requestedModel: string;
+          };
+          reviewedAttemptId = request.attemptId;
           return jsonResponse({
-            ...proposalResponseFixture,
-            proposal: {
-              ...proposalResponseFixture.proposal,
-              unifiedDiff:
-                "--- a/index.html\n+++ b/index.html\n-<h1>まだ、白紙です。</h1>\n+<h1>対話から、公開できるLPへ。</h1>\n+<img onerror=alert(1)>",
+            ...contextResponseFixture,
+            context: {
+              ...contextResponseFixture.context,
+              attemptId: request.attemptId,
+              providerId: request.providerId,
+              requestedModel: request.requestedModel,
+              instruction: request.instruction,
+              provider: {
+                ...contextResponseFixture.context.provider,
+                providerId: request.providerId,
+                requestedModel: request.requestedModel,
+              },
             },
           });
+        }
+        if (path.endsWith("/proposals")) {
+          return deferredProposalResponse;
         }
         if (path.endsWith("/approvals")) {
           return jsonResponse({
@@ -187,6 +333,18 @@ describe("C2 browser vertical slice", () => {
     fireEvent.click(
       within(dialog).getByRole("button", { name: "変更案を作成" }),
     );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    resolveProposalResponse?.(
+      jsonResponse({
+        ...proposalResponseForAttempt(reviewedAttemptId),
+        proposal: {
+          ...proposalResponseForAttempt(reviewedAttemptId).proposal,
+          unifiedDiff:
+            "--- a/index.html\n+++ b/index.html\n-<h1>まだ、白紙です。</h1>\n+<h1>対話から、公開できるLPへ。</h1>\n+<img onerror=alert(1)>",
+        },
+      }),
+    );
 
     const review = await screen.findByRole("heading", { name: "変更案を確認" });
     const drawer = review.closest("section");
@@ -197,6 +355,12 @@ describe("C2 browser vertical slice", () => {
     expect(
       within(drawer as HTMLElement).getByText(/execution未検証/),
     ).toBeInTheDocument();
+    expect(drawer).toHaveTextContent("input 460");
+    expect(drawer).toHaveTextContent("output 32");
+    expect(drawer).toHaveTextContent("total 492 tokens");
+    expect(drawer).toHaveTextContent(
+      "見出しを、未来への期待が伝わる表現にしてください",
+    );
     expect(
       within(drawer as HTMLElement).getByText(/<img onerror/),
     ).toBeInTheDocument();
@@ -281,6 +445,9 @@ describe("C2 browser vertical slice", () => {
       revisionId: "revision-accepted-001",
       targetId: "target-001",
       resolutionId: "resolution-001",
+      attemptId: "11111111-2222-4333-8444-555555555555",
+      providerId: "fake",
+      requestedModel: "deterministic-v1",
       instruction: "見出しを、未来への期待が伝わる表現にしてください",
     });
 
@@ -292,6 +459,262 @@ describe("C2 browser vertical slice", () => {
       expect(init?.credentials).toBe("omit");
     }
   });
+
+  it("rejects an external context binding that suppresses provider disclosure", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          const bootstrap = bootstrapFixture(window.location.origin);
+          return jsonResponse({
+            ...bootstrap,
+            capabilities: {
+              ...bootstrap.capabilities,
+              aiProviders: bootstrap.capabilities.aiProviders.map((provider) =>
+                provider.id === "openai"
+                  ? {
+                      ...provider,
+                      availability: "available",
+                      models: [{ id: "gpt-5.4-mini", label: "gpt-5.4-mini" }],
+                    }
+                  : provider,
+              ),
+            },
+          });
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        if (path.endsWith("/targets")) {
+          return jsonResponse(targetResponseFixture);
+        }
+        if (path.endsWith("/contexts")) {
+          const request = JSON.parse(String(init?.body)) as {
+            attemptId: string;
+            instruction: string;
+            providerId: string;
+            requestedModel: string;
+          };
+          return jsonResponse({
+            ...contextResponseFixture,
+            context: {
+              ...contextResponseFixture.context,
+              attemptId: request.attemptId,
+              providerId: request.providerId,
+              requestedModel: request.requestedModel,
+              instruction: request.instruction,
+              provider: {
+                providerId: request.providerId,
+                adapterVersion: "openai-responses/1",
+                requestedModel: request.requestedModel,
+                external: false,
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await openRetainedProjectAndSelectTarget();
+    fireEvent.change(screen.getByLabelText("AI provider"), {
+      target: { value: "openai" },
+    });
+    expect(screen.getByLabelText("Model")).toHaveValue("gpt-5.4-mini");
+    fireEvent.click(screen.getByRole("button", { name: "送信内容を確認" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Targetまたはprovider bindingが一致しません",
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/proposals"),
+      ),
+    ).toBe(false);
+  });
+
+  it("reviews redacted context but keeps full-file Proposal generation unavailable", async () => {
+    const secretCanary = "sk-C6_REDACTION_SECRET_CANARY_123456789";
+    const redactedHtml = `<meta data-api-key="[LP_STUDIO_REDACTED]">`;
+    const redactedCanonicalJson = JSON.stringify({
+      untrustedSiteContent: [{ path: "index.html", content: redactedHtml }],
+    });
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        if (path.endsWith("/targets")) {
+          return jsonResponse(targetResponseFixture);
+        }
+        if (path.endsWith("/contexts")) {
+          const request = JSON.parse(String(init?.body)) as {
+            attemptId: string;
+            instruction: string;
+            providerId: string;
+            requestedModel: string;
+          };
+          return jsonResponse({
+            ...contextResponseFixture,
+            context: {
+              ...contextResponseFixture.context,
+              attemptId: request.attemptId,
+              providerId: request.providerId,
+              requestedModel: request.requestedModel,
+              instruction: request.instruction,
+              provider: {
+                ...contextResponseFixture.context.provider,
+                providerId: request.providerId,
+                requestedModel: request.requestedModel,
+              },
+              manifest: {
+                ...contextResponseFixture.context.manifest,
+                entries: contextResponseFixture.context.manifest.entries.map(
+                  (entry, index) =>
+                    index === 0
+                      ? {
+                          ...entry,
+                          redacted: true,
+                          redactions: ["credential_assignment"],
+                        }
+                      : entry,
+                ),
+              },
+              canonicalJson: redactedCanonicalJson,
+            },
+          });
+        }
+        if (path.endsWith("/proposals")) {
+          return jsonResponse(proposalResponseFixture);
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await openRetainedProjectAndSelectTarget();
+    fireEvent.click(screen.getByRole("button", { name: "送信内容を確認" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "送信内容を確認",
+    });
+
+    expect(within(dialog).getByText(redactedCanonicalJson)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(secretCanary);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "redactionを含むfileから安全なfull-file ChangeSetを生成できない",
+    );
+    const generate = within(dialog).getByRole("button", {
+      name: "変更案を作成",
+    });
+    expect(generate).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "送信内容を閉じる" }),
+    ).toBeEnabled();
+    fireEvent.click(generate);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/proposals"),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(proposalBindingMismatchCases)(
+    "rejects a Proposal with mismatched %s binding",
+    async (_name, mutateProposal) => {
+      let reviewedAttemptId = "";
+      const fetchMock = vi.fn(
+        async (
+          input: RequestInfo | URL,
+          init?: RequestInit,
+        ): Promise<Response> => {
+          const path = String(input);
+          const method = init?.method ?? "GET";
+          if (path === "/api/v1/bootstrap") {
+            return jsonResponse(bootstrapFixture(window.location.origin));
+          }
+          if (method === "GET" && path === "/api/v1/projects") {
+            return jsonResponse(projectsResponseFixture());
+          }
+          if (method === "GET" && path === "/api/v1/projects/project-001") {
+            return jsonResponse(projectResponseFixture());
+          }
+          if (path.endsWith("/targets")) {
+            return jsonResponse(targetResponseFixture);
+          }
+          if (path.endsWith("/contexts")) {
+            const request = JSON.parse(String(init?.body)) as {
+              attemptId: string;
+              instruction: string;
+              providerId: string;
+              requestedModel: string;
+            };
+            reviewedAttemptId = request.attemptId;
+            return jsonResponse({
+              ...contextResponseFixture,
+              context: {
+                ...contextResponseFixture.context,
+                attemptId: request.attemptId,
+                providerId: request.providerId,
+                requestedModel: request.requestedModel,
+                instruction: request.instruction,
+                provider: {
+                  ...contextResponseFixture.context.provider,
+                  providerId: request.providerId,
+                  requestedModel: request.requestedModel,
+                },
+              },
+            });
+          }
+          if (path.endsWith("/proposals")) {
+            return jsonResponse(
+              mutateProposal(proposalResponseForAttempt(reviewedAttemptId)),
+            );
+          }
+          throw new Error(`Unexpected request: ${method} ${path}`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+      await openRetainedProjectAndSelectTarget();
+      fireEvent.click(screen.getByRole("button", { name: "送信内容を確認" }));
+      const dialog = await screen.findByRole("dialog", {
+        name: "送信内容を確認",
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "変更案を作成" }),
+      );
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "reviewed provider context bindingが一致しません",
+      );
+      expect(
+        screen.queryByRole("heading", { name: "変更案を確認" }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("lists retained projects and reopens the selected Accepted state", async () => {
     const fetchMock = vi.fn(

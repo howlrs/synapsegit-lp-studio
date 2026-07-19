@@ -6,7 +6,7 @@ Branch: `agent/lp-studio-m1`
 
 Draft PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
 
-Completed progress: 56%
+Completed progress: 65%
 
 ## Checkpoints
 
@@ -18,7 +18,7 @@ Completed progress: 56%
 | C3 Project/revision/import | 8% | complete | private retained state root; canonical immutable revision/CAS and Accepted pointer; reviewed copy import; restart, drift, malicious-path, root-overlap, source-preservation, and browser E2E evidence |
 | C4 Separate-origin preview | 8% | complete | session/project/snapshot-scoped opaque Preview origins; exact Host/route binding and revocation; CSP/sandbox/storage/navigation isolation; privacy-safe diagnostics; Rust, Web, and Chromium evidence |
 | C5 Target v1 and resolution | 10% | complete | strict six-kind TargetV1/schema; immutable target persistence/restart; scoped bridge capture and dynamic tree; fail-closed resolution receipt; Web/Rust/Chromium evidence; [SynapseGit #29](https://github.com/howlrs/synapsegit/issues/29) |
-| C6 AI context and ChangeSet | 9% | planned | — |
+| C6 AI context and ChangeSet | 9% | complete | exact reviewed provider context/manifest; deterministic fake and optional OpenAI Responses adapters; strict four-operation ChangeSet; atomic isolated workspace, Target re-resolution, blocking active-behavior checks; Web/Rust/Chromium evidence |
 | C7 Review, Decision, recovery | 8% | planned | — |
 | C8 Export, publication, integrated E2E | 7% | planned | [#17 follow-up](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363) |
 | **80% local verification gate** | — | blocked until C0–C8 complete | Creator check required before C9 |
@@ -51,7 +51,7 @@ Completed progress: 56%
   as a SynapseGit checkout.
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
-- C0 through C5 are implemented and locally verified. C5 evidence is bound to
+- C0 through C6 are implemented and locally verified. C6 evidence is bound to
   this checkpoint commit and its GitHub checks. No tag, merge,
   release, product publication, or distribution permission exists yet.
 - The development repository is Public by explicit Creator direction. Public
@@ -203,9 +203,77 @@ Completed progress: 56%
   cross-browser visual accuracy remain deferred to later M1 acceptance and
   hardening. The current resolver fails closed instead of guessing.
 
+## C6 evidence and limits
+
+- Context creation binds the exact attempt, instruction, Target, current
+  resolution receipt, Accepted revision, provider/model/adapter, system
+  instruction, output contract, and redacted site content into one canonical
+  digest. The Creator can expand those exact provider bytes before generation.
+- The manifest is limited to ten UTF-8 text files, 512 KiB per file, and 2 MiB
+  total. It reports path, media type, purpose, line range, source/included byte
+  count, digest, token estimate, redactions, truncation, and screenshot-off
+  state. Credential-like values and common local absolute paths are redacted;
+  site content is explicitly quoted as untrusted data.
+- Original Accepted and included-redacted content digests are distinct. Because
+  ChangeSet v1 uses full-file replacement, a context containing any redacted
+  site file remains locally reviewable but generation is disabled in the UI
+  and rejected server-side before provider execution. C6 never rehydrates a
+  model-authored placeholder or pays for a provider call that cannot be safely
+  applied. Redacted instructions and Target labels may still generate when the
+  site-file manifest itself is clean.
+- Provider capabilities expose the local deterministic fake and, only when a
+  server-side key is configured, an OpenAI Responses adapter. Provider/model
+  selection is allow-listed. The live request uses no tools, low reasoning
+  effort, strict Structured Outputs, no provider-side storage request, no
+  redirects, bounded timeouts, and a 4 MiB streaming response cap.
+- The Responses adapter accepts exactly one completed assistant message with
+  one non-empty output-text part. Missing control fields, unknown/extra output
+  items, multiple text parts, incomplete messages, and malformed envelopes
+  fail closed; any explicit refusal rejects the entire response even when text
+  is also present.
+- The browser receives no provider credential. Safe errors omit provider response
+  bodies, and failed or invalid raw results are neither logged nor materialized.
+  Valid attribution binds attempt, provider request ID, provider, requested and
+  reported model, adapter, external/local status, and only provider-reported
+  usage.
+- ChangeSet v1 rejects unknown fields/operations, stale bases, unsafe or
+  case-colliding paths, media mismatches, binary generation, excessive counts
+  or bytes, conflicting operations, rename cycles, and exact hash-precondition
+  failures. All four operations apply to a clone before entry point, syntax,
+  local-reference, export deny-list, and Target checks.
+- A valid result is materialized into an immutable isolated Proposal workspace,
+  then registered through the pinned real SynapseGit generic artifact path.
+  SynapseGit receives a privacy-filtered digest projection rather than the user
+  prompt, full Target, site snippets, credential, or raw model result. The UI
+  continues to state caller-supplied attribution and `execution未検証`.
+- Newly introduced external origins (including protocol-relative URLs), form
+  actions, script/iframe/download behavior, inline event handlers, changed
+  local or inline script bodies, analytics, and cookie behavior are visible
+  blocking warnings with exact destinations. Both the UI and Decision server
+  reject adoption while one is present; reject and defer remain available
+  Human dispositions. Accepted bytes are unchanged on every failed
+  generation/validation.
+- Local gates pass with 205 Web tests, 63 Rust library tests, 10 launcher
+  tests, Clippy warnings denied, strict schema/guard parity, production build,
+  and 3 Chromium E2E flows. One external-billing live-provider test remains
+  explicitly ignored unless manually acknowledged.
+- Ordinary CI uses only the fake adapter. The opt-in ignored OpenAI live contract
+  test requires an explicit environment acknowledgement and credential and was
+  not executed in the credential-free checkpoint gates. Its external network,
+  billing, and account availability are therefore not claimed as automated CI
+  evidence.
+- Consultation mode, message persistence/branching, streaming and cancellation,
+  screenshot opt-in, target-optimized snippets, pending Proposal restart
+  recovery, multi-Proposal history, and protected-range editing for redacted
+  site files remain deliberately deferred. Shared stream/cancel contract types
+  are not presented as an available runtime capability. Safe same-file secret
+  preservation requires a future digest-bound range-edit protocol rather than
+  ChangeSet v1 placeholder rehydration. Recovery and sequential admission
+  continue in C7 and SynapseGit Issues #23/#26.
+
 ## Next checkpoint
 
-C6 turns the reviewed Target context into a provider-neutral AI request and
-strict ChangeSet protocol. It keeps the deterministic fake provider as the
-offline reference, validates operation order and file preconditions, and binds
-every Proposal to the exact current Accepted revision.
+C7 makes review decisions explicit and restart-safe: adopt, reject, and defer
+remain Human-only terminal actions; a durable local journal reconciles the
+Synapse receipt with the application Accepted pointer without inventing
+restart authority that the pinned SynapseGit contract does not expose.
