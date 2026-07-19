@@ -8,10 +8,13 @@ import {
   isExportResponse,
   isImportPreviewResponse,
   isPreviewActionMessage,
+  isPreviewDiagnosticMessage,
+  isPreviewScopeBaseOrigin,
   isPreviewSelectionMessage,
   isProjectResponse,
   isProjectsResponse,
   isProposalResponse,
+  isScopedPreviewUrl,
   isTargetResponse,
 } from "@synapsegit-lp/contracts";
 import apiSchema from "../../../../packages/contracts/schemas/api-v1.schema.json";
@@ -61,6 +64,18 @@ const previewClearSelection = {
   projectId: "project-001",
   snapshotId: "proposal-001",
   revisionId: "revision-accepted-001",
+};
+
+const previewDiagnostic = {
+  type: "synapsegit-lp.diagnostic",
+  schemaVersion: "1",
+  channelId: "channel-001",
+  projectId: "project-001",
+  snapshotId: "proposal-001",
+  revisionId: "revision-accepted-001",
+  severity: "warning",
+  code: "csp_blocked",
+  sourceUnavailable: true,
 };
 
 const bootstrap = bootstrapFixture();
@@ -305,6 +320,11 @@ const extraFieldCases: ReadonlyArray<
     isPreviewActionMessage,
     { ...previewSetMode, extra: true },
   ],
+  [
+    "preview diagnostic root",
+    isPreviewDiagnosticMessage,
+    { ...previewDiagnostic, extra: true },
+  ],
 ];
 
 describe("canonical API v1 schema", () => {
@@ -331,6 +351,7 @@ describe("canonical API v1 schema", () => {
     ["export", exportResponseFixture],
     ["error", apiErrorResponseFixture],
     ["preview selection", previewSelection],
+    ["preview diagnostic", previewDiagnostic],
     ["preview set mode", previewSetMode],
     ["preview clear selection", previewClearSelection],
   ])("validates the %s fixture with Draft 2020-12", (_name, fixture) => {
@@ -353,6 +374,7 @@ describe("canonical API v1 schema", () => {
     expect(validate(withoutSnapshot)).toBe(false);
     expect(isPreviewSelectionMessage(withoutSnapshot)).toBe(false);
     expect(isPreviewSelectionMessage(previewSelection)).toBe(true);
+    expect(isPreviewDiagnosticMessage(previewDiagnostic)).toBe(true);
   });
 
   it("binds mode presence exactly to the preview action", () => {
@@ -398,6 +420,30 @@ describe("canonical API v1 schema", () => {
       ).toBe(false);
     }
   });
+
+  it("rejects foreign preview scopes and non-canonical scoped URLs in the schema", () => {
+    for (const previewOrigin of [
+      "https://localhost:4174",
+      "http://localhost",
+      "http://child.localhost:4174",
+    ]) {
+      expect(validate({ ...bootstrap, previewOrigin })).toBe(false);
+    }
+    for (const previewUrl of [
+      "http://pv-11111111111111111111111111111111.localhost.attacker.test:4174/preview/project-001/revision-001/",
+      "http://user@pv-11111111111111111111111111111111.localhost:4174/preview/project-001/revision-001/",
+      "http://pv-11111111111111111111111111111111.localhost:4174/preview/project-001/../secret/",
+      "http://pv-11111111111111111111111111111111.localhost:4174/preview/project-001/revision-001",
+      "http://pv-11111111111111111111111111111111.localhost:4174/preview/project-001/revision-001/assets/",
+    ]) {
+      expect(
+        validate({
+          ...project,
+          project: { ...project.project, previewUrl },
+        }),
+      ).toBe(false);
+    }
+  });
 });
 
 describe("runtime response and bridge guards", () => {
@@ -414,6 +460,7 @@ describe("runtime response and bridge guards", () => {
     expect(isExportResponse(exportResponseFixture)).toBe(true);
     expect(isApiErrorResponse(apiErrorResponseFixture)).toBe(true);
     expect(isPreviewSelectionMessage(previewSelection)).toBe(true);
+    expect(isPreviewDiagnosticMessage(previewDiagnostic)).toBe(true);
     expect(isPreviewActionMessage(previewSetMode)).toBe(true);
     expect(isPreviewActionMessage(previewClearSelection)).toBe(true);
   });
@@ -497,5 +544,73 @@ describe("runtime response and bridge guards", () => {
         }),
       ).toBe(false);
     }
+  });
+
+  it("accepts only the local scope base and canonical scoped preview URLs", () => {
+    const scopeBase = "http://localhost:4174";
+    const scopedOrigin =
+      "http://pv-0123456789abcdef0123456789abcdef.localhost:4174";
+    expect(isPreviewScopeBaseOrigin(scopeBase)).toBe(true);
+    expect(
+      isScopedPreviewUrl(
+        `${scopedOrigin}/preview/project-001/revision-001/`,
+        scopeBase,
+      ),
+    ).toBe(true);
+    expect(
+      isScopedPreviewUrl(
+        `${scopedOrigin}/preview/project-001/revision-001/assets/app.css`,
+        scopeBase,
+      ),
+    ).toBe(true);
+
+    for (const invalidBase of [
+      "https://localhost:4174",
+      "http://127.0.0.1:4174",
+      "http://localhost",
+      "http://localhost:80",
+      "http://localhost:4174/path",
+      "http://attacker.localhost:4174",
+    ]) {
+      expect(isPreviewScopeBaseOrigin(invalidBase)).toBe(false);
+    }
+
+    for (const invalidUrl of [
+      "http://pv-0123456789abcdef0123456789abcdef.localhost.attacker.test:4174/preview/project-001/revision-001/",
+      "http://evil.pv-0123456789abcdef0123456789abcdef.localhost:4174/preview/project-001/revision-001/",
+      `${scopedOrigin.replace(":4174", ":4175")}/preview/project-001/revision-001/`,
+      "http://user@pv-0123456789abcdef0123456789abcdef.localhost:4174/preview/project-001/revision-001/",
+      `${scopedOrigin}/preview/project-001/../secret/`,
+      `${scopedOrigin}/preview/project-001/%2e%2e/secret.css`,
+      `${scopedOrigin}/preview/project-001/revision-001//app.css`,
+      `${scopedOrigin}/preview/project-001/revision-001`,
+      `${scopedOrigin}/preview/project-001/revision-001/assets/`,
+      `${scopedOrigin}/preview/project-001/revision-001/?query=secret`,
+      `${scopedOrigin}/preview/project-001/revision-001/#fragment`,
+    ]) {
+      expect(isScopedPreviewUrl(invalidUrl, scopeBase)).toBe(false);
+    }
+  });
+
+  it("accepts only the fixed privacy-safe diagnostic vocabulary", () => {
+    expect(isPreviewDiagnosticMessage(previewDiagnostic)).toBe(true);
+    expect(
+      isPreviewDiagnosticMessage({
+        ...previewDiagnostic,
+        message: "file:///private/site/index.html",
+      }),
+    ).toBe(false);
+    expect(
+      isPreviewDiagnosticMessage({
+        ...previewDiagnostic,
+        sourceUnavailable: false,
+      }),
+    ).toBe(false);
+    expect(
+      isPreviewDiagnosticMessage({
+        ...previewDiagnostic,
+        code: "raw_exception",
+      }),
+    ).toBe(false);
   });
 });

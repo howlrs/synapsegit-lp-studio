@@ -1,7 +1,10 @@
 import {
   SCHEMA_VERSION,
+  isPreviewDiagnosticMessage,
   isPreviewSelectionMessage,
+  isScopedPreviewUrl,
   type PreviewActionMessage,
+  type PreviewDiagnosticMessage,
   type PreviewMode,
   type PreviewSelectionMessage,
 } from "@synapsegit-lp/contracts";
@@ -45,6 +48,33 @@ export const readPreviewSelection = (
   return selection;
 };
 
+/**
+ * Reads only the privacy-safe diagnostic vocabulary. Preview code cannot send
+ * raw URLs, exception messages, or stacks through this envelope.
+ */
+export const readPreviewDiagnostic = (
+  event: MessageEvent<unknown>,
+  binding: BridgeBinding,
+): PreviewDiagnosticMessage | null => {
+  if (
+    event.origin !== binding.expectedOrigin ||
+    event.source !== binding.expectedSource ||
+    !isPreviewDiagnosticMessage(event.data)
+  ) {
+    return null;
+  }
+  const diagnostic = event.data;
+  if (
+    diagnostic.channelId !== binding.channelId ||
+    diagnostic.projectId !== binding.projectId ||
+    diagnostic.snapshotId !== binding.snapshotId ||
+    diagnostic.revisionId !== binding.revisionId
+  ) {
+    return null;
+  }
+  return diagnostic;
+};
+
 export const postPreviewMode = (
   target: Window,
   binding: Omit<BridgeBinding, "expectedSource">,
@@ -81,14 +111,5 @@ export const postClearSelection = (
 
 export const isAllowedPreviewUrl = (
   previewUrl: string,
-  expectedOrigin: string,
-): boolean => {
-  try {
-    const parsed = new URL(previewUrl);
-    return (
-      parsed.origin === expectedOrigin && /^https?:$/.test(parsed.protocol)
-    );
-  } catch {
-    return false;
-  }
-};
+  previewScopeBaseOrigin: string,
+): boolean => isScopedPreviewUrl(previewUrl, previewScopeBaseOrigin);

@@ -16,6 +16,11 @@ import type {
 export const HASH_A = "a".repeat(64);
 export const HASH_B = "b".repeat(64);
 export const HASH_C = "c".repeat(64);
+export const PREVIEW_SCOPE_BASE = "http://localhost:4174";
+export const ACCEPTED_PREVIEW_ORIGIN =
+  "http://pv-11111111111111111111111111111111.localhost:4174";
+export const PROPOSED_PREVIEW_ORIGIN =
+  "http://pv-22222222222222222222222222222222.localhost:4174";
 
 export const bootstrapFixture = (
   editorOrigin = "http://localhost:3000",
@@ -27,7 +32,7 @@ export const bootstrapFixture = (
     expiresAt: "2026-07-19T12:00:00Z",
   },
   editorOrigin,
-  previewOrigin: "https://preview.test",
+  previewOrigin: PREVIEW_SCOPE_BASE,
   capabilities: {
     targetKinds: ["element"],
     dispositions: ["adopted_unchanged", "rejected", "deferred"],
@@ -51,7 +56,7 @@ export const projectFixture = (
   revisionId,
   acceptedManifestSha256: revisionId.endsWith("002") ? HASH_B : HASH_A,
   status: "ready",
-  previewUrl: `https://preview.test/projects/project-001/${revisionId}/index.html`,
+  previewUrl: `${ACCEPTED_PREVIEW_ORIGIN}/preview/project-001/${revisionId}/`,
   files: [
     { path: "index.html", byteLength: 1200 },
     { path: "styles.css", byteLength: 640 },
@@ -130,8 +135,7 @@ export const proposalResponseFixture: ProposalResponse = {
     reviewContextSha256: HASH_B,
     sourceAttribution: "caller_supplied_ai_attributed",
     executionVerified: false,
-    previewUrl:
-      "https://preview.test/projects/project-001/proposals/proposal-001/index.html",
+    previewUrl: `${PROPOSED_PREVIEW_ORIGIN}/preview/project-001/proposal-001/`,
     changes: [{ path: "index.html", kind: "modified" }],
     unifiedDiff:
       "--- a/index.html\n+++ b/index.html\n-<h1>まだ、白紙です。</h1>\n+<h1>対話から、公開できるLPへ。</h1>",

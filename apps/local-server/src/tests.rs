@@ -8,7 +8,7 @@ use tower::ServiceExt;
 
 const EDITOR_ORIGIN: &str = "http://editor.test:4321";
 const EDITOR_HOST: &str = "editor.test:4321";
-const PREVIEW_ORIGIN: &str = "http://preview.test:4322";
+const PREVIEW_ORIGIN: &str = "http://localhost:4322";
 static SYNAPSEGIT_WORKFLOW_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct Harness {
@@ -102,6 +102,23 @@ async fn get_for(state: &StudioState, token: &str, uri: &str) -> Response {
         .expect("response")
 }
 
+async fn get_preview_for(state: &StudioState, url: &str) -> Response {
+    get_preview_with_binding(state, preview_host(url), preview_path(url)).await
+}
+
+async fn get_preview_with_binding(state: &StudioState, host: &str, path: &str) -> Response {
+    preview_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header(HOST, host)
+                .body(Body::empty())
+                .expect("preview request"),
+        )
+        .await
+        .expect("preview response")
+}
+
 async fn bootstrap_token(state: &StudioState) -> String {
     let response = editor_router(state.clone())
         .oneshot(
@@ -138,6 +155,7 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     let project_id = string_at(&create_body, "/project/id");
     let original_revision = string_at(&create_body, "/project/revisionId");
     let original_manifest = string_at(&create_body, "/project/acceptedManifestSha256");
+    let accepted_preview_url = string_at(&create_body, "/project/previewUrl");
     assert_eq!(
         create_body["project"]["displayName"],
         "Untitled landing page"
@@ -194,6 +212,13 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
     let proposal_id = string_at(&proposal_body, "/proposal/id");
     let review_id = string_at(&proposal_body, "/proposal/reviewId");
     let proposal_digest = string_at(&proposal_body, "/proposal/artifactManifestSha256");
+    let proposal_preview_url = string_at(&proposal_body, "/proposal/previewUrl");
+    assert_ne!(accepted_preview_url, proposal_preview_url);
+    assert_ne!(
+        preview_host(&accepted_preview_url),
+        preview_host(&proposal_preview_url),
+        "each snapshot must receive an isolated origin"
+    );
     assert_ne!(proposal_digest, original_manifest);
     assert_eq!(proposal_body["proposal"]["executionVerified"], false);
     assert_eq!(proposal_body["proposal"]["validation"]["status"], "passed");
@@ -226,24 +251,70 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
         .oneshot(
             Request::builder()
                 .uri(format!("/preview/{project_id}/{proposal_id}/"))
+                .header(HOST, preview_host(&proposal_preview_url))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(proposal_preview.status(), StatusCode::OK);
+    let preview_headers = proposal_preview.headers();
+    assert_eq!(preview_headers.get(CACHE_CONTROL).unwrap(), "no-store");
+    assert_eq!(
+        preview_headers.get("clear-site-data").unwrap(),
+        "\"cache\", \"cookies\", \"storage\""
+    );
+    assert_eq!(
+        preview_headers.get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        preview_headers.get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
+    assert_eq!(
+        preview_headers.get("x-dns-prefetch-control").unwrap(),
+        "off"
+    );
     assert!(
-        proposal_preview
-            .headers()
-            .get("content-security-policy")
+        preview_headers
+            .get("permissions-policy")
             .unwrap()
             .to_str()
             .unwrap()
-            .contains("frame-ancestors http://editor.test:4321")
+            .contains("camera=()")
     );
+    let preview_csp = preview_headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(preview_csp.contains("frame-ancestors http://editor.test:4321"));
+    assert!(preview_csp.contains("script-src 'self' 'nonce-"));
+    assert!(preview_csp.contains("worker-src 'none'"));
+    assert!(preview_csp.contains("frame-src 'none'"));
+    assert!(preview_csp.contains("connect-src 'none'"));
+    assert!(preview_csp.contains("webrtc 'block'"));
+    assert!(preview_csp.contains("form-action 'none'"));
+    assert!(!preview_csp.contains("script-src 'unsafe-inline'"));
     let preview_html = response_text(proposal_preview).await;
     assert!(preview_html.contains("対話から、公開できるLPへ。"));
     assert!(preview_html.contains("synapsegit-lp.selection"));
+    assert!(preview_html.contains("synapsegit-lp.diagnostic"));
+    assert!(preview_html.contains("securitypolicyviolation"));
+    assert!(preview_html.contains("csp_blocked"));
+    assert!(preview_html.contains("site_error"));
+    assert!(preview_html.contains("unhandled_rejection"));
+    assert!(preview_html.contains("sourceUnavailable:true"));
+    assert!(preview_html.contains("window.name=\"\""));
+    assert!(preview_html.contains("pending.splice(0).forEach(send)"));
+    assert!(preview_html.contains("nav.addEventListener(\"navigate\""));
+    assert!(preview_html.contains("e.preventDefault()"));
+    assert!(preview_html.contains("Object.defineProperty(owner,name"));
+    assert!(preview_html.contains("RTCPeerConnection"));
+    assert!(!preview_html.contains("e.message"));
+    assert!(!preview_html.contains("e.filename"));
+    assert!(!preview_html.contains("e.stack"));
     assert!(preview_html.contains("channelId:channel"));
     assert!(preview_html.contains(&format!(
         "S={}",
@@ -320,6 +391,8 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
         decision_body["project"]["acceptedManifestSha256"],
         proposal_digest
     );
+    assert_uniform_preview_not_found(get_preview_for(&harness.state, &proposal_preview_url).await)
+        .await;
 
     let replay = harness
         .post(
@@ -373,6 +446,8 @@ async fn complete_real_synapsegit_flow_adopts_only_after_one_shot_approval() {
         .unwrap();
     assert!(index.contains("対話から、公開できるLPへ。"));
     assert!(!index.contains("synapsegit-lp.selection"));
+    assert!(!index.contains("synapsegit-lp.diagnostic"));
+    assert!(!index.contains("window.name=\"\""));
 }
 
 #[tokio::test]
@@ -478,11 +553,13 @@ async fn fake_ai_proposal_is_bound_to_each_selected_element() {
             "diff new {element_id}"
         );
         let proposal_id = string_at(&proposal_body, "/proposal/id");
+        let proposal_preview_url = string_at(&proposal_body, "/proposal/previewUrl");
 
         let preview = preview_router(harness.state.clone())
             .oneshot(
                 Request::builder()
                     .uri(format!("/preview/{project_id}/{proposal_id}/"))
+                    .header(HOST, preview_host(&proposal_preview_url))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -568,6 +645,9 @@ async fn retained_state_rehydrates_blank_project_and_immutable_revision() {
     let project_id = string_at(&created, "/project/id");
     let revision_id = string_at(&created, "/project/revisionId");
     let manifest_sha = string_at(&created, "/project/acceptedManifestSha256");
+    let first_preview_url = string_at(&created, "/project/previewUrl");
+    let first_secret_bound_url =
+        scoped_preview_url(&first_state, "ses_fixed", &project_id, &revision_id);
     drop(first_state);
 
     let second_state = StudioState::new(config()).unwrap();
@@ -582,6 +662,15 @@ async fn retained_state_rehydrates_blank_project_and_immutable_revision() {
         manifest_sha
     );
     assert_eq!(listed["projects"][0]["status"], "ready");
+    assert_ne!(
+        listed["projects"][0]["previewUrl"], first_preview_url,
+        "a restarted server must not reproduce a prior session origin"
+    );
+    assert_ne!(
+        scoped_preview_url(&second_state, "ses_fixed", &project_id, &revision_id),
+        first_secret_bound_url,
+        "the process preview secret must rotate across state reconstruction"
+    );
 
     let project_root = root.path().join("managed-v1/projects").join(&project_id);
     assert!(
@@ -626,6 +715,7 @@ async fn import_is_session_bound_rescanned_consumed_persisted_and_source_preserv
             .unwrap(),
     )
     .await;
+    assert_eq!(capability["previewOrigin"], PREVIEW_ORIGIN);
     assert_eq!(capability["capabilities"]["importAvailable"], true);
     assert_eq!(capability["capabilities"]["limits"]["maxFiles"], 1_000);
 
@@ -958,10 +1048,131 @@ async fn editor_responses_deny_framing_and_allow_only_the_preview_origin() {
         .to_str()
         .unwrap();
     assert!(csp.contains("frame-ancestors 'none'"));
-    assert!(csp.contains("frame-src http://preview.test:4322"));
+    assert!(csp.contains("frame-src http://*.localhost:4322"));
     assert!(csp.contains("script-src 'self'"));
     assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
     assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+}
+
+#[tokio::test]
+async fn preview_origins_are_session_and_route_bound_with_uniform_not_found_responses() {
+    let harness = Harness::new().await;
+    let created = response_json(
+        harness
+            .post(
+                "/api/v1/projects",
+                json!({"schemaVersion":"1","template":"blank"}),
+            )
+            .await,
+    )
+    .await;
+    let project_id = string_at(&created, "/project/id");
+    let revision_id = string_at(&created, "/project/revisionId");
+    let first_url = string_at(&created, "/project/previewUrl");
+    let first_host = preview_host(&first_url).to_owned();
+    assert!(first_url.starts_with("http://pv-"));
+    assert!(first_url.ends_with(&format!(
+        ".localhost:4322/preview/{project_id}/{revision_id}/"
+    )));
+    let first_label = first_host
+        .strip_suffix(".localhost:4322")
+        .unwrap()
+        .strip_prefix("pv-")
+        .unwrap();
+    assert_eq!(first_label.len(), 32);
+    assert!(
+        first_label
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(!first_url.contains('@'));
+    assert!(!first_url.contains('?'));
+    assert!(!first_url.contains('#'));
+    assert_eq!(
+        get_preview_for(&harness.state, &first_url).await.status(),
+        StatusCode::OK
+    );
+
+    let second_token = bootstrap_token(&harness.state).await;
+    let second_project_view = response_json(
+        get_for(
+            &harness.state,
+            &second_token,
+            &format!("/api/v1/projects/{project_id}"),
+        )
+        .await,
+    )
+    .await;
+    let second_url = string_at(&second_project_view, "/project/previewUrl");
+    assert_ne!(first_url, second_url);
+    assert_ne!(preview_host(&first_url), preview_host(&second_url));
+    assert_eq!(
+        get_preview_for(&harness.state, &second_url).await.status(),
+        StatusCode::OK
+    );
+
+    let second_project = response_json(
+        post_for(
+            &harness.state,
+            &second_token,
+            "/api/v1/projects",
+            json!({"schemaVersion":"1","template":"blank"}),
+        )
+        .await,
+    )
+    .await;
+    let second_project_id = string_at(&second_project, "/project/id");
+    let second_project_url = string_at(&second_project, "/project/previewUrl");
+    assert_ne!(preview_host(&second_url), preview_host(&second_project_url));
+
+    let invalid_bindings = [
+        (
+            "localhost:4322".to_owned(),
+            format!("/preview/{project_id}/{revision_id}/"),
+        ),
+        (
+            "127.0.0.1:4322".to_owned(),
+            format!("/preview/{project_id}/{revision_id}/"),
+        ),
+        (
+            first_host.replace(":4322", ":4323"),
+            format!("/preview/{project_id}/{revision_id}/"),
+        ),
+        (
+            first_host.clone(),
+            format!("/preview/{second_project_id}/{revision_id}/"),
+        ),
+        (
+            first_host.clone(),
+            format!("/preview/{project_id}/rev_foreign/"),
+        ),
+        (
+            first_host.clone(),
+            format!("/preview/{project_id}/{revision_id}/missing.css"),
+        ),
+        (first_host.clone(), "/not-a-preview-route".to_owned()),
+    ];
+    for (host, path) in invalid_bindings {
+        assert_uniform_preview_not_found(
+            get_preview_with_binding(&harness.state, &host, &path).await,
+        )
+        .await;
+    }
+
+    {
+        let mut store = harness.state.store().unwrap();
+        store
+            .sessions
+            .get_mut(&token_hash(&harness.token))
+            .unwrap()
+            .expires_at = now_unix().saturating_sub(1);
+    }
+    assert_uniform_preview_not_found(get_preview_for(&harness.state, &first_url).await).await;
+    assert_eq!(
+        get_preview_for(&harness.state, &second_url).await.status(),
+        StatusCode::OK,
+        "expiring one session must not revoke another session's origin"
+    );
 }
 
 #[tokio::test]
@@ -1112,6 +1323,121 @@ fn approval_is_hashed_bound_expiring_and_atomically_one_shot() {
 }
 
 #[test]
+fn preview_bridge_is_response_only_first_script_and_privacy_safe_before_handshake() {
+    let source = br#"<!doctype html><!-- <script src="comment.js"></script><header> --><html><head><meta charset="utf-8"><script src="app.js"></script></head><body><header>source</header></body></html>"#;
+    let original = source.to_vec();
+    let injected = inject_preview_bridge(
+        source,
+        "fixed-nonce",
+        EDITOR_ORIGIN,
+        "prj_fixed",
+        "pro_fixed",
+        "rev_fixed",
+    )
+    .unwrap();
+    assert_eq!(
+        source,
+        original.as_slice(),
+        "injection must not mutate source"
+    );
+    let injected = String::from_utf8(injected).unwrap();
+    let bridge = injected.find("<script nonce=\"fixed-nonce\">").unwrap();
+    let source_script = injected.find("<script src=\"app.js\">").unwrap();
+    let head = injected.find("<head>").unwrap();
+    assert_eq!(bridge, "<!doctype html>".len());
+    assert!(bridge < head);
+    assert!(
+        bridge < source_script,
+        "bridge listeners must be installed first"
+    );
+    assert!(injected.contains("window.name=\"\""));
+    assert!(injected.contains("seen=new Set(),pending=[]"));
+    assert!(injected.contains("channel?send(code):pending.push(code)"));
+    assert!(injected.contains("pending.splice(0).forEach(send)"));
+    assert!(injected.contains("securitypolicyviolation"));
+    assert!(injected.contains("addEventListener(\"error\",()=>diagnose(\"site_error\"),true)"));
+    assert!(injected.contains("nav.addEventListener(\"navigate\""));
+    assert!(injected.contains("Function.call.bind(String.prototype.startsWith)"));
+    assert!(injected.contains("Function.call.bind(Event.prototype.preventDefault)"));
+    assert!(injected.contains("getter(NavigateEvent.prototype,\"destination\")"));
+    assert!(injected.contains("getter(NavigationDestination.prototype,\"url\")"));
+    assert!(injected.contains("startsWith(destination,A)"));
+    assert!(!injected.contains("new URL("));
+    assert!(injected.contains("Object.defineProperty(owner,name"));
+    assert!(injected.contains("RTCPeerConnection"));
+    assert!(injected.contains("sourceUnavailable:true"));
+    for private_field in [
+        "error.message",
+        "error.filename",
+        "error.stack",
+        "reason.stack",
+    ] {
+        assert!(!injected.contains(private_field));
+    }
+
+    let no_doctype =
+        br#"<template><script src="template.js"></script></template><noscript><script src="fallback.js"></script></noscript>"#;
+    let injected_no_doctype = inject_preview_bridge(
+        no_doctype,
+        "second-nonce",
+        EDITOR_ORIGIN,
+        "prj_fixed",
+        "rev_fixed",
+        "rev_fixed",
+    )
+    .unwrap();
+    assert!(injected_no_doctype.starts_with(b"<script nonce=\"second-nonce\">"));
+    assert_eq!(
+        preview_bridge_insertion("\u{feff} \n<!DOCTYPE html><html>"),
+        20
+    );
+}
+
+#[test]
+fn preview_scope_and_length_delimited_labels_are_canonical() {
+    assert_eq!(
+        validate_preview_scope_origin("http://localhost:4322").unwrap(),
+        4322
+    );
+    for invalid in [
+        "http://127.0.0.1:4322",
+        "https://localhost:4322",
+        "http://localhost:04322",
+        "http://localhost:0",
+        "http://localhost:80",
+        "http://localhost:4322/",
+        "http://user@localhost:4322",
+        "http://localhost:4322?query=1",
+        "http://localhost:4322#fragment",
+    ] {
+        assert!(
+            validate_preview_scope_origin(invalid).is_err(),
+            "accepted non-canonical scope: {invalid}"
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let state = StudioState::new(ServerConfig::new(
+        EDITOR_ORIGIN,
+        EDITOR_HOST,
+        PREVIEW_ORIGIN,
+        root.path(),
+        root.path().join("missing-web-dist"),
+    ))
+    .unwrap();
+    let split_one = scoped_preview_label(&state, "ses_ab", "c", "snapshot");
+    let split_two = scoped_preview_label(&state, "ses_a", "bc", "snapshot");
+    assert_ne!(
+        split_one, split_two,
+        "field boundaries must affect the digest"
+    );
+    assert_eq!(
+        split_one,
+        scoped_preview_label(&state, "ses_ab", "c", "snapshot")
+    );
+}
+
+#[test]
 fn zip_is_pure_lexical_stored_and_has_fixed_metadata() {
     let files = blank_files();
     let first = deterministic_zip(&files).unwrap();
@@ -1156,12 +1482,52 @@ async fn response_bytes(response: Response) -> Vec<u8> {
         .to_vec()
 }
 
+async fn assert_uniform_preview_not_found(response: Response) {
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
+    assert_eq!(
+        response.headers().get("clear-site-data").unwrap(),
+        "\"cache\", \"cookies\", \"storage\""
+    );
+    assert_eq!(
+        response.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        response.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
+    assert_eq!(
+        response.headers().get("x-dns-prefetch-control").unwrap(),
+        "off"
+    );
+    assert!(response.headers().contains_key("permissions-policy"));
+    assert_eq!(response_bytes(response).await, b"Not found");
+}
+
 fn string_at(value: &Value, pointer: &str) -> String {
     value
         .pointer(pointer)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("missing string at {pointer}: {value}"))
         .to_owned()
+}
+
+fn preview_host(url: &str) -> &str {
+    url.strip_prefix("http://")
+        .and_then(|remainder| remainder.split_once('/'))
+        .map(|(host, _)| host)
+        .unwrap_or_else(|| panic!("invalid preview URL: {url}"))
+}
+
+fn preview_path(url: &str) -> &str {
+    url.find("/preview/")
+        .map(|index| &url[index..])
+        .unwrap_or_else(|| panic!("invalid preview URL: {url}"))
 }
 
 fn source_fingerprint(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {

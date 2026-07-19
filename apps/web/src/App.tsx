@@ -12,6 +12,8 @@ import type {
   ExportReceipt,
   ImportLimits,
   ImportPreview,
+  PreviewDiagnosticCode,
+  PreviewDiagnosticMessage,
   PreviewMode,
   PreviewSource,
   Project,
@@ -36,6 +38,7 @@ import {
   isAllowedPreviewUrl,
   postClearSelection,
   postPreviewMode,
+  readPreviewDiagnostic,
   readPreviewSelection,
 } from "./preview/bridge";
 
@@ -49,6 +52,23 @@ const VIEWPORTS: Record<Exclude<ViewportPreset, "custom">, number> = {
   desktop: 1440,
   tablet: 768,
   mobile: 390,
+};
+
+const diagnosticLabel: Record<PreviewDiagnosticCode, string> = {
+  csp_blocked:
+    "プレビューのセキュリティ制約により、一部の表示または処理を停止しました。",
+  site_error: "プレビュー内のサイトでエラーを検出しました。",
+  unhandled_rejection: "プレビュー内の処理が完了しませんでした。",
+};
+
+const supportsPreviewNavigationIsolation = (): boolean => {
+  const navigation = Reflect.get(globalThis, "navigation") as unknown;
+  return (
+    typeof navigation === "object" &&
+    navigation !== null &&
+    "addEventListener" in navigation &&
+    typeof navigation.addEventListener === "function"
+  );
 };
 
 const operationLabel: Record<Exclude<StudioOperation, null>, string> = {
@@ -257,7 +277,7 @@ function PageTree({ target, disabled, onSelect }: PageTreeProps) {
 interface PreviewPaneProps {
   project: Project;
   proposal: Proposal | null;
-  expectedOrigin: string;
+  previewScopeBaseOrigin: string;
   target: Target | null;
   mode: PreviewMode;
   source: PreviewSource;
@@ -274,7 +294,7 @@ interface PreviewPaneProps {
 function PreviewPane({
   project,
   proposal,
-  expectedOrigin,
+  previewScopeBaseOrigin,
   target,
   mode,
   source,
@@ -288,6 +308,9 @@ function PreviewPane({
   onClear,
 }: PreviewPaneProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [diagnostic, setDiagnostic] = useState<PreviewDiagnosticMessage | null>(
+    null,
+  );
   const activeSource =
     source === "proposed" && proposal === null ? "accepted" : source;
   const previewUrl =
@@ -307,16 +330,30 @@ function PreviewPane({
     activeSource === "proposed" && proposal !== null
       ? proposal.baseRevisionId
       : project.revisionId;
+  const previewUrlAllowed = isAllowedPreviewUrl(
+    previewUrl,
+    previewScopeBaseOrigin,
+  );
+  const navigationIsolationAvailable = supportsPreviewNavigationIsolation();
+  const scopedPreviewOrigin = previewUrlAllowed
+    ? new URL(previewUrl).origin
+    : "null";
 
   const bridgeBinding = useMemo(
     () => ({
-      expectedOrigin,
+      expectedOrigin: scopedPreviewOrigin,
       channelId,
       projectId: project.id,
       snapshotId: bridgeSnapshotId,
       revisionId: bridgeRevisionId,
     }),
-    [bridgeRevisionId, bridgeSnapshotId, channelId, expectedOrigin, project.id],
+    [
+      bridgeRevisionId,
+      bridgeSnapshotId,
+      channelId,
+      project.id,
+      scopedPreviewOrigin,
+    ],
   );
 
   useEffect(() => {
@@ -327,13 +364,22 @@ function PreviewPane({
         ...bridgeBinding,
         expectedSource: frameWindow,
       });
-      if (selection !== null) onSelection(selection.elementId);
+      if (selection !== null) {
+        onSelection(selection.elementId);
+        return;
+      }
+      const nextDiagnostic = readPreviewDiagnostic(event, {
+        ...bridgeBinding,
+        expectedSource: frameWindow,
+      });
+      if (nextDiagnostic !== null) setDiagnostic(nextDiagnostic);
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
   }, [bridgeBinding, onSelection]);
 
   const synchronizeMode = () => {
+    if (!previewUrlAllowed) return;
     const frameWindow = iframeRef.current?.contentWindow;
     if (frameWindow === null || frameWindow === undefined) return;
     postPreviewMode(frameWindow, bridgeBinding, mode);
@@ -349,7 +395,17 @@ function PreviewPane({
     onClear();
   };
 
-  if (!isAllowedPreviewUrl(previewUrl, expectedOrigin)) {
+  if (!navigationIsolationAvailable) {
+    return (
+      <main id="preview" className="preview-pane panel" tabIndex={-1}>
+        <div className="error-card" role="alert">
+          このブラウザでは安全なプレビュー隔離を利用できないため、LPの実行を停止しました。
+        </div>
+      </main>
+    );
+  }
+
+  if (!previewUrlAllowed) {
     return (
       <main id="preview" className="preview-pane panel" tabIndex={-1}>
         <div className="error-card" role="alert">
@@ -417,6 +473,20 @@ function PreviewPane({
           AIへの要望へ移動
         </a>
       </div>
+
+      {diagnostic?.channelId === channelId &&
+      diagnostic.projectId === project.id &&
+      diagnostic.snapshotId === bridgeSnapshotId &&
+      diagnostic.revisionId === bridgeRevisionId ? (
+        <div
+          className={`preview-diagnostic preview-diagnostic-${diagnostic.severity}`}
+          role={diagnostic.severity === "error" ? "alert" : "status"}
+        >
+          <strong>プレビュー診断</strong>
+          <span>{diagnosticLabel[diagnostic.code]}</span>
+          <code>source unavailable</code>
+        </div>
+      ) : null}
 
       <div className="canvas-shell">
         <div
@@ -1441,7 +1511,7 @@ function Studio({ session }: StudioProps) {
         <PreviewPane
           project={state.project}
           proposal={state.proposal}
-          expectedOrigin={session.bootstrap.previewOrigin}
+          previewScopeBaseOrigin={session.bootstrap.previewOrigin}
           target={state.target}
           mode={state.previewMode}
           source={state.previewSource}

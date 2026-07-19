@@ -1,6 +1,6 @@
 # SynapseGit LP Studio 実装計画
 
-Status: active; C3 complete at 38%
+Status: active; C4 complete at 46%
 
 Last updated: 2026-07-19
 
@@ -44,7 +44,7 @@ Creatorの確認結果を受けるまで残り20%へ進まない。
 | Workspace/package manager | pnpm workspace、Node/Rust toolchainとlockfile固定 |
 | Web UI | TypeScript SPA、React、Vite |
 | Local server | Rust、Axum、Editor/API用IPv4 loopback listener |
-| Preview | session別random portのRust static listener、ephemeral bridge |
+| Preview | Rust static listener、session/project/snapshot別opaque localhost subdomain、ephemeral bridge |
 | Shared validation | canonical JSON Schema、generated TS/Rust types、golden parity test |
 | Local metadata | SQLite command journal + filesystem CAS + materialized Accepted view |
 | Test | TS/Rust unit/integration、Playwright browser E2E、deterministic fake AI |
@@ -68,7 +68,7 @@ checkpointのweightで計算する。途中作業は完了percentageへ加算し
 | C1 Upstream Synapse generic contract | 15% | 20% | blocker Issue、generic file-tree Proposal、checked recovery/journal primitive、one-disposition receipt/query、versioned contract lock |
 | C2 Real-boundary M0 vertical slice | 10% | 30% | blank、element Target、fake AI、review、adopt、exportをreal adapter boundaryでE2E |
 | C3 Project/revision/import | 8% | 38% | managed storage、manifest/hash、bounded copy import、drift検出 |
-| C4 Separate-origin preview | 8% | 46% | random Editor/Preview origin、session、bridge、Accepted/Proposed static serving |
+| C4 Separate-origin preview | 8% | 46% | scoped Editor/Preview origin、session/Host/route binding、bridge、Accepted/Proposed static serving、browser isolation evidence |
 | C5 Target v1 and resolution | 10% | 56% | page/block/element/text/point/region、coordinate、tree、fail-closed resolver |
 | C6 AI context and ChangeSet | 9% | 65% | exact context review、fake/live adapter、ChangeSet v1、isolated Proposal |
 | C7 Review, Decision, recovery | 8% | 73% | diff/render、adopt/reject/defer/stale、Synapse-backed SQLite journal/reconciliation |

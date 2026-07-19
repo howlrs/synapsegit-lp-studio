@@ -6,7 +6,7 @@ Branch: `agent/lp-studio-m1`
 
 Draft PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
 
-Completed progress: 38%
+Completed progress: 46%
 
 ## Checkpoints
 
@@ -16,7 +16,7 @@ Completed progress: 38%
 | C1 Upstream Synapse generic contract | 15% | complete | SynapseGit commit [`7ddb58b`](https://github.com/howlrs/synapsegit/commit/7ddb58b2ad585db3823431135ae33222d4704f9f), [draft PR #25](https://github.com/howlrs/synapsegit/pull/25), [passing CI](https://github.com/howlrs/synapsegit/actions/runs/29672697156/job/88154428767), contract lock/parity check, workspace quality gates |
 | C2 Real-boundary M0 vertical slice | 10% | complete | real pinned `synapse-artifact` Proposal/Decision; strict API/bridge schema; separate random loopback origins; deterministic blank/fake-AI/adopt/export E2E; Rust, TypeScript, CSP, quota, and ZIP tests |
 | C3 Project/revision/import | 8% | complete | private retained state root; canonical immutable revision/CAS and Accepted pointer; reviewed copy import; restart, drift, malicious-path, root-overlap, source-preservation, and browser E2E evidence |
-| C4 Separate-origin preview | 8% | planned | — |
+| C4 Separate-origin preview | 8% | complete | session/project/snapshot-scoped opaque Preview origins; exact Host/route binding and revocation; CSP/sandbox/storage/navigation isolation; privacy-safe diagnostics; Rust, Web, and Chromium evidence |
 | C5 Target v1 and resolution | 10% | planned | — |
 | C6 AI context and ChangeSet | 9% | planned | — |
 | C7 Review, Decision, recovery | 8% | planned | — |
@@ -51,7 +51,7 @@ Completed progress: 38%
   as a SynapseGit checkout.
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
-- C0 through C3 are implemented and locally verified. C3 evidence is bound to
+- C0 through C4 are implemented and locally verified. C4 evidence is bound to
   this checkpoint commit and its GitHub checks. No tag, merge,
   release, product publication, or distribution permission exists yet.
 - The development repository is Public by explicit Creator direction. Public
@@ -114,17 +114,60 @@ Completed progress: 38%
   restart-durable pending Proposal authority, and Synapse/local Accepted
   outcome reconciliation. The last two remain C7/#23 work; fault-injection and
   retention hardening remain C9. Imported non-UTF-8 or oversized entry HTML can
-  be accepted by the copy boundary but rejected by Preview; C4 adds aligned
-  preflight diagnostics rather than weakening Preview validation.
+  be accepted by the copy boundary but rejected by Preview. Aligned import-time
+  entry diagnostics remain deferred rather than weakening Preview validation.
 - An adversarial same-user process that swaps and restores the same directory
   inode during both complete scans remains a theoretical live-filesystem race.
   The registered-root, no-follow, identity, rescan, digest, and private-state
   boundaries substantially narrow it but do not claim transactional filesystem
   snapshots.
 
+## C4 evidence and limits
+
+- The Editor/API listener and Preview listener remain distinct loopback
+  origins. Every live Preview snapshot receives a process-secret-derived,
+  128-bit opaque `pv-….localhost` host label bound to its session, project,
+  snapshot, route, and listener port. A restart rotates the process secret.
+- Preview requests require the exact scoped Host and bounded static route.
+  Unknown, expired, foreign-project, stale Accepted, and terminal Proposal
+  routes return the same not-found response, without an enumeration oracle.
+- Preview responses expose only revision files plus a response-only bridge.
+  They carry no Editor credential, OS path, source manifest, Synapse handle,
+  prompt, or provider response, and the bridge is absent from source and
+  deterministic export bytes.
+- The iframe, Editor CSP, Preview CSP, and common security headers deny Editor
+  framing, external connections, forms, popups, top navigation, downloads,
+  workers, nested frames, WebRTC, referrers, MIME sniffing, and cache reuse.
+  The bridge blocks document replacement and navigation outside the exact
+  scoped project prefix while retaining same-project relative navigation.
+- The bridge captures native navigation intrinsics before untrusted site
+  scripts run, clears `window.name`, and reports only bounded diagnostic codes
+  for missing resources, CSP violations, site errors, and unhandled
+  rejections. It never invents a source location when one is unavailable.
+- Chromium isolation tests exercise localStorage, IndexedDB, Cache Storage,
+  BroadcastChannel, cookies, `window.name`, service-worker registration,
+  Editor API access, popup/top/external navigation, document replacement,
+  WebRTC construction, forged bridge messages, same-project navigation, URL
+  expiry, project switch, and process restart.
+- Local gates pass with 118 Web tests, 24 Rust library tests, 10 launcher
+  tests, production build, strict contract/schema checks, and 3 Chromium E2E
+  flows.
+- Navigation containment depends on the browser Navigation API. The Editor
+  fails closed and does not mount active Preview content when that API is not
+  available. Current browser evidence is Chromium-only.
+- `webrtc 'block'` CSP plus the same-realm constructor guard is defense in
+  depth, not a claim that arbitrary hostile JavaScript across every browser
+  realm is fully contained. Broader browser/runtime and fault hardening remains
+  C9/C10 work.
+- A non-canonical or legacy doctype receives the bridge at byte zero for
+  response-first execution; this can change quirks-mode behavior. Port 80 is
+  also outside the supported Preview configuration because URL
+  canonicalization removes its explicit port. Normal random high ports are
+  covered.
+
 ## Next checkpoint
 
-C4 replaces the process-shared Preview storage scope with ephemeral
-project/session origins, binds every static request to an opaque grant, and adds
-browser evidence for CSP, service-worker, storage, navigation, and bridge
-isolation before the checkpoint is committed/pushed.
+C5 defines canonical Target v1 capture and fail-closed resolution for page,
+block, element, text, point, and region targets. It adds coordinate metadata,
+block-tree navigation, keyboard alternatives, and Accepted/Proposed revision
+binding before the next checkpoint is committed/pushed.

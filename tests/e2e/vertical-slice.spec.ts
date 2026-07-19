@@ -19,6 +19,7 @@ import {
   isExportResponse,
   isImportPreviewResponse,
   isPreviewActionMessage,
+  isPreviewDiagnosticMessage,
   isPreviewSelectionMessage,
   isProjectResponse,
   isProjectsResponse,
@@ -27,6 +28,9 @@ import {
   type BootstrapResponse,
   type ExportResponse,
   type ImportPreviewResponse,
+  type PreviewDiagnosticMessage,
+  type Project,
+  type ProjectResponse,
 } from "../../packages/contracts/src/index";
 import apiSchema from "../../packages/contracts/schemas/api-v1.schema.json";
 
@@ -36,6 +40,7 @@ const INITIAL_COPY =
 const PROPOSED_HEADING = "対話から、公開できるLPへ。";
 const PROMPT_CANARY =
   "ヒーロー見出しを明確にしてください。E2E_PRIVATE_PROMPT_CANARY";
+const SCOPED_PREVIEW_HOST = /^pv-[0-9a-f]{32}\.localhost$/;
 
 type RuntimeGuard = (value: unknown) => boolean;
 
@@ -258,6 +263,48 @@ async function importSourceSnapshot(
   return { sha256: hash.digest("hex"), byteLength };
 }
 
+function expectScopedPreviewUrl(
+  rawUrl: string,
+  previewScopeBaseOrigin: string,
+): URL {
+  const scoped = new URL(rawUrl);
+  const base = new URL(previewScopeBaseOrigin);
+  expect(scoped.protocol).toBe("http:");
+  expect(scoped.hostname).toMatch(SCOPED_PREVIEW_HOST);
+  expect(scoped.port).toBe(base.port);
+  expect(scoped.username).toBe("");
+  expect(scoped.password).toBe("");
+  expect(scoped.search).toBe("");
+  expect(scoped.hash).toBe("");
+  expect(scoped.pathname).toMatch(/^\/preview\/[^/]+\/[^/]+\/$/);
+  return scoped;
+}
+
+async function createBlankProject(
+  page: Page,
+  sessionToken: string,
+): Promise<Project> {
+  const payload = await page.evaluate(
+    async ({ token }) => {
+      const response = await fetch("/api/v1/projects", {
+        method: "POST",
+        credentials: "omit",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ schemaVersion: "1", template: "blank" }),
+      });
+      return { ok: response.ok, value: (await response.json()) as unknown };
+    },
+    { token: sessionToken },
+  );
+  expect(payload.ok).toBe(true);
+  expect(isProjectResponse(payload.value)).toBe(true);
+  return (payload.value as ProjectResponse).project;
+}
+
 test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを得る", async ({
   page,
 }) => {
@@ -330,6 +377,11 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   expect(isBootstrapResponse(bootstrapWithExtraField)).toBe(false);
   const editorOrigin = new URL(page.url()).origin;
   expect(editorOrigin).toBe(configuredEditorOrigin);
+  const previewScopeBase = new URL(bootstrap.previewOrigin);
+  const previewHealthOrigin = new URL(configuredPreviewOrigin);
+  expect(previewScopeBase.hostname).toBe("localhost");
+  expect(previewScopeBase.port).toBe(previewHealthOrigin.port);
+  expect(previewScopeBase.origin).not.toBe(previewHealthOrigin.origin);
 
   const invalidRequestStatus = await page.evaluate(
     async ({ token }) => {
@@ -360,9 +412,17 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   await expect(previewElement).toBeVisible();
   const previewSource = await previewElement.getAttribute("src");
   expect(previewSource).toBeTruthy();
-  const previewOrigin = new URL(previewSource!, editorOrigin).origin;
-  expect(previewOrigin).toBe(configuredPreviewOrigin);
-  expect(previewOrigin).not.toBe(editorOrigin);
+  const initialPreviewUrl = expectScopedPreviewUrl(
+    new URL(previewSource!, editorOrigin).href,
+    bootstrap.previewOrigin,
+  );
+  expect(initialPreviewUrl.origin).not.toBe(editorOrigin);
+  expect(initialPreviewUrl.origin).not.toBe(configuredPreviewOrigin);
+  await expect(previewElement).toHaveAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin",
+  );
+  await expect(previewElement).toHaveAttribute("allow", "");
 
   const preview = page.frameLocator('iframe[title="LPプレビュー"]');
   await expect(
@@ -474,6 +534,18 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   await expect(
     preview.getByRole("heading", { name: PROPOSED_HEADING }),
   ).toBeVisible();
+  await expect
+    .poll(async () => {
+      const source = await previewElement.getAttribute("src");
+      return source === null ? null : new URL(source, editorOrigin).origin;
+    })
+    .not.toBe(initialPreviewUrl.origin);
+  const proposedPreviewSource = await previewElement.getAttribute("src");
+  expect(proposedPreviewSource).not.toBeNull();
+  const proposedPreviewUrl = expectScopedPreviewUrl(
+    new URL(proposedPreviewSource!, editorOrigin).href,
+    bootstrap.previewOrigin,
+  );
   const proposedTargetResponsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -503,6 +575,28 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
     preview.getByRole("heading", { name: PROPOSED_HEADING }),
   ).toBeVisible();
   await expect(acceptedRevision).not.toHaveText(revisionBeforeAdoption!);
+  await expect
+    .poll(async () => {
+      const source = await previewElement.getAttribute("src");
+      return source === null ? null : new URL(source, editorOrigin).origin;
+    })
+    .not.toBe(proposedPreviewUrl.origin);
+  const adoptedPreviewSource = await previewElement.getAttribute("src");
+  expect(adoptedPreviewSource).not.toBeNull();
+  const adoptedPreviewUrl = expectScopedPreviewUrl(
+    new URL(adoptedPreviewSource!, editorOrigin).href,
+    bootstrap.previewOrigin,
+  );
+  expect(adoptedPreviewUrl.origin).not.toBe(initialPreviewUrl.origin);
+  const [staleAcceptedResponse, terminalProposalResponse] = await Promise.all([
+    page.request.get(initialPreviewUrl.href),
+    page.request.get(proposedPreviewUrl.href),
+  ]);
+  expect(staleAcceptedResponse.status()).toBe(404);
+  expect(terminalProposalResponse.status()).toBe(404);
+  expect(await staleAcceptedResponse.text()).toBe(
+    await terminalProposalResponse.text(),
+  );
 
   const firstExportResponsePromise = page.waitForResponse(
     (response) =>
@@ -572,6 +666,387 @@ test("blank Targetからfake AI Proposalを採用し、pureなAccepted exportを
   expect(apiValidationErrors).toEqual([]);
 });
 
+test("scoped Preview originが権限・storage・navigationをproject/session間で隔離する", async ({
+  page,
+}) => {
+  const editorOrigin = process.env.LP_STUDIO_E2E_EDITOR_ORIGIN;
+  const previewHealthOrigin = process.env.LP_STUDIO_E2E_PREVIEW_ORIGIN;
+  if (editorOrigin === undefined || previewHealthOrigin === undefined) {
+    throw new Error("E2E origins were not initialized by global setup");
+  }
+
+  const bootstrapResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === "/api/v1/bootstrap",
+  );
+  await page.goto(`${editorOrigin}/`);
+  const bootstrap = (await (
+    await bootstrapResponsePromise
+  ).json()) as BootstrapResponse;
+  expect(isBootstrapResponse(bootstrap)).toBe(true);
+
+  const projectA = await createBlankProject(page, bootstrap.session.token);
+  const projectB = await createBlankProject(page, bootstrap.session.token);
+  const scopedA = expectScopedPreviewUrl(
+    projectA.previewUrl,
+    bootstrap.previewOrigin,
+  );
+  const scopedB = expectScopedPreviewUrl(
+    projectB.previewUrl,
+    bootstrap.previewOrigin,
+  );
+  expect(scopedA.origin).not.toBe(scopedB.origin);
+  expect(scopedA.origin).not.toBe(editorOrigin);
+  expect(scopedA.origin).not.toBe(previewHealthOrigin);
+
+  const editorDocumentResponse = await page.request.get(`${editorOrigin}/`);
+  expect(editorDocumentResponse.ok()).toBe(true);
+  const editorCsp = editorDocumentResponse.headers()["content-security-policy"];
+  expect(editorCsp).toContain("frame-ancestors 'none'");
+  expect(editorCsp).toContain(
+    `frame-src http://*.localhost:${new URL(bootstrap.previewOrigin).port}`,
+  );
+
+  const acceptedResponse = await page.request.get(projectA.previewUrl);
+  expect(acceptedResponse.ok()).toBe(true);
+  const previewHeaders = acceptedResponse.headers();
+  const previewCsp = previewHeaders["content-security-policy"];
+  expect(previewCsp).toContain("default-src 'none'");
+  expect(previewCsp).toMatch(/script-src 'self' 'nonce-[^']+'/);
+  expect(previewCsp).toContain("worker-src 'none'");
+  expect(previewCsp).toContain("connect-src 'none'");
+  expect(previewCsp).toContain("frame-src 'none'");
+  expect(previewCsp).toContain("webrtc 'block'");
+  expect(previewCsp).toContain("form-action 'none'");
+  expect(previewCsp).toContain(`frame-ancestors ${editorOrigin}`);
+  expect(previewHeaders["clear-site-data"]).toBe(
+    '"cache", "cookies", "storage"',
+  );
+  expect(previewHeaders["cache-control"]).toBe("no-store");
+  expect(previewHeaders["x-content-type-options"]).toBe("nosniff");
+  expect(previewHeaders["referrer-policy"]).toBe("no-referrer");
+  expect(previewHeaders["x-dns-prefetch-control"]).toBe("off");
+  const acceptedHtml = await acceptedResponse.text();
+  expect(acceptedHtml).not.toContain(bootstrap.session.token);
+  expect(acceptedHtml).not.toContain("LP_STUDIO_STATE_ROOT");
+
+  const changedHex = scopedA.hostname[3] === "0" ? "1" : "0";
+  const tamperedHost = new URL(projectA.previewUrl);
+  tamperedHost.hostname = `${scopedA.hostname.slice(0, 3)}${changedHex}${scopedA.hostname.slice(4)}`;
+  const foreignProject = new URL(projectA.previewUrl);
+  foreignProject.pathname = foreignProject.pathname.replace(
+    `/preview/${projectA.id}/`,
+    "/preview/prj_foreign/",
+  );
+  const foreignSnapshot = new URL(projectA.previewUrl);
+  foreignSnapshot.pathname = foreignSnapshot.pathname.replace(
+    `/${projectA.revisionId}/`,
+    "/rev_foreign/",
+  );
+  const missingSlash = new URL(projectA.previewUrl);
+  missingSlash.pathname = missingSlash.pathname.slice(0, -1);
+  const unscoped = new URL(projectA.previewUrl);
+  unscoped.hostname = "localhost";
+  const listenerOrigin = new URL(projectA.previewUrl);
+  listenerOrigin.hostname = "127.0.0.1";
+
+  const rejectedResponses = await Promise.all(
+    [
+      tamperedHost,
+      foreignProject,
+      foreignSnapshot,
+      missingSlash,
+      unscoped,
+      listenerOrigin,
+    ].map((url) => page.request.get(url.href)),
+  );
+  const rejectedBodies = await Promise.all(
+    rejectedResponses.map((response) => response.text()),
+  );
+  for (const response of rejectedResponses) {
+    expect(response.status()).toBe(404);
+    expect(response.headers()["cache-control"]).toBe("no-store");
+    expect(response.headers()["x-content-type-options"]).toBe("nosniff");
+  }
+  expect(new Set(rejectedBodies).size).toBe(1);
+
+  const mountPreview = async (id: string, url: string) => {
+    await page.evaluate(
+      ({ frameId, previewUrl }) =>
+        new Promise<void>((resolveLoad, rejectLoad) => {
+          const iframe = document.createElement("iframe");
+          iframe.id = frameId;
+          iframe.title = frameId;
+          iframe.sandbox.add("allow-scripts", "allow-same-origin");
+          iframe.referrerPolicy = "no-referrer";
+          iframe.onload = () => resolveLoad();
+          iframe.onerror = () => rejectLoad(new Error("preview load failed"));
+          iframe.src = previewUrl;
+          document.body.append(iframe);
+        }),
+      { frameId: id, previewUrl: url },
+    );
+    const handle = await page.locator(`#${id}`).elementHandle();
+    const frame = await handle?.contentFrame();
+    if (frame === null || frame === undefined) {
+      throw new Error(`Preview frame ${id} was not attached`);
+    }
+    expect(frame.url()).toBe(url);
+    return frame;
+  };
+
+  const frameA = await mountPreview("isolation-preview-a", projectA.previewUrl);
+  const frameB = await mountPreview("isolation-preview-b", projectB.previewUrl);
+  const storageSupport = await frameA.evaluate(async () => {
+    localStorage.setItem("lp-scope-canary", "project-a");
+    document.cookie = "lp_scope_canary=project-a; SameSite=Strict";
+    window.name = "project-a-window-name";
+    await new Promise<void>((resolveDatabase, rejectDatabase) => {
+      const request = indexedDB.open("lp-scope-canary", 1);
+      request.onerror = () => rejectDatabase(request.error);
+      request.onupgradeneeded = () =>
+        request.result.createObjectStore("values");
+      request.onsuccess = () => {
+        request.result.close();
+        resolveDatabase();
+      };
+    });
+    const cacheAvailable = "caches" in window;
+    if (cacheAvailable) await caches.open("lp-scope-canary");
+    const received: unknown[] = [];
+    const channel = new BroadcastChannel("lp-scope-canary");
+    channel.onmessage = (event) => received.push(event.data);
+    Object.assign(window, {
+      __LP_STUDIO_E2E_BROADCAST_CHANNEL__: channel,
+      __LP_STUDIO_E2E_BROADCAST_RECEIVED__: received,
+    });
+    return { cacheAvailable };
+  });
+  expect(storageSupport.cacheAvailable).toBe(true);
+
+  const isolatedState = await frameB.evaluate(async () => {
+    const databaseNames =
+      typeof indexedDB.databases === "function"
+        ? (await indexedDB.databases()).map((database) => database.name)
+        : [];
+    const cacheNames = "caches" in window ? await caches.keys() : [];
+    const channel = new BroadcastChannel("lp-scope-canary");
+    channel.postMessage("must-not-cross-project-origin");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    channel.close();
+    return {
+      localStorage: localStorage.getItem("lp-scope-canary"),
+      cookie: document.cookie,
+      windowName: window.name,
+      databaseNames,
+      cacheNames,
+    };
+  });
+  expect(isolatedState.localStorage).toBeNull();
+  expect(isolatedState.cookie).not.toContain("lp_scope_canary");
+  expect(isolatedState.windowName).toBe("");
+  expect(isolatedState.databaseNames).not.toContain("lp-scope-canary");
+  expect(isolatedState.cacheNames).not.toContain("lp-scope-canary");
+  const broadcastReceived = await frameA.evaluate(
+    () =>
+      (
+        window as Window & {
+          __LP_STUDIO_E2E_BROADCAST_RECEIVED__?: unknown[];
+        }
+      ).__LP_STUDIO_E2E_BROADCAST_RECEIVED__ ?? [],
+  );
+  expect(broadcastReceived).toEqual([]);
+
+  const privilegedRequests: string[] = [];
+  const workerRequests: string[] = [];
+  const blockedNavigations: string[] = [];
+  const observeRequest = (request: { url(): string }) => {
+    if (request.url() === `${editorOrigin}/api/v1/bootstrap`) {
+      privilegedRequests.push(request.url());
+    }
+    if (request.url().endsWith("/styles.css"))
+      workerRequests.push(request.url());
+    if (request.url().includes("blocked.invalid")) {
+      blockedNavigations.push(request.url());
+    }
+  };
+  page.on("request", observeRequest);
+  const capabilityAttempts = await frameB.evaluate(async (origin) => {
+    let editorFetch = "resolved";
+    try {
+      await fetch(`${origin}/api/v1/bootstrap`, { credentials: "include" });
+    } catch {
+      editorFetch = "blocked";
+    }
+    let serviceWorker = "unavailable";
+    if ("serviceWorker" in navigator) {
+      try {
+        await navigator.serviceWorker.register("styles.css");
+        serviceWorker = "registered";
+      } catch {
+        serviceWorker = "blocked";
+      }
+    }
+    let peerConnection = "unavailable";
+    if ("RTCPeerConnection" in window) {
+      try {
+        const connection = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:blocked.invalid:3478" }],
+        });
+        connection.close();
+        peerConnection = "opened";
+      } catch {
+        peerConnection = "blocked";
+      }
+    }
+    let editorDom = "reachable";
+    try {
+      void parent.document.documentElement;
+    } catch {
+      editorDom = "blocked";
+    }
+    let documentReplacement = "replaced";
+    try {
+      document.open();
+      document.write("<h1>replacement bypass</h1>");
+      document.close();
+    } catch {
+      // A throwing deny shim is also fail-closed.
+    }
+    if (document.querySelector('[data-lp-id="hero-heading"]') !== null) {
+      documentReplacement = "blocked";
+    }
+    return {
+      editorFetch,
+      serviceWorker,
+      peerConnection,
+      editorDom,
+      documentReplacement,
+      popup: window.open("about:blank") === null ? "blocked" : "opened",
+    };
+  }, editorOrigin);
+  expect(capabilityAttempts).toEqual({
+    editorFetch: "blocked",
+    serviceWorker: "blocked",
+    peerConnection: "blocked",
+    editorDom: "blocked",
+    documentReplacement: "blocked",
+    popup: "blocked",
+  });
+  expect(privilegedRequests).toEqual([]);
+  expect(workerRequests).toEqual([]);
+
+  await frameB.evaluate(() => {
+    const refresh = document.createElement("meta");
+    refresh.httpEquiv = "refresh";
+    refresh.content =
+      "0;url=https://blocked.invalid/meta-refresh-navigation-canary";
+    document.head.append(refresh);
+  });
+  await page.waitForTimeout(200);
+  expect(frameB.url()).toBe(projectB.previewUrl);
+  expect(blockedNavigations).toEqual([]);
+
+  await frameB.evaluate(() => {
+    const NativeUrl = URL;
+    Object.defineProperty(globalThis, "URL", {
+      configurable: true,
+      value: class ForgedUrl extends NativeUrl {
+        constructor() {
+          super(window.location.href);
+        }
+      },
+    });
+    Object.defineProperty(NavigationDestination.prototype, "url", {
+      configurable: true,
+      get: () => window.location.href,
+    });
+    Object.defineProperty(Event.prototype, "preventDefault", {
+      configurable: true,
+      value: () => undefined,
+    });
+    window.location.href = "https://blocked.invalid/preview-navigation-canary";
+  });
+  await page.waitForTimeout(200);
+  expect(frameB.url()).toBe(projectB.previewUrl);
+  expect(blockedNavigations).toEqual([]);
+
+  const nestedNavigationAttempt = await frameB.evaluate(() => {
+    const nested = document.createElement("iframe");
+    nested.src = "about:blank";
+    document.body.append(nested);
+    try {
+      nested.contentWindow?.eval(
+        'parent.location.href="https://blocked.invalid/nested-navigation-canary"',
+      );
+      return "attempted";
+    } catch {
+      return "blocked";
+    }
+  });
+  expect(["attempted", "blocked"]).toContain(nestedNavigationAttempt);
+  await page.waitForTimeout(200);
+  expect(frameB.url()).toBe(projectB.previewUrl);
+  expect(blockedNavigations).toEqual([]);
+  page.off("request", observeRequest);
+
+  await frameA.goto(projectB.previewUrl);
+  expect(
+    await frameA.evaluate(() => ({
+      localStorage: localStorage.getItem("lp-scope-canary"),
+      cookie: document.cookie,
+      windowName: window.name,
+    })),
+  ).toEqual({ localStorage: null, cookie: "", windowName: "" });
+
+  const secondBootstrap = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/bootstrap", {
+      credentials: "omit",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    return (await response.json()) as unknown;
+  });
+  expect(isBootstrapResponse(secondBootstrap)).toBe(true);
+  const secondSessionProject = await page.evaluate(
+    async ({ projectId, token }) => {
+      const response = await fetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}`,
+        {
+          credentials: "omit",
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+      return (await response.json()) as unknown;
+    },
+    {
+      projectId: projectA.id,
+      token: (secondBootstrap as BootstrapResponse).session.token,
+    },
+  );
+  expect(isProjectResponse(secondSessionProject)).toBe(true);
+  const secondSessionUrl = (secondSessionProject as ProjectResponse).project
+    .previewUrl;
+  expectScopedPreviewUrl(
+    secondSessionUrl,
+    (secondBootstrap as BootstrapResponse).previewOrigin,
+  );
+  expect(new URL(secondSessionUrl).origin).not.toBe(scopedA.origin);
+  await frameA.goto(secondSessionUrl);
+  expect(
+    await frameA.evaluate(() => ({
+      localStorage: localStorage.getItem("lp-scope-canary"),
+      cookie: document.cookie,
+      windowName: window.name,
+    })),
+  ).toEqual({ localStorage: null, cookie: "", windowName: "" });
+});
+
 test("登録済みルートを正確にレビューしてコピーし、元sourceを変更しない", async ({
   page,
 }) => {
@@ -594,6 +1069,54 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
     byteLength: Number(expectedSourceBytes),
   });
 
+  await page.addInitScript(() => {
+    const envelopes: unknown[] = [];
+    Object.defineProperty(window, "__LP_STUDIO_E2E_BRIDGE_ENVELOPES__", {
+      configurable: false,
+      enumerable: false,
+      value: envelopes,
+      writable: false,
+    });
+    window.addEventListener(
+      "message",
+      (event) => {
+        const data = event.data as unknown;
+        if (
+          typeof data === "object" &&
+          data !== null &&
+          "type" in data &&
+          typeof data.type === "string" &&
+          data.type.startsWith("synapsegit-lp.")
+        ) {
+          envelopes.push(structuredClone(data));
+        }
+      },
+      true,
+    );
+  });
+  const blockedExternalRequests: string[] = [];
+  const blockedExternalFailures: string[] = [];
+  const blockedExternalResponses: string[] = [];
+  const missingAssetStatuses: number[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("blocked.invalid")) {
+      blockedExternalRequests.push(request.url());
+    }
+  });
+  page.on("requestfailed", (request) => {
+    if (request.url().includes("blocked.invalid")) {
+      blockedExternalFailures.push(request.failure()?.errorText ?? "unknown");
+    }
+  });
+  page.on("response", (response) => {
+    if (response.url().includes("blocked.invalid")) {
+      blockedExternalResponses.push(response.url());
+    }
+    if (response.url().endsWith("/assets/missing.png")) {
+      missingAssetStatuses.push(response.status());
+    }
+  });
+
   await page.goto(`${editorOrigin}/`);
   const previewResponsePromise = page.waitForResponse(
     (response) =>
@@ -612,7 +1135,7 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
   expect(previewPayload.importPreview.entryPoint).toBe("index.html");
   expect(
     previewPayload.importPreview.included.map((file) => file.path),
-  ).toEqual(["assets/theme.css", "index.html"]);
+  ).toEqual(["about.html", "assets/app.js", "assets/theme.css", "index.html"]);
   expect(previewPayload.importPreview.excluded).toEqual([
     { path: ".env", reason: "credential_material" },
   ]);
@@ -623,6 +1146,8 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("取り込み元のファイルは変更しません");
   await expect(dialog).toContainText("assets/theme.css");
+  await expect(dialog).toContainText("assets/app.js");
+  await expect(dialog).toContainText("about.html");
   await expect(dialog).toContainText("index.html");
   await expect(dialog).toContainText(".env");
   await expect(dialog).toContainText("credential_material");
@@ -665,6 +1190,95 @@ test("登録済みルートを正確にレビューしてコピーし、元sourc
     page
       .frameLocator('iframe[title="LPプレビュー"]')
       .getByRole("heading", { name: "登録ルートから始めるLP" }),
+  ).toBeVisible();
+  const importedPreview = page.frameLocator('iframe[title="LPプレビュー"]');
+  await expect(importedPreview.locator("html")).toHaveAttribute(
+    "data-self-script",
+    "executed",
+  );
+  expect(
+    await importedPreview.locator("html").evaluate(
+      () =>
+        (
+          window as Window & {
+            __LP_STUDIO_INLINE_SCRIPT_MUST_NOT_RUN__?: boolean;
+          }
+        ).__LP_STUDIO_INLINE_SCRIPT_MUST_NOT_RUN__,
+    ),
+  ).toBeUndefined();
+  await expect(
+    page.getByText("source unavailable", { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(async () => {
+      const envelopes = await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __LP_STUDIO_E2E_BRIDGE_ENVELOPES__?: unknown[];
+            }
+          ).__LP_STUDIO_E2E_BRIDGE_ENVELOPES__ ?? [],
+      );
+      return envelopes.filter((value): value is PreviewDiagnosticMessage =>
+        isPreviewDiagnosticMessage(value),
+      );
+    })
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "csp_blocked" }),
+        expect.objectContaining({ code: "site_error" }),
+        expect.objectContaining({ code: "unhandled_rejection" }),
+      ]),
+    );
+  const diagnosticEnvelopes = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __LP_STUDIO_E2E_BRIDGE_ENVELOPES__?: unknown[];
+        }
+      ).__LP_STUDIO_E2E_BRIDGE_ENVELOPES__ ?? [],
+  );
+  for (const envelope of diagnosticEnvelopes.filter(
+    (value): value is PreviewDiagnosticMessage =>
+      isPreviewDiagnosticMessage(value),
+  )) {
+    expectSchemaValid("previewDiagnosticMessage", envelope);
+    expect(Object.keys(envelope).sort()).toEqual(
+      [
+        "channelId",
+        "code",
+        "projectId",
+        "revisionId",
+        "schemaVersion",
+        "severity",
+        "snapshotId",
+        "sourceUnavailable",
+        "type",
+      ].sort(),
+    );
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain("blocked.invalid");
+    expect(serialized).not.toContain("E2E isolated rejection");
+    expect(serialized).not.toContain(importRoot);
+  }
+  expect(blockedExternalRequests).toContain(
+    "https://blocked.invalid/e2e-preview-canary.png",
+  );
+  await expect
+    .poll(() => blockedExternalFailures.length)
+    .toBe(blockedExternalRequests.length);
+  expect(blockedExternalResponses).toEqual([]);
+  for (const failure of blockedExternalFailures) {
+    expect(failure).toMatch(/^(?:csp|net::ERR_BLOCKED_BY_CLIENT)$/i);
+  }
+  expect(missingAssetStatuses).toEqual([404]);
+  await importedPreview.getByRole("link", { name: "同じLP内の詳細へ" }).click();
+  await expect(
+    importedPreview.getByRole("heading", { name: "同じLP内の詳細ページ" }),
+  ).toBeVisible();
+  await importedPreview.getByRole("link", { name: "トップへ戻る" }).click();
+  await expect(
+    importedPreview.getByRole("heading", { name: "登録ルートから始めるLP" }),
   ).toBeVisible();
   await expect(page.locator("body")).not.toContainText(importRoot);
 

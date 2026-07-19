@@ -103,6 +103,8 @@ pub struct StudioState(Arc<InnerState>);
 
 struct InnerState {
     config: ServerConfig,
+    preview_port: u16,
+    preview_secret: [u8; 32],
     storage: ManagedStorage,
     store: Mutex<Store>,
 }
@@ -115,6 +117,10 @@ impl fmt::Debug for StudioState {
 
 impl StudioState {
     pub fn new(config: ServerConfig) -> std::io::Result<Self> {
+        let preview_port = validate_preview_scope_origin(&config.preview_origin)?;
+        let mut preview_secret = [0_u8; 32];
+        getrandom::fill(&mut preview_secret)
+            .map_err(|_| std::io::Error::other("could not initialize preview isolation"))?;
         std::fs::create_dir_all(&config.state_root)?;
         let (storage, persisted) =
             ManagedStorage::open(&config.state_root).map_err(storage_initialization_error)?;
@@ -155,6 +161,8 @@ impl StudioState {
         }
         Ok(Self(Arc::new(InnerState {
             config,
+            preview_port,
+            preview_secret,
             storage,
             store: Mutex::new(store),
         })))
@@ -709,6 +717,45 @@ impl IntoResponse for ApiError {
     }
 }
 
+enum PreviewError {
+    NotFound,
+    Failure(ApiError),
+}
+
+impl PreviewError {
+    const fn not_found() -> Self {
+        Self::NotFound
+    }
+}
+
+impl From<ApiError> for PreviewError {
+    fn from(error: ApiError) -> Self {
+        if error.status == StatusCode::NOT_FOUND {
+            Self::NotFound
+        } else {
+            Self::Failure(error)
+        }
+    }
+}
+
+impl IntoResponse for PreviewError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotFound => uniform_preview_not_found(),
+            Self::Failure(error) => error.into_response(),
+        }
+    }
+}
+
+fn uniform_preview_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "Not found",
+    )
+        .into_response()
+}
+
 fn storage_initialization_error(error: StorageError) -> std::io::Error {
     match error {
         StorageError::Io(error) => error,
@@ -720,6 +767,120 @@ fn storage_initialization_error(error: StorageError) -> std::io::Error {
             "managed local state is invalid",
         ),
     }
+}
+
+fn validate_preview_scope_origin(origin: &str) -> std::io::Result<u16> {
+    let port_text = origin.strip_prefix("http://localhost:").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "preview origin must be an explicit http://localhost port",
+        )
+    })?;
+    if port_text.is_empty() || !port_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "preview origin must contain one explicit TCP port",
+        ));
+    }
+    let port = port_text.parse::<u16>().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "preview origin contains an invalid TCP port",
+        )
+    })?;
+    if matches!(port, 0 | 80) || origin != format!("http://localhost:{port}") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "preview origin must be canonical and use a bound TCP port",
+        ));
+    }
+    Ok(port)
+}
+
+fn preview_frame_source(port: u16) -> String {
+    format!("http://*.localhost:{port}")
+}
+
+fn length_delimited_hash_part(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn scoped_preview_label(
+    state: &StudioState,
+    session_id: &str,
+    project_id: &str,
+    snapshot_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    length_delimited_hash_part(&mut hasher, &state.0.preview_secret);
+    length_delimited_hash_part(&mut hasher, session_id.as_bytes());
+    length_delimited_hash_part(&mut hasher, project_id.as_bytes());
+    length_delimited_hash_part(&mut hasher, snapshot_id.as_bytes());
+    let digest = hasher.finalize();
+    let label = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("pv-{label}")
+}
+
+fn scoped_preview_host(
+    state: &StudioState,
+    session_id: &str,
+    project_id: &str,
+    snapshot_id: &str,
+) -> String {
+    format!(
+        "{}.localhost:{}",
+        scoped_preview_label(state, session_id, project_id, snapshot_id),
+        state.0.preview_port
+    )
+}
+
+fn scoped_preview_url(
+    state: &StudioState,
+    session_id: &str,
+    project_id: &str,
+    snapshot_id: &str,
+) -> String {
+    format!(
+        "http://{}/preview/{project_id}/{snapshot_id}/",
+        scoped_preview_host(state, session_id, project_id, snapshot_id)
+    )
+}
+
+fn preview_request_is_bound(
+    state: &StudioState,
+    store: &Store,
+    headers: &HeaderMap,
+    project_id: &str,
+    snapshot_id: &str,
+) -> bool {
+    if headers.get_all(HOST).iter().count() != 1 {
+        return false;
+    }
+    let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let suffix = format!(".localhost:{}", state.0.preview_port);
+    let Some(label) = host.strip_suffix(&suffix) else {
+        return false;
+    };
+    let Some(hex) = label.strip_prefix("pv-") else {
+        return false;
+    };
+    if hex.len() != 32
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    store
+        .sessions
+        .values()
+        .any(|session| scoped_preview_label(state, &session.id, project_id, snapshot_id) == label)
 }
 
 fn storage_api_error(error: StorageError) -> ApiError {
@@ -757,7 +918,7 @@ pub fn editor_router(state: StudioState) -> Router {
     let web_dist = state.0.config.web_dist.clone();
     let editor_csp = HeaderValue::from_str(&format!(
         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src {}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
-        state.0.config.preview_origin
+        preview_frame_source(state.0.preview_port)
     ))
     .unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"));
     let spa =
@@ -809,6 +970,32 @@ pub fn preview_router(state: StudioState) -> Router {
             get(preview_file),
         )
         .fallback(preview_not_found)
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("clear-site-data"),
+            HeaderValue::from_static("\"cache\", \"cookies\", \"storage\""),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-dns-prefetch-control"),
+            HeaderValue::from_static("off"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+                "accelerometer=(), attribution-reporting=(), autoplay=(), bluetooth=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-create=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), storage-access=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()",
+            ),
+        ))
         .with_state(state)
 }
 
@@ -872,7 +1059,7 @@ async fn create_project(
     headers: HeaderMap,
     payload: Result<Json<CreateProjectRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Versioned<ProjectPayload>>), ApiError> {
-    authorize_mutation(&state, &headers)?;
+    let session_id = authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
     if request.template != "blank" {
@@ -905,7 +1092,7 @@ async fn create_project(
             &project.accepted_files,
         )
         .map_err(storage_api_error)?;
-    let dto = project_dto(&state, &project);
+    let dto = project_dto(&state, &session_id, &project);
     store.projects.insert(id, project);
     Ok((
         StatusCode::CREATED,
@@ -917,12 +1104,12 @@ async fn list_projects(
     State(state): State<StudioState>,
     headers: HeaderMap,
 ) -> Result<Json<Versioned<ProjectsPayload>>, ApiError> {
-    authorize_read(&state, &headers)?;
+    let session_id = authorize_read(&state, &headers)?;
     let store = state.store()?;
     let mut projects = store
         .projects
         .values()
-        .map(|project| project_dto(&state, project))
+        .map(|project| project_dto(&state, &session_id, project))
         .collect::<Vec<_>>();
     projects.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(Json(Versioned::new(ProjectsPayload { projects })))
@@ -1080,7 +1267,7 @@ async fn confirm_import_preview(
         )
         .map_err(storage_api_error)?;
     store.import_previews.remove(&preview_id);
-    let dto = project_dto(&state, &project);
+    let dto = project_dto(&state, &session_id, &project);
     store.projects.insert(id, project);
     Ok((
         StatusCode::CREATED,
@@ -1093,14 +1280,14 @@ async fn get_project(
     Path(project_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Versioned<ProjectPayload>>, ApiError> {
-    authorize_read(&state, &headers)?;
+    let session_id = authorize_read(&state, &headers)?;
     let store = state.store()?;
     let project = store
         .projects
         .get(&project_id)
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(Versioned::new(ProjectPayload {
-        project: project_dto(&state, project),
+        project: project_dto(&state, &session_id, project),
     })))
 }
 
@@ -1228,7 +1415,7 @@ async fn create_proposal(
     headers: HeaderMap,
     payload: Result<Json<CreateProposalRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Versioned<ProposalPayload>>), ApiError> {
-    authorize_mutation(&state, &headers)?;
+    let session_id = authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
     let mut store = state.store()?;
@@ -1322,7 +1509,7 @@ async fn create_proposal(
         pending,
         status: ProposalStatus::PendingReview,
     };
-    let dto = proposal_dto(&state, project, &proposal);
+    let dto = proposal_dto(&state, &session_id, project, &proposal);
     project.proposal = Some(proposal);
     store.reviews.insert(review_id, project_id);
     Ok((
@@ -1438,7 +1625,7 @@ async fn create_decision(
         .map(|proposal| proposal.artifact_manifest_sha256.clone())
         .ok_or_else(ApiError::not_found)?;
     let expected_binding = ApprovalBinding {
-        session_id,
+        session_id: session_id.clone(),
         project_id: project_id.clone(),
         review_id: review_id.clone(),
         proposal_id: request.proposal_id.clone(),
@@ -1543,7 +1730,7 @@ async fn create_decision(
     proposal.status = ProposalStatus::Committed;
     let revision_id = project.revision_id.clone();
     let manifest_sha256 = project.accepted_manifest_sha256.clone();
-    let project_dto = project_dto(&state, project);
+    let project_dto = project_dto(&state, &session_id, project);
     Ok(Json(Versioned::new(DecisionPayload {
         decision: DecisionDto {
             review_id,
@@ -1660,43 +1847,52 @@ async fn download_export(
 async fn preview_index(
     state: State<StudioState>,
     Path((project_id, snapshot_id)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    serve_preview(state, project_id, snapshot_id, "index.html".into()).await
+    headers: HeaderMap,
+) -> Result<Response, PreviewError> {
+    serve_preview(state, headers, project_id, snapshot_id, "index.html".into()).await
 }
 
 async fn preview_file(
     state: State<StudioState>,
     Path((project_id, snapshot_id, path)): Path<(String, String, String)>,
-) -> Result<Response, ApiError> {
-    serve_preview(state, project_id, snapshot_id, path).await
+    headers: HeaderMap,
+) -> Result<Response, PreviewError> {
+    serve_preview(state, headers, project_id, snapshot_id, path).await
 }
 
 async fn serve_preview(
     State(state): State<StudioState>,
+    headers: HeaderMap,
     project_id: String,
     snapshot_id: String,
     path: String,
-) -> Result<Response, ApiError> {
+) -> Result<Response, PreviewError> {
     if path.is_empty()
         || path.starts_with('/')
         || path
             .split('/')
             .any(|part| part.is_empty() || matches!(part, "." | ".."))
     {
-        return Err(ApiError::not_found());
+        return Err(PreviewError::not_found());
     }
     let (bytes, revision_id) = {
-        let store = state.store()?;
+        let mut store = state.store()?;
+        sweep_expired_sessions(&mut store, now_unix());
+        if !preview_request_is_bound(&state, &store, &headers, &project_id, &snapshot_id) {
+            return Err(PreviewError::not_found());
+        }
         let project = store
             .projects
             .get(&project_id)
             .ok_or_else(ApiError::not_found)?;
         let (files, revision_id) = if snapshot_id == project.revision_id {
             (&project.accepted_files, project.revision_id.clone())
-        } else if let Some(proposal) = project.proposal.as_ref().filter(|p| p.id == snapshot_id) {
+        } else if let Some(proposal) = project.proposal.as_ref().filter(|proposal| {
+            proposal.id == snapshot_id && proposal.status == ProposalStatus::PendingReview
+        }) {
             (&proposal.proposed_files, proposal.base_revision_id.clone())
         } else {
-            return Err(ApiError::not_found());
+            return Err(PreviewError::not_found());
         };
         (
             files.get(&path).cloned().ok_or_else(ApiError::not_found)?,
@@ -1713,7 +1909,8 @@ async fn serve_preview(
                 "preview_too_large",
                 "The preview document is too large.",
                 false,
-            ));
+            )
+            .into());
         }
         let script_nonce = random_token(16)?;
         response_bytes = inject_preview_bridge(
@@ -1731,16 +1928,9 @@ async fn serve_preview(
         CONTENT_TYPE,
         HeaderValue::from_str(mime.as_ref()).map_err(|_| ApiError::internal())?,
     );
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
     if let Some(nonce) = nonce {
         let csp = format!(
-            "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'nonce-{nonce}'; connect-src 'none'; frame-ancestors {}; base-uri 'none'; form-action 'none'",
+            "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; script-src 'self' 'nonce-{nonce}'; worker-src 'none'; frame-src 'none'; connect-src 'none'; webrtc 'block'; frame-ancestors {}; object-src 'none'; base-uri 'none'; form-action 'none'",
             state.0.config.editor_origin
         );
         response.headers_mut().insert(
@@ -1756,7 +1946,7 @@ async fn api_not_found() -> ApiError {
 }
 
 async fn preview_not_found() -> Response {
-    (StatusCode::NOT_FOUND, "Not found").into_response()
+    uniform_preview_not_found()
 }
 
 fn validate_bootstrap_headers(state: &StudioState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -2087,16 +2277,13 @@ fn manifest_digest(files: &BTreeMap<String, Vec<u8>>) -> Result<String, ApiError
     Ok(artifact_manifest_sha256(&manifest(files)?))
 }
 
-fn project_dto(state: &StudioState, project: &Project) -> ProjectDto {
+fn project_dto(state: &StudioState, session_id: &str, project: &Project) -> ProjectDto {
     ProjectDto {
         id: project.id.clone(),
         display_name: project.display_name.clone(),
         revision_id: project.revision_id.clone(),
         status: "ready",
-        preview_url: format!(
-            "{}/preview/{}/{}/",
-            state.0.config.preview_origin, project.id, project.revision_id
-        ),
+        preview_url: scoped_preview_url(state, session_id, &project.id, &project.revision_id),
         accepted_manifest_sha256: project.accepted_manifest_sha256.clone(),
         files: project
             .accepted_files
@@ -2109,7 +2296,12 @@ fn project_dto(state: &StudioState, project: &Project) -> ProjectDto {
     }
 }
 
-fn proposal_dto(state: &StudioState, project: &Project, proposal: &ProposalRecord) -> ProposalDto {
+fn proposal_dto(
+    state: &StudioState,
+    session_id: &str,
+    project: &Project,
+    proposal: &ProposalRecord,
+) -> ProposalDto {
     debug_assert_eq!(
         fake_ai_mutation(&proposal.target_element_id).map(|mutation| mutation.element_id),
         Some(proposal.target_element_id.as_str())
@@ -2124,10 +2316,7 @@ fn proposal_dto(state: &StudioState, project: &Project, proposal: &ProposalRecor
         review_context_sha256: proposal.review_context_sha256.clone(),
         source_attribution: "caller_supplied_ai_attributed",
         execution_verified: false,
-        preview_url: format!(
-            "{}/preview/{}/{}/",
-            state.0.config.preview_origin, project.id, proposal.id
-        ),
+        preview_url: scoped_preview_url(state, session_id, &project.id, &proposal.id),
         changes: vec![ProposalChangeDto {
             path: "index.html",
             kind: "modified",
@@ -2213,19 +2402,42 @@ fn inject_preview_bridge(
     let project = serde_json::to_string(project_id).map_err(|_| ApiError::internal())?;
     let snapshot = serde_json::to_string(snapshot_id).map_err(|_| ApiError::internal())?;
     let revision = serde_json::to_string(revision_id).map_err(|_| ApiError::internal())?;
-    let script = format!(
-        r##"<script nonce="{nonce}">(()=>{{"use strict";const O={origin},P={project},S={snapshot},R={revision};let mode="interact",channel="";const valid=s=>typeof s==="string"&&s.length>0&&s.length<=128;addEventListener("message",e=>{{const m=e.data;if(e.origin!==O||e.source!==parent||!m||m.type!=="synapsegit-lp.action"||m.schemaVersion!=="1"||m.projectId!==P||m.snapshotId!==S||m.revisionId!==R||!valid(m.channelId))return;if(m.action==="set_mode"&&(m.mode==="select"||m.mode==="interact")){{channel=m.channelId;mode=m.mode;}}else if(m.action==="clear_selection"){{channel=m.channelId;document.querySelectorAll("[data-lp-selected]").forEach(n=>n.removeAttribute("data-lp-selected"));}}}});addEventListener("click",e=>{{if(mode!=="select"||!channel)return;const n=e.target instanceof Element?e.target.closest("[data-lp-id]"):null;if(!n)return;e.preventDefault();e.stopPropagation();const id=n.getAttribute("data-lp-id"),r=n.getBoundingClientRect();if(!id||id.length>128)return;parent.postMessage({{type:"synapsegit-lp.selection",schemaVersion:"1",channelId:channel,projectId:P,snapshotId:S,revisionId:R,elementId:id,rect:{{x:r.x,y:r.y,width:r.width,height:r.height}}}},O);}},true);}})();</script>"##
+    let mut script = format!(
+        r##"<script nonce="{nonce}">(()=>{{"use strict";window.name="";const O={origin},P={project},S={snapshot},R={revision},V=location.origin,B="/preview/"+encodeURIComponent(P)+"/"+encodeURIComponent(S)+"/",A=V+B,startsWith=Function.call.bind(String.prototype.startsWith),cancel=Function.call.bind(Event.prototype.preventDefault),seen=new Set(),pending=[];let mode="interact",channel="";const valid=s=>typeof s==="string"&&s.length>0&&s.length<=128,send=code=>{{try{{parent.postMessage({{type:"synapsegit-lp.diagnostic",schemaVersion:"1",channelId:channel,projectId:P,snapshotId:S,revisionId:R,severity:code==="csp_blocked"?"warning":"error",code,sourceUnavailable:true}},O);}}catch{{}}}},diagnose=code=>{{if(seen.has(code))return;seen.add(code);channel?send(code):pending.push(code);}},deny=()=>{{diagnose("csp_blocked");throw new DOMException("Blocked","SecurityError");}},lock=(owner,name)=>{{try{{Object.defineProperty(owner,name,{{value:deny,writable:false,configurable:false}});return true;}}catch{{return false;}}}};["open","write","writeln"].forEach(name=>{{const prototypeSafe=lock(Document.prototype,name),documentSafe=lock(document,name);if(!prototypeSafe||!documentSafe)diagnose("csp_blocked");}});const getter=(owner,name)=>{{try{{const value=Object.getOwnPropertyDescriptor(owner,name)?.get;return typeof value==="function"?Function.call.bind(value):null;}}catch{{return null;}}}},nav=window.navigation,getDestination=typeof NavigateEvent==="function"?getter(NavigateEvent.prototype,"destination"):null,getUrl=typeof NavigationDestination==="function"?getter(NavigationDestination.prototype,"url"):null;if(!nav||typeof nav.addEventListener!=="function")diagnose("csp_blocked");else nav.addEventListener("navigate",e=>{{let destination="";try{{destination=getDestination&&getUrl?getUrl(getDestination(e)):"";}}catch{{}}if(typeof destination!=="string"||!startsWith(destination,A)){{try{{cancel(e);}}catch{{}}diagnose("csp_blocked");}}}});addEventListener("securitypolicyviolation",()=>diagnose("csp_blocked"));addEventListener("error",()=>diagnose("site_error"),true);addEventListener("unhandledrejection",()=>diagnose("unhandled_rejection"));addEventListener("message",e=>{{const m=e.data;if(e.origin!==O||e.source!==parent||!m||m.type!=="synapsegit-lp.action"||m.schemaVersion!=="1"||m.projectId!==P||m.snapshotId!==S||m.revisionId!==R||!valid(m.channelId))return;if(m.action==="set_mode"&&(m.mode==="select"||m.mode==="interact")){{channel=m.channelId;mode=m.mode;pending.splice(0).forEach(send);}}else if(m.action==="clear_selection"&&channel===m.channelId){{document.querySelectorAll("[data-lp-selected]").forEach(n=>n.removeAttribute("data-lp-selected"));}}}});addEventListener("click",e=>{{if(mode!=="select"||!channel)return;const n=e.target instanceof Element?e.target.closest("[data-lp-id]"):null;if(!n)return;e.preventDefault();e.stopPropagation();const id=n.getAttribute("data-lp-id"),r=n.getBoundingClientRect();if(!id||id.length>128)return;parent.postMessage({{type:"synapsegit-lp.selection",schemaVersion:"1",channelId:channel,projectId:P,snapshotId:S,revisionId:R,elementId:id,rect:{{x:r.x,y:r.y,width:r.width,height:r.height}}}},O);}},true);}})();</script>"##
     );
+    script.push_str(&format!(
+        r#"<script nonce="{nonce}">(()=>{{"use strict";const blocked=()=>{{dispatchEvent(new Event("securitypolicyviolation"));throw new DOMException("Blocked","SecurityError");}};for(const name of ["RTCPeerConnection","webkitRTCPeerConnection"]){{try{{Object.defineProperty(window,name,{{value:blocked,writable:false,configurable:false}});}}catch{{dispatchEvent(new Event("securitypolicyviolation"));}}}}}})();</script>"#
+    ));
     let mut output = String::with_capacity(html.len() + script.len());
-    if let Some(index) = html.rfind("</body>") {
-        output.push_str(&html[..index]);
-        output.push_str(&script);
-        output.push_str(&html[index..]);
-    } else {
-        output.push_str(html);
-        output.push_str(&script);
-    }
+    let insertion = preview_bridge_insertion(html);
+    output.push_str(&html[..insertion]);
+    output.push_str(&script);
+    output.push_str(&html[insertion..]);
     Ok(output.into_bytes())
+}
+
+fn preview_bridge_insertion(html: &str) -> usize {
+    let bytes = html.as_bytes();
+    let mut offset = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        3
+    } else {
+        0
+    };
+    while bytes
+        .get(offset)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        offset += 1;
+    }
+    const DOCTYPE: &str = "<!doctype html>";
+    if html[offset..]
+        .get(..DOCTYPE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(DOCTYPE))
+    {
+        offset + DOCTYPE.len()
+    } else {
+        0
+    }
 }
 
 fn deterministic_zip(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, ApiError> {

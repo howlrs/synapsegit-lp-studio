@@ -7,7 +7,9 @@ import {
 } from "@testing-library/react";
 import { App } from "../App";
 import {
+  ACCEPTED_PREVIEW_ORIGIN,
   HASH_C,
+  PROPOSED_PREVIEW_ORIGIN,
   bootstrapFixture,
   contextResponseFixture,
   importPreviewResponseFixture,
@@ -113,6 +115,14 @@ describe("C2 browser vertical slice", () => {
       "referrerpolicy",
       "no-referrer",
     );
+    expect(screen.getByTitle("LPプレビュー")).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-same-origin",
+    );
+    expect(screen.getByTitle("LPプレビュー")).toHaveAttribute(
+      "src",
+      `${ACCEPTED_PREVIEW_ORIGIN}/preview/project-001/revision-accepted-001/`,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "ヒーロー見出し" }));
     expect(await screen.findByText("#hero-heading")).toBeInTheDocument();
@@ -141,6 +151,52 @@ describe("C2 browser vertical slice", () => {
       within(drawer as HTMLElement).getByText(/<img onerror/),
     ).toBeInTheDocument();
     expect((drawer as HTMLElement).querySelector("img")).toBeNull();
+
+    const proposedFrame = screen.getByTitle(
+      "LPプレビュー",
+    ) as HTMLIFrameElement;
+    expect(proposedFrame).toHaveAttribute(
+      "src",
+      `${PROPOSED_PREVIEW_ORIGIN}/preview/project-001/proposal-001/`,
+    );
+    const proposedPostMessage = vi.spyOn(
+      proposedFrame.contentWindow as Window,
+      "postMessage",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "操作モード" }));
+    await waitFor(() =>
+      expect(proposedPostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "synapsegit-lp.action",
+          snapshotId: "proposal-001",
+        }),
+        PROPOSED_PREVIEW_ORIGIN,
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Accepted" }));
+    const acceptedFrame = screen.getByTitle(
+      "LPプレビュー",
+    ) as HTMLIFrameElement;
+    expect(acceptedFrame).toHaveAttribute(
+      "src",
+      `${ACCEPTED_PREVIEW_ORIGIN}/preview/project-001/revision-accepted-001/`,
+    );
+    const acceptedPostMessage = vi.spyOn(
+      acceptedFrame.contentWindow as Window,
+      "postMessage",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "選択モード" }));
+    await waitFor(() =>
+      expect(acceptedPostMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "synapsegit-lp.action",
+          snapshotId: "revision-accepted-001",
+        }),
+        ACCEPTED_PREVIEW_ORIGIN,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Proposed" }));
 
     fireEvent.click(
       within(drawer as HTMLElement).getByRole("button", { name: "変更を採用" }),
@@ -209,6 +265,114 @@ describe("C2 browser vertical slice", () => {
       "revision-a…ed-001",
     );
     expect(screen.getByText("Untitled landing page")).toBeInTheDocument();
+  });
+
+  it("shows only privacy-safe diagnostics from the exact Accepted frame", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Untitled landing pageを開く",
+      }),
+    );
+    const frame = (await screen.findByTitle(
+      "LPプレビュー",
+    )) as HTMLIFrameElement;
+    const diagnostic = {
+      type: "synapsegit-lp.diagnostic",
+      schemaVersion: "1",
+      channelId: "11111111-2222-4333-8444-555555555555",
+      projectId: "project-001",
+      snapshotId: "revision-accepted-001",
+      revisionId: "revision-accepted-001",
+      severity: "warning",
+      code: "csp_blocked",
+      sourceUnavailable: true,
+    };
+
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: ACCEPTED_PREVIEW_ORIGIN,
+        source: frame.contentWindow,
+        data: {
+          ...diagnostic,
+          message: "file:///private/site/index.html",
+        },
+      }),
+    );
+    expect(screen.queryByText("source unavailable")).not.toBeInTheDocument();
+
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: ACCEPTED_PREVIEW_ORIGIN,
+        source: frame.contentWindow,
+        data: diagnostic,
+      }),
+    );
+    expect(await screen.findByText("source unavailable")).toBeVisible();
+    expect(screen.getByText(/プレビューのセキュリティ制約/)).toBeVisible();
+    expect(document.body.textContent).not.toContain("file:///private");
+  });
+
+  it("fails closed without mounting site content when navigation isolation is unavailable", async () => {
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const path = String(input);
+        const method = init?.method ?? "GET";
+        if (path === "/api/v1/bootstrap") {
+          return jsonResponse(bootstrapFixture(window.location.origin));
+        }
+        if (method === "GET" && path === "/api/v1/projects") {
+          return jsonResponse(projectsResponseFixture());
+        }
+        if (method === "GET" && path === "/api/v1/projects/project-001") {
+          return jsonResponse(projectResponseFixture());
+        }
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("navigation", undefined);
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Untitled landing pageを開く",
+      }),
+    );
+
+    const isolationError = await screen.findByRole("alert");
+    expect(isolationError).toHaveTextContent(
+      "このブラウザでは安全なプレビュー隔離を利用できないため、LPの実行を停止しました。",
+    );
+    expect(screen.queryByTitle("LPプレビュー")).not.toBeInTheDocument();
+    expect(isolationError).not.toHaveTextContent("pv-");
+    expect(isolationError).not.toHaveTextContent("preview/project");
   });
 
   it("reviews an exact registered-root copy before explicit import", async () => {

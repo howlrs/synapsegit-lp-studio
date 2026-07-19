@@ -6,6 +6,32 @@ const sourcePath = resolve(root, "docs/detailed-requirements.md");
 const outputPath = resolve(root, "docs/requirements-traceability.md");
 const lines = readFileSync(sourcePath, "utf8").split("\n");
 
+const implementedRequirements = new Set([
+  "FR-PREV-001",
+  "FR-PREV-002",
+  "FR-PREV-003",
+  "FR-PREV-004",
+  "FR-PREV-005",
+  "SEC-PREV-001",
+  "SEC-PREV-002",
+  "SEC-PREV-003",
+  "SEC-PREV-004",
+  "SEC-PREV-005",
+  "SEC-PREV-006",
+  "SEC-PREV-007",
+  "SEC-PREV-008",
+  "FR-PREV-010",
+  "FR-PREV-011",
+  "FR-PREV-012",
+  "FR-PREV-013",
+]);
+
+function statusFor(id) {
+  return implementedRequirements.has(id)
+    ? "implemented — [C4 evidence](implementation-status.md#c4-evidence-and-limits)"
+    : "planned";
+}
+
 function checkpointFor(id) {
   if (id.startsWith("DEV-")) return "C0–C11";
   if (id.startsWith("DEP-LIC") || id.startsWith("DEP-PLAT")) return "C0 / M2";
@@ -120,7 +146,7 @@ if (requirements.length === 0) {
 const output = [
   "# Requirement traceability",
   "",
-  "Status: generated planning baseline",
+  "Status: generated active implementation matrix",
   "",
   "Source: [detailed-requirements.md](detailed-requirements.md)",
   "",
@@ -156,7 +182,9 @@ const output = [
       sourceSection.replace(/\|/g, "\\|") +
       " | " +
       summary +
-      " | planned |",
+      " | " +
+      statusFor(id) +
+      " |",
   ),
   "",
 ].join("\n");

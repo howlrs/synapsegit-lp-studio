@@ -23,7 +23,15 @@ interface ReadyOrigins {
 const importFixture = new Map<string, string>([
   [
     "index.html",
-    '<!doctype html><html lang="ja"><head><meta charset="utf-8"><link rel="stylesheet" href="assets/theme.css"><title>Imported E2E LP</title></head><body><main><h1 data-lp-id="hero-heading">登録ルートから始めるLP</h1><p data-lp-id="hero-copy">コピーされたAccepted状態です。</p><a data-lp-id="hero-cta" href="#contact">相談する</a></main></body></html>\n',
+    '<!doctype html><html lang="ja"><head><meta charset="utf-8"><link rel="stylesheet" href="assets/theme.css"><script src="assets/app.js"></script><script>window.__LP_STUDIO_INLINE_SCRIPT_MUST_NOT_RUN__=true</script><title>Imported E2E LP</title></head><body><main><h1 data-lp-id="hero-heading">登録ルートから始めるLP</h1><p data-lp-id="hero-copy">コピーされたAccepted状態です。</p><a data-lp-id="hero-cta" href="#contact">相談する</a><a href="about.html">同じLP内の詳細へ</a><img src="assets/missing.png" alt=""><img src="https://blocked.invalid/e2e-preview-canary.png" alt=""></main></body></html>\n',
+  ],
+  [
+    "about.html",
+    '<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>Imported detail</title></head><body><main><h1>同じLP内の詳細ページ</h1><a href="./">トップへ戻る</a></main></body></html>\n',
+  ],
+  [
+    "assets/app.js",
+    'document.documentElement.dataset.selfScript = "executed"; Promise.reject(new Error("E2E isolated rejection"));\n',
   ],
   [
     "assets/theme.css",

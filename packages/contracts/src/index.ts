@@ -268,6 +268,23 @@ export interface PreviewSelectionMessage {
   rect: PreviewRect;
 }
 
+export type PreviewDiagnosticSeverity = "warning" | "error";
+export type PreviewDiagnosticCode =
+  "csp_blocked" | "site_error" | "unhandled_rejection";
+
+/** Privacy-safe diagnostic envelope. Raw URLs, messages, and stacks are forbidden. */
+export interface PreviewDiagnosticMessage {
+  type: "synapsegit-lp.diagnostic";
+  schemaVersion: SchemaVersion;
+  channelId: string;
+  projectId: string;
+  snapshotId: string;
+  revisionId: string;
+  severity: PreviewDiagnosticSeverity;
+  code: PreviewDiagnosticCode;
+  sourceUnavailable: true;
+}
+
 interface PreviewActionEnvelope {
   type: "synapsegit-lp.action";
   schemaVersion: SchemaVersion;
@@ -296,6 +313,95 @@ const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 const isNonNegativeInteger = (value: unknown): value is number =>
   isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
+const isExplicitPort = (value: string): boolean =>
+  /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65_535;
+
+export const isPreviewScopeBaseOrigin = (value: unknown): value is string => {
+  if (!isString(value) || !/^http:\/\/localhost:[1-9][0-9]{0,4}$/.test(value)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "http:" &&
+      parsed.hostname === "localhost" &&
+      isExplicitPort(parsed.port) &&
+      parsed.origin === value &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.pathname === "/" &&
+      parsed.search === "" &&
+      parsed.hash === ""
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isCanonicalPreviewPath = (parsed: URL, rawUrl: string): boolean => {
+  if (parsed.href !== rawUrl || !parsed.pathname.startsWith("/preview/")) {
+    return false;
+  }
+  const path = parsed.pathname.slice("/preview/".length);
+  if (path.length === 0 || path.includes("\\") || path.includes("//")) {
+    return false;
+  }
+  const hasTrailingSlash = path.endsWith("/");
+  const segments = (hasTrailingSlash ? path.slice(0, -1) : path).split("/");
+  if (
+    segments.length < 2 ||
+    (segments.length === 2 && !hasTrailingSlash) ||
+    (segments.length > 2 && hasTrailingSlash)
+  ) {
+    return false;
+  }
+  return segments.every((segment) => {
+    if (segment.length === 0 || segment === "." || segment === "..") {
+      return false;
+    }
+    try {
+      const decoded = decodeURIComponent(segment);
+      return (
+        decoded.length > 0 &&
+        decoded !== "." &&
+        decoded !== ".." &&
+        !decoded.includes("/") &&
+        !decoded.includes("\\") &&
+        !decoded.includes("\0")
+      );
+    } catch {
+      return false;
+    }
+  });
+};
+
+export const isScopedPreviewUrl = (
+  value: unknown,
+  previewScopeBaseOrigin?: string,
+): value is string => {
+  if (!isString(value)) return false;
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "http:" ||
+      !/^pv-[0-9a-f]{32}\.localhost$/.test(parsed.hostname) ||
+      !isExplicitPort(parsed.port) ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.search !== "" ||
+      parsed.hash !== "" ||
+      !isCanonicalPreviewPath(parsed, value)
+    ) {
+      return false;
+    }
+    if (previewScopeBaseOrigin === undefined) return true;
+    if (!isPreviewScopeBaseOrigin(previewScopeBaseOrigin)) return false;
+    const base = new URL(previewScopeBaseOrigin);
+    return parsed.protocol === base.protocol && parsed.port === base.port;
+  } catch {
+    return false;
+  }
+};
 const isSafeRelativePath = (value: unknown): value is string => {
   if (
     !isNonEmptyString(value) ||
@@ -388,7 +494,7 @@ export const isProject = (value: unknown): value is Project => {
     isNonEmptyString(value.revisionId) &&
     isSha256(value.acceptedManifestSha256) &&
     value.status === "ready" &&
-    isNonEmptyString(value.previewUrl)
+    isScopedPreviewUrl(value.previewUrl)
   );
 };
 
@@ -430,7 +536,7 @@ export const isBootstrapResponse = (
     isNonEmptyString(session.token) &&
     isNonEmptyString(session.expiresAt) &&
     isNonEmptyString(value.editorOrigin) &&
-    isNonEmptyString(value.previewOrigin) &&
+    isPreviewScopeBaseOrigin(value.previewOrigin) &&
     isExactArrayOf(capabilities.targetKinds, isString) &&
     capabilities.targetKinds.length === 1 &&
     capabilities.targetKinds[0] === "element" &&
@@ -646,7 +752,7 @@ export const isProposalResponse = (
     isSha256(proposal.reviewContextSha256) &&
     proposal.sourceAttribution === "caller_supplied_ai_attributed" &&
     proposal.executionVerified === false &&
-    isNonEmptyString(proposal.previewUrl) &&
+    isScopedPreviewUrl(proposal.previewUrl) &&
     isExactArrayOf(proposal.changes, isProposalChange) &&
     isString(proposal.unifiedDiff) &&
     isProposalValidation(proposal.validation)
@@ -788,6 +894,33 @@ export const isPreviewSelectionMessage = (
     value.rect.height >= 0
   );
 };
+
+export const isPreviewDiagnosticMessage = (
+  value: unknown,
+): value is PreviewDiagnosticMessage =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "type",
+    "schemaVersion",
+    "channelId",
+    "projectId",
+    "snapshotId",
+    "revisionId",
+    "severity",
+    "code",
+    "sourceUnavailable",
+  ]) &&
+  value.type === "synapsegit-lp.diagnostic" &&
+  value.schemaVersion === SCHEMA_VERSION &&
+  isNonEmptyString(value.channelId) &&
+  isNonEmptyString(value.projectId) &&
+  isNonEmptyString(value.snapshotId) &&
+  isNonEmptyString(value.revisionId) &&
+  (value.severity === "warning" || value.severity === "error") &&
+  (value.code === "csp_blocked" ||
+    value.code === "site_error" ||
+    value.code === "unhandled_rejection") &&
+  value.sourceUnavailable === true;
 
 export const isPreviewActionMessage = (
   value: unknown,

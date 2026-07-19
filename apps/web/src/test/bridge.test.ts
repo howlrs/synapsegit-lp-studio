@@ -1,8 +1,15 @@
 import {
   isAllowedPreviewUrl,
   postPreviewMode,
+  readPreviewDiagnostic,
   readPreviewSelection,
 } from "../preview/bridge";
+
+const previewScopeBase = "http://localhost:4174";
+const acceptedOrigin =
+  "http://pv-11111111111111111111111111111111.localhost:4174";
+const proposedOrigin =
+  "http://pv-22222222222222222222222222222222.localhost:4174";
 
 const source = {} as Window;
 const message = {
@@ -16,7 +23,7 @@ const message = {
   rect: { x: 20, y: 30, width: 240, height: 60 },
 };
 const binding = {
-  expectedOrigin: "https://preview.test",
+  expectedOrigin: proposedOrigin,
   expectedSource: source,
   channelId: "channel-123",
   projectId: "project-001",
@@ -28,7 +35,7 @@ const event = (
   overrides: Partial<MessageEvent<unknown>> = {},
 ): MessageEvent<unknown> =>
   ({
-    origin: "https://preview.test",
+    origin: proposedOrigin,
     source,
     data: message,
     ...overrides,
@@ -74,7 +81,7 @@ describe("untrusted preview bridge", () => {
     postPreviewMode(
       { postMessage } as unknown as Window,
       {
-        expectedOrigin: "https://preview.test",
+        expectedOrigin: proposedOrigin,
         channelId: "channel-123",
         projectId: "project-001",
         snapshotId: "proposal-001",
@@ -93,23 +100,80 @@ describe("untrusted preview bridge", () => {
         snapshotId: "proposal-001",
         revisionId: "revision-001",
       },
-      "https://preview.test",
+      proposedOrigin,
     );
   });
 
-  it("allows preview URLs only on the bootstrapped preview origin", () => {
+  it("allows only exact scoped origins under the bootstrapped local scope", () => {
     expect(
       isAllowedPreviewUrl(
-        "https://preview.test/projects/project-001/index.html",
-        "https://preview.test",
+        `${acceptedOrigin}/preview/project-001/revision-001/`,
+        previewScopeBase,
       ),
     ).toBe(true);
     expect(
       isAllowedPreviewUrl(
-        "https://preview.test.attacker.example/project",
-        "https://preview.test",
+        `${proposedOrigin}/preview/project-001/proposal-001/`,
+        previewScopeBase,
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedPreviewUrl(
+        `${acceptedOrigin}/preview/project-001/revision-001/`,
+        "http://attacker.localhost:4174",
       ),
     ).toBe(false);
-    expect(isAllowedPreviewUrl("javascript:alert(1)", "null")).toBe(false);
+    for (const url of [
+      "http://pv-11111111111111111111111111111111.localhost.attacker.test:4174/preview/project-001/revision-001/",
+      "http://child.pv-11111111111111111111111111111111.localhost:4174/preview/project-001/revision-001/",
+      `${acceptedOrigin.replace(":4174", ":4175")}/preview/project-001/revision-001/`,
+      "http://user@pv-11111111111111111111111111111111.localhost:4174/preview/project-001/revision-001/",
+      `${acceptedOrigin}/preview/project-001/../private/`,
+      `${acceptedOrigin}/preview/project-001/revision-001/?secret=1`,
+      "javascript:alert(1)",
+    ]) {
+      expect(isAllowedPreviewUrl(url, previewScopeBase)).toBe(false);
+    }
+  });
+
+  it("accepts diagnostics only from the exact bound source and snapshot", () => {
+    const diagnostic = {
+      type: "synapsegit-lp.diagnostic",
+      schemaVersion: "1",
+      channelId: "channel-123",
+      projectId: "project-001",
+      snapshotId: "proposal-001",
+      revisionId: "revision-001",
+      severity: "error",
+      code: "site_error",
+      sourceUnavailable: true,
+    };
+    expect(readPreviewDiagnostic(event({ data: diagnostic }), binding)).toEqual(
+      diagnostic,
+    );
+    expect(
+      readPreviewDiagnostic(
+        event({ origin: acceptedOrigin, data: diagnostic }),
+        binding,
+      ),
+    ).toBeNull();
+    expect(
+      readPreviewDiagnostic(
+        event({ source: {} as Window, data: diagnostic }),
+        binding,
+      ),
+    ).toBeNull();
+    expect(
+      readPreviewDiagnostic(
+        event({ data: { ...diagnostic, snapshotId: "accepted-revision" } }),
+        binding,
+      ),
+    ).toBeNull();
+    expect(
+      readPreviewDiagnostic(
+        event({ data: { ...diagnostic, stack: "private stack" } }),
+        binding,
+      ),
+    ).toBeNull();
   });
 });

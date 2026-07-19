@@ -25,12 +25,21 @@
     { "$ref": "#/$defs/exportResponse" },
     { "$ref": "#/$defs/errorResponse" },
     { "$ref": "#/$defs/previewSelectionMessage" },
+    { "$ref": "#/$defs/previewDiagnosticMessage" },
     { "$ref": "#/$defs/previewActionMessage" }
   ],
   "$defs": {
     "version": { "const": "1" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "nonEmptyString": { "type": "string", "minLength": 1 },
+    "previewScopeBaseOrigin": {
+      "type": "string",
+      "pattern": "^http://localhost:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
+    },
+    "scopedPreviewUrl": {
+      "type": "string",
+      "pattern": "^http://pv-[0-9a-f]{32}\\.localhost:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])/preview/(?!.*%(?:2[fF]|5[cC]|00))(?!(?:\\.|\\.\\.)(?:/|$))[^/?#\\\\\\u0000]+/(?!(?:\\.|\\.\\.)(?:/|$))[^/?#\\\\\\u0000]+/(?:((?!(?:\\.|\\.\\.)(?:/|$))[^/?#\\\\\\u0000]+)(?:/(?!(?:\\.|\\.\\.)(?:/|$))[^/?#\\\\\\u0000]+)*)?$"
+    },
     "relativePath": {
       "type": "string",
       "minLength": 1,
@@ -66,7 +75,7 @@
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "acceptedManifestSha256": { "$ref": "#/$defs/sha256" },
         "status": { "const": "ready" },
-        "previewUrl": { "$ref": "#/$defs/nonEmptyString" },
+        "previewUrl": { "$ref": "#/$defs/scopedPreviewUrl" },
         "files": {
           "type": "array",
           "items": { "$ref": "#/$defs/projectFile" }
@@ -97,7 +106,7 @@
           }
         },
         "editorOrigin": { "$ref": "#/$defs/nonEmptyString" },
-        "previewOrigin": { "$ref": "#/$defs/nonEmptyString" },
+        "previewOrigin": { "$ref": "#/$defs/previewScopeBaseOrigin" },
         "capabilities": {
           "type": "object",
           "additionalProperties": false,
@@ -382,7 +391,7 @@
         "reviewContextSha256": { "$ref": "#/$defs/sha256" },
         "sourceAttribution": { "const": "caller_supplied_ai_attributed" },
         "executionVerified": { "const": false },
-        "previewUrl": { "$ref": "#/$defs/nonEmptyString" },
+        "previewUrl": { "$ref": "#/$defs/scopedPreviewUrl" },
         "changes": {
           "type": "array",
           "items": {
@@ -594,6 +603,34 @@
         "revisionId": { "$ref": "#/$defs/nonEmptyString" },
         "elementId": { "$ref": "#/$defs/nonEmptyString" },
         "rect": { "$ref": "#/$defs/rect" }
+      }
+    },
+    "previewDiagnosticMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "schemaVersion",
+        "channelId",
+        "projectId",
+        "snapshotId",
+        "revisionId",
+        "severity",
+        "code",
+        "sourceUnavailable"
+      ],
+      "properties": {
+        "type": { "const": "synapsegit-lp.diagnostic" },
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "channelId": { "$ref": "#/$defs/nonEmptyString" },
+        "projectId": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "severity": { "enum": ["warning", "error"] },
+        "code": {
+          "enum": ["csp_blocked", "site_error", "unhandled_rejection"]
+        },
+        "sourceUnavailable": { "const": true }
       }
     },
     "previewActionMessage": {

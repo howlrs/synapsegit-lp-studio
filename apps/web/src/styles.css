@@ -1144,6 +1144,33 @@ kbd {
   line-height: 1.6;
 }
 
+.preview-diagnostic {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.65rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid rgba(255, 196, 95, 0.42);
+  border-radius: 7px;
+  color: #ffe9bd;
+  background: rgba(255, 196, 95, 0.08);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.preview-diagnostic-error {
+  border-color: rgba(255, 127, 136, 0.5);
+  color: #ffdfe1;
+  background: rgba(255, 127, 136, 0.09);
+}
+.preview-diagnostic span {
+  flex: 1;
+}
+.preview-diagnostic code {
+  color: inherit;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
 @media (max-width: 1240px) {
   .studio-header {
     grid-template-columns: 1fr 1.5fr;

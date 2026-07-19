@@ -52,7 +52,9 @@ LP_STUDIO_STATE_ROOT=.studio-data pnpm dev:server
 ```
 
 Open the `editorOrigin` printed in `LP_STUDIO_READY`. The server binds random
-IPv4 loopback ports for the Editor/API and the isolated Preview. Omitting
+IPv4 loopback ports for the Editor/API and the isolated Preview. Each live
+Preview uses an opaque session/project/snapshot-scoped `localhost` subdomain;
+expired, foreign, stale, and terminal Proposal URLs are revoked. Omitting
 `LP_STUDIO_STATE_ROOT` uses a private process-owned temporary directory and
 removes it at shutdown.
 
@@ -65,20 +67,23 @@ LP_STUDIO_IMPORT_ROOT=/absolute/path/to/built-lp \
 pnpm dev:server
 ```
 
-The current C3 slice persists blank/imported projects in the explicit state
+The current C4 slice persists blank/imported projects in the explicit state
 root, previews the exact included/excluded import set before confirmation,
 keeps the source directory unchanged, and blocks Accepted-manifest drift before
-Proposal, Decision, and export. It also supports element selection, exact
+Proposal, Decision, and export. Preview execution is isolated by scoped origin,
+CSP/sandbox, bounded navigation, storage rotation, revocable URLs, and a
+privacy-safe diagnostic bridge. It also supports element selection, exact
 context review, deterministic fake-AI Proposal, explicit adopt, and
 deterministic Accepted ZIP export. It deliberately exposes caller-supplied
 attribution and `execution未検証`; SynapseGit did not execute or verify the
-model.
+model. Active Preview currently requires Chromium's Navigation API and fails
+closed when the boundary cannot be installed.
 
 ## Status
 
-Managed project/revision/import checkpoint complete: 38%. Not production-ready. SynapseGit
-draft PR #25 is source-level evaluation work, not a released dependency or
-permission for production/distribution.
+Scoped Preview isolation checkpoint complete: 46%. Not production-ready.
+SynapseGit draft PR #25 is source-level evaluation work, not a released
+dependency or permission for production/distribution.
 
 Current product and architecture requirements are documented in
 [`docs/current-specification.md`](docs/current-specification.md). The
