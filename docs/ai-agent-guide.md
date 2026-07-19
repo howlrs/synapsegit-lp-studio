@@ -142,7 +142,8 @@ OpenAI live testは外部network、credential、billing、account availability�
 - SynapseGitがmodelを実行・検証したと表示しない。現在のattributionは
   `caller-supplied`かつ`execution未検証`である。
 - `singleProposalPerProject: true`をC7のrecovery設計なしに解除しない。
-- Public repository、development push、draft PRをproduct publicationやlicense grantと呼ばない。
+- Public repository、development push、checkpoint PR、統合済みの`main`
+  baselineをproduct publicationやlicense grantと呼ばない。
 
 ## 7. Taskからfileへのmap
 

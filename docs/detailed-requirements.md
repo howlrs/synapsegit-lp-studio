@@ -1484,7 +1484,8 @@ Section 13.6のfeedback運用に従い、local workaroundだけで閉じない�
   AI-attributed resultとし、Human Decision/verified executionを偽装しない。
 - **DEV-003 / P0:** 意味のあるcheckpointごとに関連fileだけをcommitし、
   validation後にimplementation branchへpushする。
-  commit SHA、test、Synapse checkpoint、Issueをlocal statusとdraft PRへ記録する。
+  commit SHA、test、Synapse checkpoint、Issueをlocal statusと現在のPRへ記録する。
+  統合済みbaselineはmerge PR、merge commit、post-merge checkも記録する。
 - **DEV-004 / P0:** 本開発repositoryへのcheckpoint commit/pushは
   Creatorが明示的に依頼済みの開発進捗操作である。
   製品UIからCreatorのLP/provenanceをGitHubへ公開する
@@ -1498,7 +1499,10 @@ Section 13.6のfeedback運用に従い、local workaroundだけで閉じない�
   selectorが提供されない環境で下位modelを使用したと主張しない。
   trust boundary、integration、security、checkpoint scopeは主agentがreviewする。
 - **DEV-007 / P0:** 80%まではdraft PRを維持し、merge、release、tag、
-  production publicationを行わない。
+  production publicationを行わないことをdefaultとする。Creatorがexact PRの
+  開発baseline mergeを明示承認した場合のみ例外とし、merge commitと
+  post-merge checkをstatusに記録する。そのmergeは80% gate、release、tag、
+  production readiness、publication、またはdistribution permissionを意味しない。
 - **DEV-008 / P0:** SynapseGitの不満・不便・missing capabilityを発見した場合、
   Section 13.6に従って該当slice前または発見直後にIssueへfeedbackする。
 - **DEV-009 / P0:** 実装開始前に全requirement IDをcheckpointとplanned evidenceへ

@@ -2,9 +2,11 @@
 
 Status date: 2026-07-19
 
-Branch: `agent/lp-studio-m1`
+Baseline branch: `main`
 
-Draft PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
+Integration PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
+
+C0–C6 integration commit: `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`
 
 Completed progress: 65%
 
@@ -15,7 +17,7 @@ Completed progress: 65%
 
 | Checkpoint | Weight | Status | Evidence |
 | --- | ---: | --- | --- |
-| C0 Requirements and early ADR baseline | 5% | complete | commit `e256075`; detailed requirements, plan, ADR-0001–0006, traceability generator, docs QA; draft PR #1 |
+| C0 Requirements and early ADR baseline | 5% | complete | commit `e256075`; detailed requirements, plan, ADR-0001–0006, traceability generator, docs QA; opened draft PR #1, now merged as the C0–C6 baseline |
 | C1 Upstream Synapse generic contract | 15% | complete | SynapseGit commit [`7ddb58b`](https://github.com/howlrs/synapsegit/commit/7ddb58b2ad585db3823431135ae33222d4704f9f), [draft PR #25](https://github.com/howlrs/synapsegit/pull/25), [passing CI](https://github.com/howlrs/synapsegit/actions/runs/29672697156/job/88154428767), contract lock/parity check, workspace quality gates |
 | C2 Real-boundary M0 vertical slice | 10% | complete | real pinned `synapse-artifact` Proposal/Decision; strict API/bridge schema; separate random loopback origins; deterministic blank/fake-AI/adopt/export E2E; Rust, TypeScript, CSP, quota, and ZIP tests |
 | C3 Project/revision/import | 8% | complete | private retained state root; canonical immutable revision/CAS and Accepted pointer; reviewed copy import; restart, drift, malicious-path, root-overlap, source-preservation, and browser E2E evidence |
@@ -54,13 +56,50 @@ Completed progress: 65%
   as a SynapseGit checkout.
 - GitHub App Issue writes returned 403; authenticated GitHub CLI successfully
   created the reviewed upstream feedback.
-- C0 through C6 are implemented and locally verified. C6 evidence is bound to
-  this checkpoint commit and its GitHub checks. No tag, merge,
-  release, product publication, or distribution permission exists yet.
+- C0 through C6 are implemented and locally verified. The Creator explicitly
+  approved integrating this 65% development baseline through PR #1. `main`
+  contains merge commit `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`, and the
+  post-merge [GitHub Actions run](https://github.com/howlrs/synapsegit-lp-studio/actions/runs/29683014738)
+  passed the documentation/lock, formatting, Web, Rust, build, and Chromium
+  gates.
+- A fresh local audit of that merge commit also passed frozen install,
+  `pnpm check`, `pnpm test`, `pnpm build`, `pnpm test:e2e`,
+  `pnpm format:check`, `pnpm check:docs`, and `git diff --check`: 205 Web
+  tests, 63 Rust library tests, 10 launcher tests, and 3 Chromium flows passed.
+  The separately acknowledged, externally billed OpenAI live test remained
+  intentionally ignored.
+- The 65% merge is an explicit exception to the default pre-80% draft-PR
+  policy. It establishes a development baseline only: C7–C11 and the 80% local
+  verification gate remain incomplete. No tag, release, product publication,
+  production-readiness claim, or distribution permission exists.
 - The development repository is Public by explicit Creator direction. Public
   visibility is not a product-publication action or a license grant.
 - Development checkpoint pushes are explicitly authorized; product publication
   remains a separate Human action.
+
+## C1 evidence and limits
+
+- The Rust workspace pins the upstream SynapseGit source contract to exact
+  commit `7ddb58b2ad585db3823431135ae33222d4704f9f`. The committed lock records
+  source hashes and capabilities, and the parity check rejects drift from the
+  reviewed adjacent source checkout.
+- Only the local Rust server imports and calls the versioned trusted use-case
+  API. Browser contracts expose Studio-owned opaque identifiers and bounded
+  receipts, not raw Ref, OID, CAS, repository path, Actor, Policy, Grant,
+  permit, or Decision authority.
+- The generic artifact mapping accepts regular files only. The application
+  boundary also rejects symlinks, hardlink aliases, and non-regular entries
+  before materializing a reviewed file tree.
+- Proposal attribution is fixed to caller-supplied with execution verification
+  false. Rust and TypeScript guards reject a forged verified-execution claim,
+  and byte or graph identity is not presented as authorship, truth, rights, or
+  semantic correctness.
+- A Proposal becomes locally reviewable only after real Synapse registration
+  succeeds. The Decision path requires that registered Proposal plus a valid
+  host approval, so an unregistered Proposal cannot be adopted.
+- Startup-wide capability negotiation, coordinated external-writer locking,
+  durable pending recovery, outcome-unknown reconciliation, and publication
+  claims remain deliberately outside this C1 baseline and are still planned.
 
 ## C2 evidence and limits
 
@@ -124,6 +163,9 @@ Completed progress: 65%
   The registered-root, no-follow, identity, rescan, digest, and private-state
   boundaries substantially narrow it but do not claim transactional filesystem
   snapshots.
+- The later C6 ChangeSet boundary also rejects AI operations that would create
+  Studio metadata or credential-pattern paths; this closes `FR-FILE-007`
+  without claiming archive import or the deferred C3 limits.
 
 ## C4 evidence and limits
 

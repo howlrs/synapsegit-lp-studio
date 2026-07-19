@@ -1,6 +1,6 @@
 # SynapseGit LP Studio 実装計画
 
-Status: active; C6 complete at 65%
+Status: active; C6 complete at 65%; development baseline integrated into `main`
 
 Last updated: 2026-07-19
 
@@ -11,6 +11,13 @@ Traceability: [requirements-traceability.md](requirements-traceability.md)
 > **読み方:** 本書は実装順序とexit criteriaを定義します。checkpointに書かれた
 > 機能は、当該checkpointがcompleteになるまで現在のcapabilityではありません。
 > 現在のevidenceは[実装ステータス](implementation-status.md)を参照してください。
+
+> **65% integration record:** 当初のdefaultは80%までdraft PRを維持する方針でしたが、
+> Creatorが2026-07-19にC0–C6開発baselineの先行mergeを明示承認しました。
+> [PR #1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)は
+> `main` の `c9a22b15369c25f1e83a39d2cf9834962bb0db5a` へ統合済みです。
+> この例外は80% gate、C7–C11、release、production readiness、または
+> distribution permissionを完了させません。
 
 ## 1. 目的
 
@@ -32,7 +39,7 @@ Creatorの確認結果を受けるまで残り20%へ進まない。
 6. SynapseGitの不足はworkaroundだけで閉じず、重複確認後に
    acceptance-bounded Issueとしてfeedbackする。
 7. Git commitはreview可能な小さなcheckpointにし、各checkpointをpushして
-   GitHub draft PRの進捗表を更新する。
+   現在のcheckpoint PRの進捗表を更新する。
 8. 分割可能な定型実装・test追加・fixture整備はサブエージェントへ委譲し、
    主agentがcontract、統合、security、final verificationを確認する。
    実行surfaceにmodel/effort selectorがない場合、下位model使用を過大主張しない。
@@ -132,12 +139,16 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 7. **Decision**
    - 80%前のcheckpoint pushは進捗公開であり、CreatorのHuman adoptionを
      自動的に意味しない。
+   - 80%前のbaseline mergeはCreatorの明示承認を必須とし、実施した場合は
+     exact PR、merge commit、post-merge check、未完了gateをstatusに同時記録する。
    - Creatorによるローカル確認結果は80% handoff後に明示的に記録する。
 
 ## 6. Git branch、commit、PR方針
 
-- default branchから `agent/lp-studio-m1` を作る。
-- 最初のpushでdraft PRを作り、M1の全checkpointを原則同じPRで可視化する。
+- C0–C6は `agent/lp-studio-m1` とPR #1で実装し、Creator承認による
+  65% development baselineとして `main` へ統合した。
+- C7以降はこの `main` baselineから新しいcheckpoint branchを作り、
+  draft PRで進捗を可視化する。
 - commit messageは `docs:`、`chore:`、`feat:`、`test:`、
   `fix:` 等の短いscopeを使う。
 - C1以降、利用可能ならcommit bodyへ
@@ -146,8 +157,10 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
   internal Synapse authorityをcommit/PRへ含めない。
 - checkpointごとにpushする。test未完、Accepted corruption、
   security boundary破損を既知のまま「完了」としてpushしない。
-- force push、tag、merge、releaseはこの計画では行わない。
-- PRは80% local確認が完了するまでdraftを維持する。
+- force push、tag、releaseはこの計画では行わない。mergeはCreatorの
+  exact targetに対する明示承認がある場合に限る。
+- PRは80% local確認が完了するまでdraft維持をdefaultとする。
+  PR #1の65% mergeは上記の明示承認による記録済みの例外である。
 
 ## 7. SynapseGitの開発中利用
 

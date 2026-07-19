@@ -208,8 +208,9 @@ available. Automated GitHub upload is a separate operation and must not be
 inferred from generating GitHub-ready files.
 
 This product-publication rule is distinct from the development repository
-checkpoint commits and pushes explicitly authorized for implementation
-progress in [implementation-plan.md](implementation-plan.md).
+checkpoint commits, pushes, and explicitly approved development-baseline
+merges authorized for implementation progress in
+[implementation-plan.md](implementation-plan.md).
 
 ## 5. System boundary
 
