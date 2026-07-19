@@ -4,9 +4,9 @@ Status date: 2026-07-19
 
 Baseline branch: `main`
 
-Integration PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
+Baseline integration PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pull/1)
 
-C0–C6 integration commit: `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`
+C0–C6 baseline integration commit: `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`
 
 Completed progress: 65%
 
@@ -68,6 +68,9 @@ Completed progress: 65%
   tests, 63 Rust library tests, 10 launcher tests, and 3 Chromium flows passed.
   The separately acknowledged, externally billed OpenAI live test remained
   intentionally ignored.
+- This baseline-completion audit passed the same complete gate set with 213 Web
+  tests, 66 Rust library tests, 10 launcher tests, and 3 Chromium flows. The
+  externally billed OpenAI live test remains intentionally ignored.
 - The 65% merge is an explicit exception to the default pre-80% draft-PR
   policy. It establishes a development baseline only: C7–C11 and the 80% local
   verification gate remain incomplete. No tag, release, product publication,
@@ -112,6 +115,11 @@ Completed progress: 65%
 - Human adoption requires a hashed, expiring, intent-bound, atomically consumed
   host approval. Accepted bytes change only after the real Synapse Decision
   receipt succeeds and are then fetched again by GET.
+- UI errors distinguish failure before Decision from a lost Decision response
+  and from failure to refresh Accepted after a committed response. Once a
+  Decision may have run, the UI reports the outcome as unknown, warns against
+  blind retry, and requires reload plus Accepted-revision reconciliation
+  instead of claiming that Accepted remained unchanged.
 - Repeated export produces byte-identical ZIPs with lexical entries, fixed
   timestamp/mode, and no prompt, token, bridge, Studio, or attribution metadata.
 - Runtime state collections are capped and return stable 429 responses. A
@@ -189,6 +197,10 @@ Completed progress: 65%
   scripts run, clears `window.name`, and reports only bounded diagnostic codes
   for missing resources, CSP violations, site errors, and unhandled
   rejections. It never invents a source location when one is unavailable.
+- A safe same-project directory route such as `docs/` resolves to the existing
+  `docs/index.html` file. The server injects that canonical file path into the
+  response-only Target runtime, so nested navigation, capture, restart, and
+  later resolution do not disagree about Target authority.
 - Chromium isolation tests exercise localStorage, IndexedDB, Cache Storage,
   BroadcastChannel, cookies, `window.name`, service-worker registration,
   Editor API access, popup/top/external navigation, document replacement,
@@ -225,6 +237,24 @@ Completed progress: 65%
   sorted and bounded on load, and rehydrated across restart. A Proposed Target
   resolves only while that exact Proposal remains pending on the current
   Accepted base.
+- Target `pagePath` policy is aligned across TypeScript, JSON Schema, the
+  Preview runtime, and Rust: a safe relative HTML file path at most 512 UTF-8
+  bytes, with ASCII case-insensitive `.htm` or `.html`. TypeScript and Rust
+  runtime guards additionally enforce NFC because JSON Schema has no Unicode
+  normalization assertion. Root aliases, directory aliases, queries,
+  traversal, managed-storage-invalid names, and non-HTML paths fail closed at
+  Target admission. A `#` remains valid inside a canonical managed filename;
+  browser URL fragments never enter the server-injected `pagePath`.
+- When the 32-record persistence bound is reached, the server deterministically
+  recycles only Target metadata that no reviewed context references, verifies
+  its exact persisted bytes before deletion, and syncs the directory. A
+  referenced Target is never removed merely to admit a new capture.
+- Recycling relies on the process-held private state root and its writer lease;
+  it is not claimed as an atomic defense against a hostile same-user process
+  that ignores that boundary and swaps internal directory entries. That fault
+  model, plus crash-atomic replacement across remove/persist I/O, remains part
+  of C9 hardening. Shape and metadata-size validation complete before any
+  existing unreferenced Target is removed.
 - Resolver v1 returns resolved, ambiguous, or detached candidates and a
   deterministic receipt. Context creation recomputes source/revision evidence
   and rejects stale receipts, ambiguity, detachment, or a terminal Proposal.
@@ -247,6 +277,10 @@ Completed progress: 65%
   history UI, candidate overlays, a general weighted HTML resolver corpus, and
   cross-browser visual accuracy remain deferred to later M1 acceptance and
   hardening. The current resolver fails closed instead of guessing.
+- A dormant C2 `synapsegit-lp.selection` producer and private v1 contract remain
+  alongside the C5 `target-draft` runtime. Production Web code has no consumer,
+  the message carries no authority, and current capture does not depend on it;
+  remove the legacy hook and contract together before any external v1 freeze.
 
 ## C6 evidence and limits
 

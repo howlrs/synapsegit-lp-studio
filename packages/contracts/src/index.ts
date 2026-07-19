@@ -24,7 +24,8 @@ export const AI_CONTRACT_LIMITS = {
 
 export const TARGET_CONTRACT_LIMITS = {
   idLength: 128,
-  pagePathLength: 1024,
+  pagePathBytes: 512,
+  pagePathDepth: 16,
   labelLength: 256,
   textQuoteLength: 1024,
   textContextLength: 256,
@@ -859,10 +860,13 @@ const isSafeRelativePath = (value: unknown): value is string => {
     (segment) => segment.length > 0 && segment !== "." && segment !== "..",
   );
 };
-const isContractRelativePath = (value: unknown): value is string =>
+const isContractRelativePath = (
+  value: unknown,
+  maximumBytes = 512,
+): value is string =>
   isSafeRelativePath(value) &&
   value.normalize("NFC") === value &&
-  new TextEncoder().encode(value).byteLength <= 512;
+  new TextEncoder().encode(value).byteLength <= maximumBytes;
 const containsAbsolutePath = (value: string): boolean =>
   /(?:^|[\s("'=])\/(?!\/)/.test(value) ||
   /[A-Za-z]:[\\/]/.test(value) ||
@@ -962,23 +966,24 @@ const isBoundedExactArray = <T>(
   isExactArrayOf(value, guard);
 
 const isTargetPagePath = (value: unknown): value is string => {
-  if (
-    !isBoundedString(value, 1, TARGET_CONTRACT_LIMITS.pagePathLength) ||
-    value.includes("?") ||
-    value.includes("#") ||
-    value.includes("\\")
-  ) {
+  if (!isContractRelativePath(value, TARGET_CONTRACT_LIMITS.pagePathBytes)) {
     return false;
   }
-  if (value === "/") return true;
-  if (value.startsWith("/") || value.endsWith("/") || value.includes("//")) {
-    return false;
-  }
-  return value
-    .split("/")
-    .every(
-      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
-    );
+  const segments = value.split("/");
+  const fileName = segments.at(-1) ?? "";
+  const extensionSeparator = fileName.lastIndexOf(".");
+  return (
+    segments.length <= TARGET_CONTRACT_LIMITS.pagePathDepth &&
+    segments.every(
+      (segment) =>
+        !segment.endsWith(" ") &&
+        !segment.endsWith(".") &&
+        !/[<>:"|?*\u0000-\u001F\u007F-\u009F]/u.test(segment) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment),
+    ) &&
+    extensionSeparator > 0 &&
+    /\.[Hh][Tt][Mm][Ll]?$/.test(fileName)
+  );
 };
 
 const isTargetRectV1 = (

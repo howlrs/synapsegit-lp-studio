@@ -786,7 +786,7 @@ Creator Pilot専用であり、別originのLP Studio browserから直接利用�
 
 ### 13.2 Required dependency: generic LP contract
 
-**DEP-SG-001 / M1 blocker:** 次のいずれかを実装・review・version化する。
+- **DEP-SG-001 / M1 blocker:** 次のいずれかを実装・review・version化する。
 
 1. SynapseGit側にgeneric-file Proposal/Human Decision use-case contractを追加する。
 2. LP Studio側のtrusted Rust sidecarがexact pinned SynapseGit cratesをembedし、

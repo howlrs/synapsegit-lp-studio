@@ -18,7 +18,7 @@ pub(super) const MAX_DEPTH: usize = 16;
 const STORAGE_SCHEMA: &str = "1";
 const STORAGE_DIRECTORY: &str = "managed-v1";
 const MAX_PERSISTED_TARGETS: usize = 32;
-const MAX_TARGET_METADATA_BYTES: usize = 64 * 1024;
+pub(super) const MAX_TARGET_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(super) enum StorageError {
@@ -439,6 +439,32 @@ impl ManagedStorage {
             &targets_root.join(format!("{target_id}.json")),
             canonical_bytes,
         )
+    }
+
+    pub fn remove_target(
+        &self,
+        project_id: &str,
+        target_id: &str,
+        expected_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        validate_identifier(project_id, "prj_")?;
+        validate_identifier(target_id, "tgt_")?;
+        if expected_bytes.is_empty() || expected_bytes.len() > MAX_TARGET_METADATA_BYTES {
+            return Err(StorageError::Corrupt);
+        }
+        let targets_root = self.project_root(project_id).join("targets");
+        validate_real_directory(&targets_root)?;
+        let target_path = targets_root.join(format!("{target_id}.json"));
+        let persisted = read_regular_file_bounded(
+            &target_path,
+            MAX_TARGET_METADATA_BYTES,
+            StorageError::Corrupt,
+        )?;
+        if persisted != expected_bytes {
+            return Err(StorageError::Corrupt);
+        }
+        fs::remove_file(target_path)?;
+        sync_directory(&targets_root)
     }
 
     fn load_projects(&self) -> Result<Vec<PersistedProject>, StorageError> {
@@ -1024,7 +1050,7 @@ fn canonical_relative_path(path: &Path) -> Result<String, StorageError> {
     Ok(canonical)
 }
 
-fn validate_canonical_path(path: &str) -> Result<(), StorageError> {
+pub(super) fn validate_canonical_path(path: &str) -> Result<(), StorageError> {
     if path.is_empty()
         || path.len() > MAX_PATH_BYTES
         || path.contains('\0')
@@ -1657,7 +1683,7 @@ mod tests {
             Err(StorageError::Corrupt)
         ));
 
-        let (_, projects) = ManagedStorage::open(root.path()).unwrap();
+        let (reopened, projects) = ManagedStorage::open(root.path()).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(
             projects[0].targets,
@@ -1665,6 +1691,18 @@ mod tests {
                 (first_target.to_owned(), first.to_vec()),
                 (later_target.to_owned(), later.to_vec())
             ]
+        );
+        assert!(matches!(
+            reopened.remove_target(PROJECT_ID, first_target, b"different"),
+            Err(StorageError::Corrupt)
+        ));
+        reopened
+            .remove_target(PROJECT_ID, first_target, first)
+            .unwrap();
+        let (_, projects) = ManagedStorage::open(root.path()).unwrap();
+        assert_eq!(
+            projects[0].targets,
+            vec![(later_target.to_owned(), later.to_vec())]
         );
     }
 
