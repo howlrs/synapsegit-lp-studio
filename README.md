@@ -9,6 +9,7 @@ SynapseGitを活用し、AIと対話しながらランディングページを�
 - プレビュー上のDOM要素や空白領域を指定してAIへ修正を依頼できる
 - AIの変更案とHuman DecisionをSynapseGitへ記録できる
 - 完成したLPを単独で動作するHTML、CSS、JavaScript、画像等の静的ファイルとして出力できる
+- 人が確認したprovenance情報をGitHubへ記録し、SynapseGitの実活用事例として検証・共有できる
 
 ## Repository boundary
 
@@ -37,3 +38,9 @@ development change.
 ## Status
 
 Initial project setup. Not production-ready.
+
+Current product and architecture requirements are documented in
+[`docs/current-specification.md`](docs/current-specification.md). The
+implementation-ready baseline and weighted delivery plan are in
+[`docs/detailed-requirements.md`](docs/detailed-requirements.md) and
+[`docs/implementation-plan.md`](docs/implementation-plan.md).
