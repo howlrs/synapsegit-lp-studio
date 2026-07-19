@@ -1,39 +1,243 @@
 # SynapseGit LP Studio
 
-SynapseGitを活用し、AIと対話しながらランディングページを制作する、
-ローカルファーストのWebアプリケーションです。
+SynapseGit LP Studioは、AIへLP（ランディングページ）の変更を依頼し、
+結果を人が確認してから採用する、ローカルファーストのWebアプリです。
 
-## Product goals
+> **現在地:** M1実装の65%（C6完了）です。ローカル評価用であり、
+> production-readyな製品、配布物、またはリリース版ではありません。
+> 現在の実装事実は
+> [実装ステータス](docs/implementation-status.md)を正本として確認してください。
 
-- ブランクページまたは既存LPから制作を開始できる
-- プレビュー上のDOM要素や空白領域を指定してAIへ修正を依頼できる
-- AIの変更案とHuman DecisionをSynapseGitへ記録できる
-- 完成したLPを単独で動作するHTML、CSS、JavaScript、画像等の静的ファイルとして出力できる
+## まず知ってほしい3つの言葉
 
-## Repository boundary
+| 言葉 | 意味 |
+| --- | --- |
+| **Accepted** | 現在、人が採用済みのLPです。Previewとexportの基準になります。 |
+| **Proposal** | AIが作った変更案です。Acceptedを自動では変更しません。 |
+| **Human Decision** | Proposalを人が確認し、採用などを決める操作です。 |
 
-このリポジトリはLP制作アプリケーションを管理します。SynapseGit Coreは
-別リポジトリの [`howlrs/synapsegit`](https://github.com/howlrs/synapsegit)
-で管理し、バージョン化されたAPIまたはCLI adapterを介して連携します。
+基本ルールは単純です。
 
-制作中の会話、注釈、revision、provenance metadataは静的LPの出力物へ混入させません。
+~~~text
+Acceptedを選ぶ
+  → AIへ要望を出す
+  → Proposalを比較する
+  → 人が採用する
+  → 新しいAcceptedになる
+  → AcceptedだけをZIPへexportする
+~~~
 
-## Initial architecture
+SynapseGitはProposalとHuman Decisionの来歴を扱います。ただし、現在の表示は
+`caller-supplied`かつ`execution未検証`です。SynapseGitがAIを実行または
+検証した、という意味ではありません。
 
-```text
+## 5分でローカル起動する
+
+### 必要なもの
+
+- Node.js `24.14.1`
+- pnpm `10.33.0`
+- Rust `1.95.0`（`rustfmt`と`clippy`を含む）
+- ChromeまたはChromium
+
+バージョンは
+[`.node-version`](.node-version)、
+[`package.json`](package.json)、
+[`rust-toolchain.toml`](rust-toolchain.toml)に固定されています。
+
+### 起動
+
+~~~bash
+pnpm install --frozen-lockfile
+pnpm build
+LP_STUDIO_STATE_ROOT=.studio-data pnpm dev:server
+~~~
+
+1. terminalに`LP_STUDIO_READY`が表示されるまで待ちます。
+2. `editorOrigin`のURLをChromeまたはChromiumで開きます。
+3. `previewOrigin`はPreview専用です。直接開く必要はありません。
+
+`.studio-data`を指定すると、Accepted projectはserver再起動後も残ります。
+`LP_STUDIO_STATE_ROOT`を省略するとprivateな一時directoryを使い、server終了時に
+削除します。
+
+## 最短の動作確認
+
+外部AIを使わない確認手順です。
+
+1. 「空のLPを作成」を押します。
+2. Previewの「まだ、白紙です。」という見出しを選びます。
+3. 「AIへの要望」へ、たとえば
+   `公開向けの明確な見出しにしてください`と入力します。
+4. providerが`fake`であることを確認します。
+5. 「送信内容を確認」を押し、実際に渡すcontextを確認します。
+6. 「変更案を作成」を押します。
+7. Accepted / Proposed、diff、Validationを確認します。
+8. 問題がなければ「変更を採用」を押します。
+9. 「Acceptedをエクスポート」を押します。
+
+fake providerは動作確認専用です。要望文を解釈せず、対応するblank templateの
+見出し・説明文・CTAを固定文へ置換します。自由なLP生成や品質評価には使えません。
+
+より詳しい画面説明とトラブル対応は
+[利用ガイド](docs/user-guide.md)を参照してください。
+
+## 現在できること
+
+| 項目 | 現在の状態 |
+| --- | --- |
+| blank project | 作成、保存、再オープンができます。 |
+| 既存LP | 起動時に登録したbuild済みstatic directoryを確認後にcopy importできます。 |
+| Preview | Editorとは別のscoped originで実行します。現在のbrowser evidenceはChromiumのみです。 |
+| Target | page / block / element / text / point / regionの6種類を選べます。 |
+| AI context | Target、Accepted revision、provider、対象fileを含むexact contextを送信前に確認できます。 |
+| provider | deterministic fakeを常に利用できます。serverにkeyを設定した場合だけOpenAIを選べます。 |
+| ChangeSet | create / replace / rename / deleteを厳格に検証し、isolated Proposalへ適用します。 |
+| review | Accepted / Proposed、変更file、text diff、Validationを確認できます。 |
+| Human Decision | 現在のUIは「変更をそのまま採用」のみ提供します。 |
+| export | Acceptedだけを決定的なZIPとして出力します。promptやStudio metadataは含みません。 |
+
+## まだできないこと
+
+次の項目は型、要件、またはserver contractに存在しても、現在のUIで完成しているとは
+限りません。
+
+- 同じserver processで1 projectへ複数のProposalを順番に作ること
+- pending ProposalとDecisionをrestart後に完全復旧すること
+- UIからProposalをrejectまたはdeferすること
+- projectのrename、delete、history操作
+- conversationの保存、分岐、streaming、cancel
+- 複数Target、screenshot付きcontext、部分採用、Proposalの直接編集
+- archive upload、GitHub publication UI、配布用packaging
+- Chromium以外を含むrelease support matrix
+
+bootstrap contractの`singleProposalPerProject: true`は現在の制約です。
+Accepted project自体は明示的なstate rootへ保存できますが、反復reviewと
+restart reconciliationはC7の作業です。
+
+要件文書に書かれた機能を「実装済み」と推測しないでください。
+[要件traceability](docs/requirements-traceability.md)と
+[実装ステータス](docs/implementation-status.md)を確認してください。
+
+## OpenAI providerを有効にする
+
+OpenAIは任意です。keyをlocal server processだけへ渡します。
+
+~~~bash
+OPENAI_API_KEY=... \
+LP_STUDIO_OPENAI_MODEL=gpt-5.4-mini \
+LP_STUDIO_STATE_ROOT=.studio-data \
+pnpm dev:server
+~~~
+
+`LP_STUDIO_OPENAI_MODEL`は省略でき、現在のdefaultは
+`gpt-5.4-mini`です。
+
+OpenAIを選ぶと、review dialogに表示されたredacted contextが外部providerへ
+送信され、provider契約に応じた料金が発生する場合があります。keyはbrowser、
+project、exportへ返しません。requestはtoolsを持たず、validated ChangeSetと
+provider attributionだけをProposalへ保持します。
+
+included site fileにredactionがある場合、full-file ChangeSet v1では元のsecretを
+安全に戻せません。この場合はcontextの確認まではできますが、providerを呼ぶ前に
+generationを停止します。
+
+外部networkと課金を明示的に受け入れるmanual testだけを実行する場合は、次を使います。
+通常のCIでは実行しません。
+
+~~~bash
+LP_STUDIO_LIVE_PROVIDER_TEST=1 \
+OPENAI_API_KEY=... \
+cargo test -p synapsegit-lp-local-server \
+  openai_live_adapter_returns_an_app_valid_changeset -- --ignored
+~~~
+
+## 既存のstatic LPを取り込む
+
+serverが読むdirectoryを起動時に登録します。state rootとimport rootには別の
+実directoryを指定してください。
+
+~~~bash
+LP_STUDIO_STATE_ROOT=.studio-data \
+LP_STUDIO_IMPORT_ROOT=/absolute/path/to/built-lp \
+pnpm dev:server
+~~~
+
+UIでincluded / excluded file、byte数、warning、entry pointを確認してから
+copy importします。元directoryは変更しません。browserから任意のfilesystem
+pathを送るAPIは提供しません。
+
+対象は`index.html`を持つbuild済みstatic siteです。frameworkのsource project、
+package install、database、またはruntime serverを必要とするsiteは対象外です。
+
+## 安全性の要点
+
+- Editor/APIとuntrusted Previewは別originです。
+- filesystem、AI credential、export、SynapseGit authorityはRust local serverが所有します。
+- AI outputはProposalであり、人の採用前にAcceptedを変更しません。
+- path、size、hash precondition、local reference、active behaviorを検査します。
+- 外部origin、form、script、iframe、downloadなどの新しいactive behaviorは採用をblockします。
+- exportにはAccepted site fileだけを含めます。
+- error時はfail closedし、未確認のbytesをAcceptedへ入れません。
+
+詳しい境界は
+[ADR一覧](docs/adr/README.md)と
+[C6 evidence](docs/implementation-status.md#c6-evidence-and-limits)にあります。
+
+## 開発用command
+
+| Command | 内容 |
+| --- | --- |
+| `pnpm build` | Web production bundleとRust workspaceをbuild |
+| `pnpm check` | lock、TypeScript/Vitest、rustfmt、Clippy、docsを検査 |
+| `pnpm test` | WebとRustのtestを実行 |
+| `pnpm test:e2e` | production buildをChromiumでE2E検証 |
+| `pnpm format:check` | Prettierとrustfmtを検査 |
+| `pnpm check:docs` | Markdown、link、要件ID、traceabilityを検査 |
+
+通常の変更後は少なくとも`pnpm check`と関連testを実行してください。
+
+## Repository map
+
+~~~text
 apps/
-  web/                  LP editor and preview UI
-  local-server/         local AI and filesystem boundary
+  web/                  React editor and review UI
+  local-server/         Rust loopback API, storage, provider, SynapseGit boundary
 packages/
-  editor-protocol/      selected-target and annotation types
-  site-model/           editable LP project model
-  exporter/             static-site export pipeline
-  synapsegit-adapter/   SynapseGit integration boundary
-```
+  contracts/            strict TypeScript and JSON Schema contracts
+templates/
+  blank/                exportable blank LP
+tests/
+  e2e/                  real Chromium flows
+docs/
+  user-guide.md         first-time user instructions
+  ai-agent-guide.md     deterministic instructions for AI agents
+  implementation-status.md
+~~~
 
-Implementation scaffolding and technology selection will be added in the first
-development change.
+SynapseGit integrationは別repository
+[`howlrs/synapsegit`](https://github.com/howlrs/synapsegit)のsource contractを
+使用します。exact commitとcontract hashは
+[`docs/synapsegit-contract.lock.json`](docs/synapsegit-contract.lock.json)に
+固定されています。
 
-## Status
+## Documentation
 
-Initial project setup. Not production-ready.
+読者ごとの入口は[docs/README.md](docs/README.md)にあります。
+
+- 初めて使う人: [利用ガイド](docs/user-guide.md)
+- 現在の完成範囲を知りたい人: [実装ステータス](docs/implementation-status.md)
+- 開発に参加する人: [詳細要件](docs/detailed-requirements.md)と
+  [実装計画](docs/implementation-plan.md)
+- AI agent: [AI agent guide](docs/ai-agent-guide.md)
+- 設計理由を確認する人: [ADR一覧](docs/adr/README.md)
+
+## Repository、license、publicationの境界
+
+このrepositoryはSynapseGitの実利用検証と進捗共有のためPublicです。
+Public visibilityはLP StudioまたはSynapseGitのproduction利用、再配布、
+brand利用の許諾を意味しません。licenseとbrand条件はrelease前に確定します。
+
+制作中のprompt、annotation、revision metadata、credential、provider raw response、
+SynapseGit internal dataはstatic LP exportへ混入させません。GitHubへのpublicationは
+local exportとは別の、明示的なHuman actionです。
