@@ -891,10 +891,12 @@ errorの不明瞭さが見つかった場合、LP Studio内だけの恒久workar
    generic static-site file Proposal/Human Decision contract
 2. [SynapseGit #23](https://github.com/howlrs/synapsegit/issues/23):
    process restartをまたぐdurable pending reviewとoutcome query
-3. [SynapseGit #17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363):
+3. [SynapseGit #24](https://github.com/howlrs/synapsegit/issues/24):
+   host-authenticated one-shot Human approval boundary
+4. [SynapseGit #17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363):
    LP-specific provider-neutral publication projection
-4. Target v1/SpatialRegionを安全にbindingするextension profile
-5. non-cooperative CLIを含むshared writer fencing/outcome detection
+5. Target v1/SpatialRegionを安全にbindingするextension profile
+6. non-cooperative CLIを含むshared writer fencing/outcome detection
 
 実際の起票時はremoteの重複Issueと最新実装を再確認し、必要なら分割する。
 

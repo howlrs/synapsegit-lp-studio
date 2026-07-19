@@ -37,12 +37,15 @@ packages/
   synapsegit-adapter/   SynapseGit integration boundary
 ```
 
-Implementation scaffolding and technology selection will be added in the first
-development change.
+Implementation scaffolding begins at C2. The SynapseGit application boundary is
+already pinned by full commit and contract hashes in
+[`docs/synapsegit-contract.lock.json`](docs/synapsegit-contract.lock.json).
 
 ## Status
 
-Initial project setup. Not production-ready.
+Requirements and upstream contract checkpoint complete: 20%. Not
+production-ready. SynapseGit draft PR #25 is source-level evaluation work, not
+a released dependency or permission for production/distribution.
 
 Current product and architecture requirements are documented in
 [`docs/current-specification.md`](docs/current-specification.md). The

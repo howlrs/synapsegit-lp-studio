@@ -1,0 +1,53 @@
+{
+  "lock_version": 1,
+  "repository": "https://github.com/howlrs/synapsegit",
+  "revision": "7ddb58b2ad585db3823431135ae33222d4704f9f",
+  "draft_pull_request": "https://github.com/howlrs/synapsegit/pull/25",
+  "contract": {
+    "name": "synapsegit.generic-artifact",
+    "version": 1,
+    "root": "spec/application/generic-artifact/v1",
+    "source_attributions": [
+      "caller_supplied_ai_attributed"
+    ],
+    "execution_verified": false,
+    "dispositions": [
+      "adopted_unchanged",
+      "rejected",
+      "deferred"
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "spec/application/generic-artifact/v1/capabilities.json",
+      "sha256": "8049a891049acfe61799a871aa1f0d8eee4a7f38ac4606bac6405dc782a6cf4b"
+    },
+    {
+      "path": "spec/application/generic-artifact/v1/capabilities.schema.json",
+      "sha256": "753020616812e6da39da76807952391fa1594ade9c144393a9f1cd48d5100a0c"
+    },
+    {
+      "path": "spec/application/generic-artifact/v1/proposal-receipt.schema.json",
+      "sha256": "4c773243b0007f4c1af0901993309ad7e4291799856d4100da241adeb3cea5a9"
+    },
+    {
+      "path": "spec/application/generic-artifact/v1/review-status.schema.json",
+      "sha256": "932b332983114cc41a053c8b4d1b4567af9791ad6d02ed0f05446b3221dd8566"
+    },
+    {
+      "path": "spec/application/generic-artifact/v1/public-error.schema.json",
+      "sha256": "a424d6b3e16e725378f285d15e1ba5b5b02132cfa6c8ad6f54b1cc4d66270f33"
+    },
+    {
+      "path": "spec/application/generic-artifact/v1/digest-vectors.json",
+      "sha256": "6546c868f432b0b73905b677b8b4866d796a9eff02dfd79f9a1d9cae096e5394"
+    }
+  ],
+  "claim_boundaries": {
+    "host_authenticated_human_approval_required": true,
+    "workflow_journal_integration": false,
+    "restart_resumable_orchestrator": false,
+    "cryptographic_durable_admission_evidence": false,
+    "tagged_release_or_distribution_permission": false
+  }
+}

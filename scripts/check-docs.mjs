@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -83,6 +84,15 @@ if (traceabilityRows !== requirementIds.length) {
 const nonFiles = markdownFiles.filter((path) => !statSync(path).isFile());
 if (nonFiles.length > 0) {
   errors.push("non-file documentation paths: " + nonFiles.join(", "));
+}
+
+const contractCheck = spawnSync(
+  process.execPath,
+  [resolve(root, "scripts/check-synapsegit-contract.mjs")],
+  { encoding: "utf8" },
+);
+if (contractCheck.status !== 0) {
+  errors.push(contractCheck.stderr.trim() || contractCheck.stdout.trim());
 }
 
 if (errors.length > 0) {

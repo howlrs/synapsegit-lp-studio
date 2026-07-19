@@ -288,12 +288,16 @@ replacement for SynapseGit archive export, and the current SynapseGit
 itself.
 
 The existing SynapseGit localhost Creator Pilot is image-oriented and does not
-invoke an AI model. A generic LP file-proposal contract is therefore an
-integration gap, not functionality that LP Studio may assume already exists.
-An M0 development slice may persist its local proposal model and use a visibly
-local-only adapter while the cross-repository contract is designed. M1 requires
-a versioned real generic-file integration and must not present a stub as
-SynapseGit admission or verification.
+invoke an AI model. The generic artifact v1 source contract is pinned by full
+revision and artifact hashes in
+[`synapsegit-contract.lock.json`](synapsegit-contract.lock.json); it is
+unreleased draft-PR functionality rather than a v0.3.0 feature. V1 accepts only
+caller-supplied AI attribution and always marks execution unverified. Checked
+re-registration and the separate journal are not an integrated restart
+orchestrator. The Decision helper is trusted-process authority, not browser-user
+authentication, so the local server must require a host-authenticated one-shot
+approval before invoking it. M1 must not present a stub, journal row, or public
+review ID as SynapseGit admission, verified execution, or Human authority.
 
 ## 9. Security and privacy requirements
 
@@ -371,7 +375,8 @@ respective slices begin:
 - exact preview sandbox/CSP compatibility profile within the separate-origin
   security boundary;
 - storage format and retention limits for conversations and proposal workspaces;
-- exact SynapseGit generic-file proposal API or CLI contract;
+- exact composition of the pinned SynapseGit primitives with LP Accepted-state
+  reconciliation and host-authenticated one-shot approval;
 - exact GitHub repository, directory layout, and publication automation for
   creator-approved adoption records;
 - repository license and contribution policy;

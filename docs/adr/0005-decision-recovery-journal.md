@@ -38,3 +38,9 @@ Decision Ref conflict, or second disposition fails closed.
   Accepted pointer change rather than attempting to roll back immutable history.
 - Browser requests contain only opaque IDs, disposition, expected revision,
   bounded rationale, and idempotency key.
+- SynapseGit commit `7ddb58b` supplies a checked re-registration primitive and
+  separate local review journal, but does not compose this LP saga. C7 must
+  bind them to LP Accepted state and reconcile live Core state after restart.
+- A `review_id` or journal row is never Human authority. The LP server must
+  reauthenticate the user and issue a project/review/intent-bound one-shot
+  approval before invoking a Decision.

@@ -1,6 +1,6 @@
 # SynapseGit LP Studio 実装計画
 
-Status: proposed execution plan
+Status: active; C1 complete at 20%
 
 Last updated: 2026-07-19
 
@@ -65,7 +65,7 @@ checkpointのweightで計算する。途中作業は完了percentageへ加算し
 | Checkpoint | Weight | 累計 | Scope / exit criteria |
 | --- | ---: | ---: | --- |
 | C0 Requirements and early ADR baseline | 5% | 5% | 詳細要件、計画、traceability、architecture/storage/license ADR、docs検証、draft PR |
-| C1 Upstream Synapse generic contract | 15% | 20% | blocker Issue、generic file-tree Proposal、one-disposition durable receipt/query、versioned contract |
+| C1 Upstream Synapse generic contract | 15% | 20% | blocker Issue、generic file-tree Proposal、checked recovery/journal primitive、one-disposition receipt/query、versioned contract lock |
 | C2 Real-boundary M0 vertical slice | 10% | 30% | blank、element Target、fake AI、review、adopt、exportをreal adapter boundaryでE2E |
 | C3 Project/revision/import | 8% | 38% | managed storage、manifest/hash、bounded copy import、drift検出 |
 | C4 Separate-origin preview | 8% | 46% | random Editor/Preview origin、session、bridge、Accepted/Proposed static serving |
@@ -158,6 +158,8 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
   [#23](https://github.com/howlrs/synapsegit/issues/23)、LP publicationを
   [#17 comment](https://github.com/howlrs/synapsegit/issues/17#issuecomment-5013850363)
   で追跡する。
+- browser Human approval boundaryを
+  [#24](https://github.com/howlrs/synapsegit/issues/24)で追跡する。
 - unsupported機能をverified/admittedと表示しない。
 
 ### Phase S1: C1
@@ -165,7 +167,8 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 - SynapseGit側へgeneric file-tree Proposal、durable one-disposition
   Decision receipt/query、version/capability contractを追加する。
 - upstream Issue、branch、commit、test、draft PRをLP Studioのtask/ADRへlinkする。
-- LP Studio側へcanonical contract fixtureとadapter parity testを追加する。
+- license上の再配布と混同しないようupstream contractをvendorせず、full Git
+  revisionとartifact hashをlockし、adjacent checkout parity testを追加する。
 - M1開発中はexact contract version + commitをpinする。
   tag/releaseは別の明示的release operationとする。
 
@@ -174,6 +177,8 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 - Target v1 digest、base/output manifest、AI attribution、
   validation summaryをcheckpointへbindingする。
 - adopt/reject/deferのSQLite command journalをreal Synapse receipt/queryへ接続する。
+- Human Decision前にhost authentication／project authorizationを行い、
+  project、review、intent、expiryへbindしたone-shot approvalを必須にする。
 - exact capability、caller-supplied/verified claim、failure/reconciliationをUIに表示する。
 - development checkpointはAI-attributed/trusted-operator evidenceとして記録し、
   CreatorがまだreviewしていないHuman Decisionを作らない。
