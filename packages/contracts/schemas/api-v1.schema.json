@@ -1,0 +1,527 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsegit-lp-studio.local/schemas/api-v1.schema.json",
+  "title": "SynapseGit LP Studio local API v1",
+  "description": "Canonical public DTO schema for the C2 local vertical slice.",
+  "oneOf": [
+    { "$ref": "#/$defs/bootstrapResponse" },
+    { "$ref": "#/$defs/createProjectRequest" },
+    { "$ref": "#/$defs/projectResponse" },
+    { "$ref": "#/$defs/createTargetRequest" },
+    { "$ref": "#/$defs/targetResponse" },
+    { "$ref": "#/$defs/createContextRequest" },
+    { "$ref": "#/$defs/contextResponse" },
+    { "$ref": "#/$defs/createProposalRequest" },
+    { "$ref": "#/$defs/proposalResponse" },
+    { "$ref": "#/$defs/approvalRequest" },
+    { "$ref": "#/$defs/approvalResponse" },
+    { "$ref": "#/$defs/decisionRequest" },
+    { "$ref": "#/$defs/decisionResponse" },
+    { "$ref": "#/$defs/createExportRequest" },
+    { "$ref": "#/$defs/exportResponse" },
+    { "$ref": "#/$defs/errorResponse" },
+    { "$ref": "#/$defs/previewSelectionMessage" },
+    { "$ref": "#/$defs/previewActionMessage" }
+  ],
+  "$defs": {
+    "version": { "const": "1" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "disposition": {
+      "enum": ["adopted_unchanged", "rejected", "deferred"]
+    },
+    "projectFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "byteLength"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "byteLength": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "revisionId",
+        "acceptedManifestSha256",
+        "status",
+        "previewUrl",
+        "files"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "displayName": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "acceptedManifestSha256": { "$ref": "#/$defs/sha256" },
+        "status": { "const": "ready" },
+        "previewUrl": { "$ref": "#/$defs/nonEmptyString" },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/projectFile" }
+        }
+      }
+    },
+    "bootstrapResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "apiVersion",
+        "session",
+        "editorOrigin",
+        "previewOrigin",
+        "capabilities"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "apiVersion": { "const": "v1" },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "expiresAt"],
+          "properties": {
+            "token": { "$ref": "#/$defs/nonEmptyString" },
+            "expiresAt": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        },
+        "editorOrigin": { "$ref": "#/$defs/nonEmptyString" },
+        "previewOrigin": { "$ref": "#/$defs/nonEmptyString" },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "targetKinds",
+            "dispositions",
+            "singleProposalPerProject"
+          ],
+          "properties": {
+            "targetKinds": {
+              "type": "array",
+              "prefixItems": [{ "const": "element" }],
+              "items": false,
+              "minItems": 1
+            },
+            "dispositions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/disposition" },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "singleProposalPerProject": { "const": true }
+          }
+        }
+      }
+    },
+    "createProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "template"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "template": { "const": "blank" }
+      }
+    },
+    "projectResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "project"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "project": { "$ref": "#/$defs/project" }
+      }
+    },
+    "createTargetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "revisionId", "kind", "elementId"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "const": "element" },
+        "elementId": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revisionId", "kind", "elementId", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "const": "element" },
+        "elementId": { "$ref": "#/$defs/nonEmptyString" },
+        "label": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "targetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "target"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "target": { "$ref": "#/$defs/target" }
+      }
+    },
+    "createContextRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "revisionId", "targetId", "instruction"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "targetId": { "$ref": "#/$defs/nonEmptyString" },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "x-maxUtf8Bytes": 2000
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revisionId",
+        "targetId",
+        "instruction",
+        "canonicalJson",
+        "sha256"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "targetId": { "$ref": "#/$defs/nonEmptyString" },
+        "instruction": { "type": "string" },
+        "canonicalJson": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "contextResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "context"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "context": { "$ref": "#/$defs/context" }
+      }
+    },
+    "createProposalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "contextId", "contextSha256"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "contextId": { "$ref": "#/$defs/nonEmptyString" },
+        "contextSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "validationCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "status", "message"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "enum": ["passed", "warning", "failed"] },
+        "message": { "type": "string" }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "reviewId",
+        "baseRevisionId",
+        "status",
+        "summary",
+        "artifactManifestSha256",
+        "reviewContextSha256",
+        "sourceAttribution",
+        "executionVerified",
+        "previewUrl",
+        "changes",
+        "unifiedDiff",
+        "validation"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "reviewId": { "$ref": "#/$defs/nonEmptyString" },
+        "baseRevisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "const": "pending_review" },
+        "summary": { "type": "string" },
+        "artifactManifestSha256": { "$ref": "#/$defs/sha256" },
+        "reviewContextSha256": { "$ref": "#/$defs/sha256" },
+        "sourceAttribution": { "const": "caller_supplied_ai_attributed" },
+        "executionVerified": { "const": false },
+        "previewUrl": { "$ref": "#/$defs/nonEmptyString" },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "kind"],
+            "properties": {
+              "path": { "$ref": "#/$defs/nonEmptyString" },
+              "kind": {
+                "enum": ["created", "modified", "renamed", "deleted"]
+              }
+            }
+          }
+        },
+        "unifiedDiff": { "type": "string" },
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "checks"],
+          "properties": {
+            "status": { "enum": ["passed", "warning", "failed"] },
+            "checks": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/validationCheck" }
+            }
+          }
+        }
+      }
+    },
+    "proposalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "proposal"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "proposal": { "$ref": "#/$defs/proposal" }
+      }
+    },
+    "approvalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "proposalId",
+        "expectedRevisionId",
+        "disposition",
+        "intentId"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "proposalId": { "$ref": "#/$defs/nonEmptyString" },
+        "expectedRevisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "intentId": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "approvalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "approval"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "expiresAt", "intentId"],
+          "properties": {
+            "token": { "$ref": "#/$defs/nonEmptyString" },
+            "expiresAt": { "$ref": "#/$defs/nonEmptyString" },
+            "intentId": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "decisionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "approvalToken",
+        "proposalId",
+        "expectedRevisionId",
+        "disposition",
+        "intentId"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "approvalToken": { "$ref": "#/$defs/nonEmptyString" },
+        "proposalId": { "$ref": "#/$defs/nonEmptyString" },
+        "expectedRevisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "intentId": { "$ref": "#/$defs/nonEmptyString" },
+        "rationale": {
+          "type": "string",
+          "maxLength": 2000,
+          "x-maxUtf8Bytes": 2000
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewId",
+        "proposalId",
+        "disposition",
+        "status",
+        "revisionId",
+        "artifactManifestSha256"
+      ],
+      "properties": {
+        "reviewId": { "$ref": "#/$defs/nonEmptyString" },
+        "proposalId": { "$ref": "#/$defs/nonEmptyString" },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "status": { "const": "committed" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "artifactManifestSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "decisionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "decision", "project"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "decision": { "$ref": "#/$defs/decision" },
+        "project": { "$ref": "#/$defs/project" }
+      }
+    },
+    "createExportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "revisionId"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "exportReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revisionId", "sha256", "byteLength", "downloadUrl"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "downloadUrl": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "exportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "export"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "export": { "$ref": "#/$defs/exportReceipt" }
+      }
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "error"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "requestId", "retryable"],
+          "properties": {
+            "code": { "$ref": "#/$defs/nonEmptyString" },
+            "message": { "$ref": "#/$defs/nonEmptyString" },
+            "requestId": { "$ref": "#/$defs/nonEmptyString" },
+            "retryable": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 }
+      }
+    },
+    "previewSelectionMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "schemaVersion",
+        "channelId",
+        "projectId",
+        "snapshotId",
+        "revisionId",
+        "elementId",
+        "rect"
+      ],
+      "properties": {
+        "type": { "const": "synapsegit-lp.selection" },
+        "schemaVersion": { "$ref": "#/$defs/version" },
+        "channelId": { "$ref": "#/$defs/nonEmptyString" },
+        "projectId": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+        "revisionId": { "$ref": "#/$defs/nonEmptyString" },
+        "elementId": { "$ref": "#/$defs/nonEmptyString" },
+        "rect": { "$ref": "#/$defs/rect" }
+      }
+    },
+    "previewActionMessage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schemaVersion",
+            "channelId",
+            "action",
+            "mode",
+            "projectId",
+            "snapshotId",
+            "revisionId"
+          ],
+          "properties": {
+            "type": { "const": "synapsegit-lp.action" },
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "channelId": { "$ref": "#/$defs/nonEmptyString" },
+            "action": { "const": "set_mode" },
+            "mode": { "enum": ["select", "interact"] },
+            "projectId": { "$ref": "#/$defs/nonEmptyString" },
+            "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+            "revisionId": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schemaVersion",
+            "channelId",
+            "action",
+            "projectId",
+            "snapshotId",
+            "revisionId"
+          ],
+          "properties": {
+            "type": { "const": "synapsegit-lp.action" },
+            "schemaVersion": { "$ref": "#/$defs/version" },
+            "channelId": { "$ref": "#/$defs/nonEmptyString" },
+            "action": { "const": "clear_selection" },
+            "projectId": { "$ref": "#/$defs/nonEmptyString" },
+            "snapshotId": { "$ref": "#/$defs/nonEmptyString" },
+            "revisionId": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -10,25 +10,29 @@ function checkpointFor(id) {
   if (id.startsWith("DEV-")) return "C0–C11";
   if (id.startsWith("DEP-LIC") || id.startsWith("DEP-PLAT")) return "C0 / M2";
   if (id.startsWith("DEP-SG") || id.startsWith("INT-SG")) return "C1";
-  if (id.startsWith("FR-PROJ") || id.startsWith("FR-FILE") || id.startsWith("DM-REV")) return "C3";
+  if (
+    id.startsWith("FR-PROJ") ||
+    id.startsWith("FR-FILE") ||
+    id.startsWith("DM-REV")
+  )
+    return "C3";
   if (id.includes("PREV")) return "C4";
   if (
     id.includes("TGT") ||
     id.includes("COORD") ||
     id.includes("BLOCK") ||
     id.includes("RESOLVE")
-  ) return "C5";
+  )
+    return "C5";
   if (
     id.includes("AI-") ||
     id.includes("CTX") ||
     id.includes("CONV") ||
     id.includes("CHG")
-  ) return "C6";
-  if (
-    id.includes("PROP") ||
-    id.includes("DEC") ||
-    id.startsWith("FR-REC")
-  ) return "C7";
+  )
+    return "C6";
+  if (id.includes("PROP") || id.includes("DEC") || id.startsWith("FR-REC"))
+    return "C7";
   if (id.includes("EXP") || id.includes("PUB")) return "C8";
   if (id.startsWith("SEC-") || id.includes("REL")) return "C9";
   if (
@@ -39,7 +43,8 @@ function checkpointFor(id) {
     id.includes("COMP") ||
     id.includes("I18N") ||
     id.includes("OBS")
-  ) return "C10";
+  )
+    return "C10";
   if (id.startsWith("RECOMMEND-")) return "M2";
   return "C2";
 }
@@ -54,7 +59,8 @@ function evidenceFor(id) {
   if (id.startsWith("DEP-")) return "ADR + capability/license evidence";
   if (id.startsWith("RECOMMEND-")) return "Backlog decision";
   if (id.startsWith("UX-")) return "Browser E2E + manual UX review";
-  if (id.startsWith("DM-") || id.startsWith("API-")) return "Schema/contract test";
+  if (id.startsWith("DM-") || id.startsWith("API-"))
+    return "Schema/contract test";
   return "Unit/integration/E2E as applicable";
 }
 
@@ -103,7 +109,9 @@ const duplicates = requirements
   .map(({ id }) => id)
   .filter((id, index, ids) => ids.indexOf(id) !== index);
 if (duplicates.length > 0) {
-  throw new Error("Duplicate requirement IDs: " + [...new Set(duplicates)].join(", "));
+  throw new Error(
+    "Duplicate requirement IDs: " + [...new Set(duplicates)].join(", "),
+  );
 }
 if (requirements.length === 0) {
   throw new Error("No requirements found");
@@ -125,10 +133,30 @@ const output = [
   "| Requirement | Priority | Checkpoint | Planned evidence | Source section | Summary | Status |",
   "| --- | --- | --- | --- | --- | --- | --- |",
   ...requirements.map(
-    ({ id, priority, checkpoint, evidence, section: sourceSection, line, summary }) =>
-      "| [" + id + "](detailed-requirements.md#L" + line + ") | " +
-      priority + " | " + checkpoint + " | " + evidence + " | " +
-      sourceSection.replace(/\|/g, "\\|") + " | " + summary + " | planned |",
+    ({
+      id,
+      priority,
+      checkpoint,
+      evidence,
+      section: sourceSection,
+      line,
+      summary,
+    }) =>
+      "| [" +
+      id +
+      "](detailed-requirements.md#L" +
+      line +
+      ") | " +
+      priority +
+      " | " +
+      checkpoint +
+      " | " +
+      evidence +
+      " | " +
+      sourceSection.replace(/\|/g, "\\|") +
+      " | " +
+      summary +
+      " | planned |",
   ),
   "",
 ].join("\n");
@@ -138,8 +166,12 @@ if (process.argv.includes("--check")) {
   if (current !== output) {
     throw new Error("requirements-traceability.md is stale; regenerate it");
   }
-  console.log("traceability is current for " + requirements.length + " requirements");
+  console.log(
+    "traceability is current for " + requirements.length + " requirements",
+  );
 } else {
   writeFileSync(outputPath, output, "utf8");
-  console.log("wrote " + requirements.length + " requirements to " + outputPath);
+  console.log(
+    "wrote " + requirements.length + " requirements to " + outputPath,
+  );
 }

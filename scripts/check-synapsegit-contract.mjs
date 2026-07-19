@@ -48,7 +48,8 @@ for (const artifact of lock.artifacts) {
   if (!/^[0-9a-f]{64}$/.test(artifact.sha256 ?? "")) {
     fail("artifact hash must be lowercase SHA-256: " + artifact.path);
   }
-  if (paths.has(artifact.path)) fail("duplicate artifact path: " + artifact.path);
+  if (paths.has(artifact.path))
+    fail("duplicate artifact path: " + artifact.path);
   paths.add(artifact.path);
 }
 for (const [key, expected] of Object.entries({
@@ -65,7 +66,9 @@ for (const [key, expected] of Object.entries({
 
 if (!existsSync(resolve(checkout, ".git"))) {
   if (requireCheckout) fail("adjacent checkout is required at " + checkout);
-  console.log("synapsegit_contract_lock_ok: checkout=absent revision=" + lock.revision);
+  console.log(
+    "synapsegit_contract_lock_ok: checkout=absent revision=" + lock.revision,
+  );
   process.exit(0);
 }
 
@@ -74,7 +77,8 @@ const commit = spawnSync(
   ["-C", checkout, "cat-file", "-e", lock.revision + "^{commit}"],
   { encoding: "utf8" },
 );
-if (commit.status !== 0) fail("pinned revision is missing from adjacent checkout");
+if (commit.status !== 0)
+  fail("pinned revision is missing from adjacent checkout");
 
 let capabilities;
 for (const artifact of lock.artifacts) {

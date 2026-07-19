@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+coverage/
+playwright-report/
+test-results/
+docs/
+README.md
+Cargo.lock
+pnpm-lock.yaml

@@ -13,7 +13,9 @@ function filesBelow(directory) {
 
 const markdownFiles = [
   resolve(root, "README.md"),
-  ...filesBelow(resolve(root, "docs")).filter((path) => extname(path) === ".md"),
+  ...filesBelow(resolve(root, "docs")).filter(
+    (path) => extname(path) === ".md",
+  ),
 ];
 const errors = [];
 const requirementIds = [];
@@ -39,14 +41,17 @@ for (const path of markdownFiles) {
       target.startsWith("https://") ||
       target.startsWith("#") ||
       target.startsWith("mailto:")
-    ) continue;
+    )
+      continue;
     const fileTarget = target.split("#", 1)[0];
     if (fileTarget && !existsSync(resolve(dirname(path), fileTarget))) {
       errors.push(path + " links to missing " + target);
     }
   }
 
-  for (const match of content.matchAll(/^- \*\*([A-Z][A-Z0-9-]+)(?:\s+\/|:)/gm)) {
+  for (const match of content.matchAll(
+    /^- \*\*([A-Z][A-Z0-9-]+)(?:\s+\/|:)/gm,
+  )) {
     requirementIds.push(match[1]);
   }
 }
@@ -55,7 +60,9 @@ const duplicateIds = requirementIds.filter(
   (id, index, ids) => ids.indexOf(id) !== index,
 );
 if (duplicateIds.length > 0) {
-  errors.push("duplicate requirement IDs: " + [...new Set(duplicateIds)].join(", "));
+  errors.push(
+    "duplicate requirement IDs: " + [...new Set(duplicateIds)].join(", "),
+  );
 }
 
 const plan = readFileSync(resolve(root, "docs/implementation-plan.md"), "utf8");
@@ -64,20 +71,23 @@ const weights = [...plan.matchAll(/^\| C\d+ [^|]+ \| (\d+)% \|/gm)].map(
 );
 const totalWeight = weights.reduce((total, weight) => total + weight, 0);
 if (totalWeight !== 100) {
-  errors.push("implementation checkpoint weights total " + totalWeight + "%, not 100%");
+  errors.push(
+    "implementation checkpoint weights total " + totalWeight + "%, not 100%",
+  );
 }
 
 const traceability = readFileSync(
   resolve(root, "docs/requirements-traceability.md"),
   "utf8",
 );
-const traceabilityRows = (
-  traceability.match(/^\| \[[A-Z][A-Z0-9-]+\]/gm) ?? []
-).length;
+const traceabilityRows = (traceability.match(/^\| \[[A-Z][A-Z0-9-]+\]/gm) ?? [])
+  .length;
 if (traceabilityRows !== requirementIds.length) {
   errors.push(
-    "traceability rows " + traceabilityRows +
-    " do not match requirement IDs " + requirementIds.length,
+    "traceability rows " +
+      traceabilityRows +
+      " do not match requirement IDs " +
+      requirementIds.length,
   );
 }
 
@@ -101,6 +111,9 @@ if (errors.length > 0) {
 }
 
 console.log(
-  "checked " + markdownFiles.length + " Markdown files, " +
-  requirementIds.length + " unique requirements, and 100% checkpoint weight",
+  "checked " +
+    markdownFiles.length +
+    " Markdown files, " +
+    requirementIds.length +
+    " unique requirements, and 100% checkpoint weight",
 );

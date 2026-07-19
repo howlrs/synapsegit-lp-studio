@@ -24,28 +24,48 @@ Public visibilityはLP StudioやSynapseGitのproduction利用・再配布許諾�
 
 制作中の会話、注釈、revision、provenance metadataは静的LPの出力物へ混入させません。
 
-## Initial architecture
+## Workspace
 
 ```text
 apps/
-  web/                  LP editor and preview UI
-  local-server/         local AI and filesystem boundary
+  web/                  React editor and review UI
+  local-server/         Rust loopback API, preview, SynapseGit boundary
 packages/
-  editor-protocol/      selected-target and annotation types
-  site-model/           editable LP project model
-  exporter/             static-site export pipeline
-  synapsegit-adapter/   SynapseGit integration boundary
+  contracts/            strict API and preview-bridge contracts
+templates/
+  blank/                exportable blank LP fixture
+tests/
+  e2e/                  real browser vertical slice
 ```
 
-Implementation scaffolding begins at C2. The SynapseGit application boundary is
-already pinned by full commit and contract hashes in
+The SynapseGit application boundary is pinned by full commit and contract hashes in
 [`docs/synapsegit-contract.lock.json`](docs/synapsegit-contract.lock.json).
+
+## Local development
+
+Prerequisites are pinned to Node.js 24.14.1, pnpm 10.33.0, and Rust 1.95.0.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+LP_STUDIO_STATE_ROOT=.studio-data pnpm dev:server
+```
+
+Open the `editorOrigin` printed in `LP_STUDIO_READY`. The server binds random
+IPv4 loopback ports for the Editor/API and the isolated Preview. Omitting
+`LP_STUDIO_STATE_ROOT` uses a private process-owned temporary directory and
+removes it at shutdown.
+
+The current C2 slice supports a blank project, element selection, exact context
+review, deterministic fake-AI Proposal, explicit adopt, and deterministic
+Accepted ZIP export. It deliberately exposes caller-supplied attribution and
+`execution未検証`; SynapseGit did not execute or verify the model.
 
 ## Status
 
-Requirements and upstream contract checkpoint complete: 20%. Not
-production-ready. SynapseGit draft PR #25 is source-level evaluation work, not
-a released dependency or permission for production/distribution.
+Real-boundary vertical slice complete: 30%. Not production-ready. SynapseGit
+draft PR #25 is source-level evaluation work, not a released dependency or
+permission for production/distribution.
 
 Current product and architecture requirements are documented in
 [`docs/current-specification.md`](docs/current-specification.md). The

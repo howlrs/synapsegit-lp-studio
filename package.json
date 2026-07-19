@@ -1,0 +1,29 @@
+{
+  "name": "synapsegit-lp-studio",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": "24.14.1",
+    "pnpm": "10.33.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm --filter @synapsegit-lp/web build && cargo build --workspace --locked",
+    "check": "pnpm check:locks && pnpm check:web && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings && node scripts/check-docs.mjs",
+    "check:docs": "node scripts/check-docs.mjs && node scripts/generate-requirements-traceability.mjs --check",
+    "check:locks": "node scripts/check-runtime-locks.mjs && node scripts/check-synapsegit-contract.mjs",
+    "check:web": "pnpm --filter @synapsegit-lp/web check",
+    "dev": "pnpm --filter @synapsegit-lp/web dev",
+    "dev:server": "cargo run -p synapsegit-lp-local-server --locked",
+    "test": "pnpm test:web && cargo test --workspace --locked",
+    "test:e2e": "playwright test",
+    "test:web": "pnpm --filter @synapsegit-lp/web test",
+    "format": "prettier --write . && cargo fmt --all",
+    "format:check": "prettier --check . && cargo fmt --all -- --check"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "ajv": "8.20.0",
+    "prettier": "3.9.5"
+  }
+}
