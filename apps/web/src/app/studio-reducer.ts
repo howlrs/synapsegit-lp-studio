@@ -33,6 +33,7 @@ export interface StudioState {
   viewportPreset: ViewportPreset;
   customWidth: number;
   operation: StudioOperation;
+  decisionReconciliationRequired: boolean;
   error: string | null;
   announcement: string;
   lastDecision: ArtifactDisposition | null;
@@ -51,6 +52,7 @@ export const initialStudioState: StudioState = {
   viewportPreset: "desktop",
   customWidth: 1080,
   operation: null,
+  decisionReconciliationRequired: false,
   error: null,
   announcement: "",
   lastDecision: null,
@@ -75,7 +77,11 @@ export type StudioAction =
   | { type: "SET_PREVIEW_MODE"; mode: PreviewMode }
   | { type: "SET_PREVIEW_SOURCE"; source: PreviewSource }
   | { type: "SET_VIEWPORT"; preset: ViewportPreset; customWidth?: number }
-  | { type: "FAILED"; message: string }
+  | {
+      type: "FAILED";
+      message: string;
+      requiresDecisionReconciliation?: true;
+    }
   | { type: "DISMISS_ERROR" };
 
 const clampWidth = (value: number): number =>
@@ -118,6 +124,7 @@ export const studioReducer = (
           : state.proposalInstruction,
         previewSource: "accepted",
         operation: null,
+        decisionReconciliationRequired: false,
         announcement: action.afterDecision
           ? `Human Decisionを記録し、Accepted revision ${action.project.revisionId} を再取得しました。`
           : `Accepted revision ${action.project.revisionId} を再取得しました。`,
@@ -201,6 +208,9 @@ export const studioReducer = (
       return {
         ...state,
         operation: null,
+        decisionReconciliationRequired:
+          state.decisionReconciliationRequired ||
+          action.requiresDecisionReconciliation === true,
         error: action.message,
         announcement: action.message,
       };

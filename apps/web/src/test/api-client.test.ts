@@ -187,6 +187,25 @@ describe("authenticated API client", () => {
     });
   });
 
+  it("does not make an Accepted outcome claim for an unstructured HTTP error", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/bootstrap") {
+        return jsonResponse(bootstrapFixture("http://editor.test"));
+      }
+      return jsonResponse({ unexpected: true }, 500);
+    });
+    const session = await bootstrapApi(
+      fetchMock as unknown as typeof fetch,
+      "http://editor.test",
+    );
+
+    await expect(session.api.getProject("project-001")).rejects.toMatchObject({
+      code: "http_error",
+      message: "リクエストに失敗しました（HTTP 500）。",
+      retryable: true,
+    });
+  });
+
   it("lists retained projects and confirms only the reviewed import digest", async () => {
     const fetchMock = vi.fn(
       async (
