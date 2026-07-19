@@ -17,6 +17,11 @@ SynapseGitを活用し、AIと対話しながらランディングページを�
 別リポジトリの [`howlrs/synapsegit`](https://github.com/howlrs/synapsegit)
 で管理し、バージョン化されたAPIまたはCLI adapterを介して連携します。
 
+この開発リポジトリは、SynapseGitの実利用検証と進捗共有のためPublicです。
+Public visibilityはLP StudioやSynapseGitのproduction利用・再配布許諾を
+意味しません。LP Studio自身のライセンスと、SynapseGitのlicense/brand条件は
+リリース前にそれぞれ確定します。
+
 制作中の会話、注釈、revision、provenance metadataは静的LPの出力物へ混入させません。
 
 ## Initial architecture

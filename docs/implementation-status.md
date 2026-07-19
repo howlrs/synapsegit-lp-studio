@@ -34,6 +34,8 @@ Completed progress: 5%
   created the reviewed upstream feedback.
 - C0 was committed and pushed as `e256075`; no implementation code, package
   dependency, tag, merge, or release exists yet.
+- The development repository is Public by explicit Creator direction. Public
+  visibility is not a product-publication action or a license grant.
 - Development checkpoint pushes are explicitly authorized; product publication
   remains a separate Human action.
 
