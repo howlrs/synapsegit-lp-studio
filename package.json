@@ -9,7 +9,8 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "pnpm --filter @synapsegit-lp/web build && cargo build --workspace --locked",
-    "check": "pnpm check:locks && pnpm check:web && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings && pnpm check:docs && pnpm check:evidence",
+    "check": "pnpm check:locks && pnpm check:docker && pnpm check:web && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings && pnpm check:docs && pnpm check:evidence",
+    "check:docker": "node scripts/check-docker-distribution.mjs",
     "check:docs": "node scripts/check-docs.mjs && node scripts/generate-requirements-traceability.mjs --check",
     "check:evidence": "node scripts/check-m1-evidence-templates.mjs && node scripts/validate-m1-traceability.mjs",
     "check:locks": "node scripts/check-runtime-locks.mjs && node scripts/check-synapsegit-contract.mjs",
@@ -22,6 +23,7 @@
     "format": "prettier --write . && cargo fmt --all",
     "format:check": "prettier --check . && cargo fmt --all -- --check",
     "measure:package-browser": "node scripts/run-m1-package-browser-smoke.mjs",
+    "measure:docker-browser": "node scripts/run-docker-browser-smoke.mjs",
     "measure:performance-geometry": "node scripts/run-m1-performance-geometry-corpus.mjs",
     "measure:production-integration-performance": "node scripts/run-m1-production-integration-performance.mjs",
     "verify:package": "node scripts/verify-local-evaluation-package.mjs"

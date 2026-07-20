@@ -49,6 +49,11 @@ const main = async () => {
       support.supportedClaims.length === 0,
     "a template must not contain a verified support claim",
   );
+  assert(
+    support.synapseGit?.releasedBaseline === "v0.4.0" &&
+      support.synapseGit?.verificationStatus === "pending",
+    "support template must name the current released baseline without claiming verification",
+  );
 
   const legal = support.licenseAndBrand;
   assert(

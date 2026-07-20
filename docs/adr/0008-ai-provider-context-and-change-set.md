@@ -46,7 +46,11 @@ model filesystem, shell, network-fetch, or Synapse authority.
   provider receipt fields. It does not receive the user instruction, complete
   Target, site snippets, credential, or raw provider output.
 - Expose the deterministic local fake adapter unconditionally. Expose the
-  OpenAI Responses adapter only when `OPENAI_API_KEY` exists on the server.
+  OpenAI Responses adapter only when exactly one of `OPENAI_API_KEY` or
+  `OPENAI_API_KEY_FILE` supplies a valid server-side credential. The Docker
+  profile initializes a dedicated Docker named volume from standard input and
+  mounts it read-only for the file form, so the value is absent from host and
+  container environment metadata.
   Credentials never enter bootstrap capabilities or response DTOs. The model
   ID is an exact server allow-list entry; the default is `gpt-5.4-mini`, with a
   bounded `LP_STUDIO_OPENAI_MODEL` override.

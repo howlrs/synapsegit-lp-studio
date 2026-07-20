@@ -8,6 +8,7 @@
 | 読者・目的 | 最初に読む文書 | 次に読む文書 |
 | --- | --- | --- |
 | 初めて起動する | [利用ガイド](user-guide.md) | [root README](../README.md) |
+| Dockerで起動する | [Docker利用ガイド](docker.md) | [ADR-0013](adr/0013-docker-local-build-profile.md) |
 | 現在できることを知る | [実装ステータス](implementation-status.md) | [要件traceability](requirements-traceability.md) |
 | AI agentとして作業する | [AI agent guide](ai-agent-guide.md) | [実装ステータス](implementation-status.md) |
 | 要件を実装する | [詳細要件](detailed-requirements.md) | [実装計画](implementation-plan.md) |
@@ -36,6 +37,8 @@
 
 - [利用ガイド](user-guide.md): install、起動、blank/import、Proposal review、
   export、troubleshooting
+- [Docker利用ガイド](docker.md): WSL integration、local build、named volume、
+  loopback network、import、停止、配布制約
 - [AI agent guide](ai-agent-guide.md): 読む順序、正本、不変条件、
   task-to-file map、安全な変更手順
 - [root README](../README.md): 5分quick start、capability、制限、repository入口
@@ -64,13 +67,15 @@
 
 ## 現在地の短い要約
 
-- Status date: 2026-07-19
+- Status date: 2026-07-20
 - Verified baseline: C0–C6 merged PR #1 commit `c9a22b1`, contained in `main`
 - Automated local baseline: C7 restart-safe Decision/recovery、C8 export/publication、
   C9 process-kill/migration/read-only recovery/retention、C10 application performanceと
   browser accessibilityを統合
 - C11 automated handoff: clean-source package、checksum、launcher/restart/browser smoke、
   traceability/evidence validationを提供
+- Docker: Linux amd64 local-build profile、host loopback publish、named volume、
+  read-only import、ephemeral Docker CIを提供。prebuilt image配布はlicense gateで禁止
 - Human/external gate: Creator UX、manual screen-reader、live-provider、license/brand、
   merge/release decisionは未完了
 - Product status: local evaluation build、not production-ready

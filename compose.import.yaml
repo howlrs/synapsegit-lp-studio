@@ -1,0 +1,11 @@
+services:
+  studio:
+    environment:
+      LP_STUDIO_IMPORT_ROOT: /imports/site
+    volumes:
+      - type: bind
+        source: ${LP_STUDIO_IMPORT_PATH:?set LP_STUDIO_IMPORT_PATH to an absolute WSL path}
+        target: /imports/site
+        read_only: true
+        bind:
+          create_host_path: false

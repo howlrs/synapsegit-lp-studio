@@ -1,8 +1,13 @@
 {
   "lock_version": 1,
   "repository": "https://github.com/howlrs/synapsegit",
-  "revision": "7ddb58b2ad585db3823431135ae33222d4704f9f",
-  "draft_pull_request": "https://github.com/howlrs/synapsegit/pull/25",
+  "revision": "5352aa9412dfdd2ad6cfcf3746770d015af11b49",
+  "pull_request": "https://github.com/howlrs/synapsegit/pull/25",
+  "release": {
+    "tag": "v0.4.0",
+    "tag_object": "78920ecb6ef24449c8ab443d9814917a06068dd7",
+    "revision": "5352aa9412dfdd2ad6cfcf3746770d015af11b49"
+  },
   "contract": {
     "name": "synapsegit.generic-artifact",
     "version": 1,

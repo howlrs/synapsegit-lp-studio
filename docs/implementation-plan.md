@@ -3,7 +3,7 @@
 Status: automated local completion baseline implemented on the post-65% branch;
 Human/external/release gates remain pending
 
-Last updated: 2026-07-19
+Last updated: 2026-07-20
 
 Requirements: [detailed-requirements.md](detailed-requirements.md)
 
@@ -42,7 +42,8 @@ passedへ変更しない。
 2. PreviewをEditorとは別originに置いてからuntrusted LPを実行する。
 3. 危険な境界を縦sliceで早期検証し、画面だけを先に作り込まない。
 4. fake AIとlive AIを同一adapter contractで扱い、通常CIはfakeを使う。
-5. SynapseGit v0.3.0の未実装機能を実装済みと見なさない。
+5. SynapseGit v0.4.0のexact pinned source contractだけを利用可能と見なし、
+   generic HTTP、CLI、browser surfaceまで実装済みとは見なさない。
 6. SynapseGitの不足はworkaroundだけで閉じず、重複確認後に
    acceptance-bounded Issueとしてfeedbackする。
 7. Git commitはreview可能な小さなcheckpointにし、各checkpointをpushして
@@ -135,8 +136,8 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 4. **Checkpoint record**
    - file manifest、test summary、known limitation、Git commit候補を
      privacy-filteredなcheckpoint recordへ束縛する。
-   - SynapseGit generic contract完成前はtrusted-operator observationとし、
-     Human DecisionやCreative AI admissionを偽装しない。
+   - 外部provider resultはv0.4.0 contract上もcaller-suppliedかつ
+     execution-unverifiedとして記録し、Creator未確認のHuman Decisionを偽装しない。
 5. **Git/GitHub**
    - 関連fileだけを明示stageし、1つの意図を表すcommitを作る。
    - checkpoint branchへpushし、draft PRの進捗表・check結果・Issue linkを更新する。
@@ -171,10 +172,10 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
 
 ## 7. SynapseGitの開発中利用
 
-現行v0.3.0にはgeneric source-file Proposal contractがないため、
-利用を次の段階に分ける。
+現行baselineはSynapseGit v0.4.0のgeneric artifact source contractをexact commitで
+pinしている。次の段階は導入履歴と残るapplication boundaryを示す。
 
-### Phase S0: C0
+### Phase S0: C0（historical v0.3.0 baseline）
 
 - v0.3.0 version/capabilityと不足をevidenceとして記録する。
 - generic-file contractを
@@ -189,14 +190,16 @@ Accepted corruptionまたはoutcome-unknownの未解決riskがある場合、
   site checkoutを[#27](https://github.com/howlrs/synapsegit/issues/27)で追跡する。
 - unsupported機能をverified/admittedと表示しない。
 
-### Phase S1: C1
+### Phase S1: C1（complete in SynapseGit v0.4.0）
 
-- SynapseGit側へgeneric file-tree Proposal、durable one-disposition
-  Decision receipt/query、version/capability contractを追加する。
+- SynapseGit PR #25でgeneric file-tree Proposal/Decision source contractを追加し、
+  v0.4.0 tagged commit
+  `5352aa9412dfdd2ad6cfcf3746770d015af11b49`としてpinする。
 - upstream Issue、branch、commit、test、draft PRをLP Studioのtask/ADRへlinkする。
 - license上の再配布と混同しないようupstream contractをvendorせず、full Git
   revisionとartifact hashをlockし、adjacent checkout parity testを追加する。
-- M1開発中はexact contract version + commitをpinする。
+- M1開発中はexact contract version + commitをpinし、LP固有のdurable
+  orchestrationはtrusted sidecarで補う。
   tag/releaseは別の明示的release operationとする。
 
 ### Phase S2: C2–C8

@@ -2,7 +2,7 @@
 
 Status: product target; not a statement of current implementation
 
-Last updated: 2026-07-19
+Last updated: 2026-07-20
 
 Repository: `howlrs/synapsegit-lp-studio`
 
@@ -296,9 +296,9 @@ itself.
 The existing SynapseGit localhost Creator Pilot is image-oriented and does not
 invoke an AI model. The generic artifact v1 source contract is pinned by full
 revision and artifact hashes in
-[`synapsegit-contract.lock.json`](synapsegit-contract.lock.json); it is
-unreleased draft-PR functionality rather than a v0.3.0 feature. V1 accepts only
-caller-supplied AI attribution and always marks execution unverified. Checked
+[`synapsegit-contract.lock.json`](synapsegit-contract.lock.json); it is a
+released v0.4.0 source-library capability, not a generic HTTP, CLI, or browser
+surface. V1 accepts only caller-supplied AI attribution and always marks execution unverified. Checked
 re-registration and the separate journal are not an integrated restart
 orchestrator. The Decision helper is trusted-process authority, not browser-user
 authentication, so the local server must require a host-authenticated one-shot

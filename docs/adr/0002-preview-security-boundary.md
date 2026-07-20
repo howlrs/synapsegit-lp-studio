@@ -46,8 +46,11 @@ and relative local assets.
 - Privacy-safe diagnostics contain only a bounded code, severity, scope
   binding, and `sourceUnavailable`; raw URLs, stack traces, prompts, source
   paths, and credentials are excluded.
-- The launcher allocates available ports dynamically and prints the exact
-  Editor URL; fixed port availability is not assumed.
+- The native launcher allocates available ports dynamically and prints the
+  exact Editor URL; fixed port availability is not assumed. The Docker profile
+  uses fixed, identical host/container ports under
+  [ADR-0013](0013-docker-local-build-profile.md) because the scoped Preview
+  origin and CSP bind that external port.
 
 ## Consequences
 

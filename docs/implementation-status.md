@@ -1,6 +1,6 @@
 # Implementation status
 
-Status date: 2026-07-19
+Status date: 2026-07-20
 
 Baseline branch: `main`
 
@@ -8,7 +8,7 @@ Baseline integration PR: [#1](https://github.com/howlrs/synapsegit-lp-studio/pul
 
 C0–C6 baseline integration commit: `c9a22b15369c25f1e83a39d2cf9834962bb0db5a`
 
-Current branch: `agent/lp-studio-m1-completion`
+Current branch: `agent/docker-distribution`
 
 Automated local baseline: C0–C10 implemented; C11 clean-package handoff integrated
 
@@ -22,7 +22,7 @@ M1 completion claim: blocked by the explicit gates below
 | Checkpoint | Weight | Status | Evidence |
 | --- | ---: | --- | --- |
 | C0 Requirements and early ADR baseline | 5% | complete | commit `e256075`; detailed requirements, plan, ADR-0001–0006, traceability generator, docs QA; opened draft PR #1, now merged as the C0–C6 baseline |
-| C1 Upstream Synapse generic contract | 15% | complete | SynapseGit commit [`7ddb58b`](https://github.com/howlrs/synapsegit/commit/7ddb58b2ad585db3823431135ae33222d4704f9f), [draft PR #25](https://github.com/howlrs/synapsegit/pull/25), [passing CI](https://github.com/howlrs/synapsegit/actions/runs/29672697156/job/88154428767), contract lock/parity check, workspace quality gates |
+| C1 Upstream Synapse generic contract | 15% | complete | SynapseGit [PR #25](https://github.com/howlrs/synapsegit/pull/25), released as [`v0.4.0`](https://github.com/howlrs/synapsegit/releases/tag/v0.4.0) at tagged source [`5352aa9`](https://github.com/howlrs/synapsegit/commit/5352aa9412dfdd2ad6cfcf3746770d015af11b49), contract lock/parity check, workspace quality gates |
 | C2 Real-boundary M0 vertical slice | 10% | complete | real pinned `synapse-artifact` Proposal/Decision; strict API/bridge schema; separate random loopback origins; deterministic blank/fake-AI/adopt/export E2E; Rust, TypeScript, CSP, quota, and ZIP tests |
 | C3 Project/revision/import | 8% | complete | private retained state root; canonical immutable revision/CAS and Accepted pointer; reviewed copy import; restart, drift, malicious-path, root-overlap, source-preservation, and browser E2E evidence |
 | C4 Separate-origin preview | 8% | complete | session/project/snapshot-scoped opaque Preview origins; exact Host/route binding and revocation; CSP/sandbox/storage/navigation isolation; privacy-safe diagnostics; Rust, Web, and Chromium evidence |
@@ -37,11 +37,23 @@ M1 completion claim: blocked by the explicit gates below
 
 ## Current facts
 
-- SynapseGit released baseline remains v0.3.0; the generic contract is pinned to
-  unreleased source commit `7ddb58b2ad585db3823431135ae33222d4704f9f`.
+- The repository now provides a source-built Linux amd64 Docker profile for
+  local non-commercial evaluation. It uses bridge networking, host loopback
+  publication on fixed ports 4173/4174, a non-root read-only container, a
+  Docker-managed state volume, a read-only import overlay, and a dedicated
+  secret volume initialized from standard input for the optional provider
+  credential. Windows/WSL2 browser evidence is still pending and no Windows
+  support claim is complete.
+- No prebuilt image, GitHub Package, GitHub Release, tag, or downloadable
+  package is published by this change. CI builds and exercises the image
+  ephemerally but has no image push permission/path and no longer retains the
+  successful local-evaluation binary package as an Actions artifact. Existing
+  historical artifacts require a separate Rights Holder decision.
+- SynapseGit released baseline is v0.4.0; the generic contract is pinned to
+  tagged source commit `5352aa9412dfdd2ad6cfcf3746770d015af11b49`.
 - Generic regular-file mapping, caller-supplied/unverified Proposal/Decision,
-  checked recovery registration, and a separate review journal are under
-  review in upstream draft PR #25. They are not v0.3.0 release features.
+  checked recovery registration, and a separate review journal are v0.4.0
+  source-library capabilities. They are not generic HTTP, CLI, or browser features.
 - The frozen public v1 contract excludes verified executor attribution. The LP
   adapter must not claim that SynapseGit ran or verified a model.
 - The upstream workflow is trusted-process authority, not browser-user
@@ -96,7 +108,7 @@ M1 completion claim: blocked by the explicit gates below
 ## C1 evidence and limits
 
 - The Rust workspace pins the upstream SynapseGit source contract to exact
-  commit `7ddb58b2ad585db3823431135ae33222d4704f9f`. The committed lock records
+  tagged source commit `5352aa9412dfdd2ad6cfcf3746770d015af11b49`. The committed lock records
   source hashes and capabilities, and the parity check rejects drift from the
   reviewed adjacent source checkout.
 - Only the local Rust server imports and calls the versioned trusted use-case
@@ -540,8 +552,11 @@ M1 completion claim: blocked by the explicit gates below
   Preview listener, graceful stop, same-root restart, browser/accessibility
   smoke, synthetic corpus, production integration performance, maximum-level
   safe logs, evidence JSON, dependency inventory, unresolved-license notice,
-  per-file SHA-256 manifest, and retained `SHA256SUMS` outside the repository.
-- This is a local evaluation package, not a redistribution or release artifact.
+  hash-verified exact SynapseGit v0.4.0 license, per-file SHA-256 manifest, and
+  retained `SHA256SUMS` outside the repository.
+- This is a locally generated evaluation package, not a redistribution or
+  release artifact. CI verifies it inside the ephemeral runner and does not
+  retain it as a downloadable successful-run artifact.
 
 ## Remaining Human and external gates
 

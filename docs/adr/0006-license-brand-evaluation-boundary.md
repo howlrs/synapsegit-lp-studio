@@ -6,7 +6,7 @@ Date: 2026-07-19
 
 ## Context
 
-The audited SynapseGit v0.3.0 license is source-available, not OSI-approved.
+The audited SynapseGit v0.4.0 license is source-available, not OSI-approved.
 Its stated Production Use definition includes a live service, external
 deliverable, operational process, and operational decision. It does not
 generally grant production/commercial/hosted use, redistribution, or use of
@@ -16,8 +16,9 @@ the SynapseGit name/logo/trademarks without separate written permission.
 
 - C0–C11 work is a local/internal evaluation and development activity.
 - Do not publish a binary distribution, hosted service, production claim,
-  external deliverable, release, container, package, or SynapseGit brand claim
-  under this plan.
+  external deliverable, release, prebuilt container image, package, or
+  SynapseGit brand claim under this plan. A recipient-built local container is
+  limited to the same permitted non-commercial evaluation as its source build.
 - Record the responsible owner and obtain applicable Rights Holder permission
   before an M2 external/production/distribution action.
 - Preserve SynapseGit and third-party notices in permitted source/evaluation

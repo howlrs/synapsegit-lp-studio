@@ -51,7 +51,11 @@ OpenAIを選んだ場合までofflineという意味ではありません。
 local evidence対象にしています。これはrelease supportやcross-browser supportの
 宣言ではありません。SafariやFirefoxを含む他の環境は未検証です。
 
-必要なruntimeは次の固定versionです。
+WSLをNode/Rust dependencyで汚したくない場合は
+[Docker利用ガイド](docker.md)のlocal-build profileを使用できます。その場合、host側に
+必要なのはDocker Desktop/Engine 28以降とChromiumで、Node/pnpm/Rustはimage内で使用します。
+
+Native起動に必要なruntimeは次の固定versionです。
 
 | 項目 | Version |
 | --- | --- |
@@ -72,7 +76,9 @@ rustc --version
 
 ## 4. fake providerで起動する
 
-まずは外部AIへ何も送信しないfake providerで試すのが安全です。
+まずは外部AIへ何も送信しないfake providerで試すのが安全です。Dockerでは
+`docker compose up --build`を実行し、`http://127.0.0.1:4173`を開きます。以下はnative
+toolchainを使う場合の手順です。
 
 リポジトリのルートで次を実行します。
 

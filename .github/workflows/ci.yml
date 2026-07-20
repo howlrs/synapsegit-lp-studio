@@ -82,14 +82,6 @@ jobs:
         working-directory: ${{ runner.temp }}/lp-studio-local-evaluation
         run: sha256sum -c SHA256SUMS
 
-      - name: Retain successful local-evaluation package and evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: lp-studio-local-evaluation-${{ github.sha }}
-          path: ${{ runner.temp }}/lp-studio-local-evaluation/
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Upload browser failure evidence
         if: failure()
         uses: actions/upload-artifact@v7
@@ -100,3 +92,175 @@ jobs:
             test-results/
           if-no-files-found: ignore
           retention-days: 7
+
+  docker-local-build:
+    name: Local-build Docker security and Chromium smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install pnpm 10.33.0
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+          run_install: false
+
+      - name: Install Node.js 24.14.1
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.14.1
+          cache: pnpm
+
+      - name: Install browser smoke dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Verify Docker and Compose profile
+        run: |
+          set -euo pipefail
+          engine_version="$(docker version --format '{{.Server.Version}}')"
+          engine_major="${engine_version%%.*}"
+          test "$engine_major" -ge 28
+          docker compose version
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.openai.yaml config --quiet
+          LP_STUDIO_IMPORT_PATH="${RUNNER_TEMP}/compose-import-placeholder" \
+            docker compose -f compose.yaml -f compose.import.yaml config --quiet
+          pnpm check:docker
+
+      - name: Build the local-only image
+        run: docker compose build --pull
+
+      - name: Exercise runtime controls, persistence, Preview, and import
+        run: |
+          set -euo pipefail
+
+          import_root="${RUNNER_TEMP}/lp-studio-docker-import"
+          secret_volume="synapsegit-lp-studio-openai-secret-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0755 "$import_root"
+          printf '%s\n' '<!doctype html><html lang="ja"><title>Docker import</title><h1>Import remains read-only</h1></html>' > "$import_root/index.html"
+          chmod 0444 "$import_root/index.html"
+          import_before="$(sha256sum "$import_root/index.html" | cut -d ' ' -f 1)"
+          export LP_STUDIO_IMPORT_PATH="$import_root"
+          export LP_STUDIO_OPENAI_SECRET_VOLUME="$secret_volume"
+
+          cleanup() {
+            docker compose -f compose.yaml -f compose.import.yaml down --volumes || true
+            docker volume rm "$secret_volume" || true
+          }
+          trap cleanup EXIT
+
+          wait_for_roles() {
+            local editor_health=""
+            local preview_health=""
+            for _attempt in $(seq 1 90); do
+              editor_health="$(curl --fail --silent --show-error http://127.0.0.1:4173/health || true)"
+              preview_health="$(curl --fail --silent --show-error http://127.0.0.1:4174/health || true)"
+              if [[ "$editor_health" == *'"role":"editor"'* && "$preview_health" == *'"role":"preview"'* ]]; then
+                return 0
+              fi
+              sleep 1
+            done
+            docker compose logs studio
+            return 1
+          }
+
+          wait_for_container_health() {
+            local container_id
+            local health_status
+            container_id="$(docker compose ps --quiet studio)"
+            for _attempt in $(seq 1 30); do
+              health_status="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+              if [[ "$health_status" == "healthy" ]]; then
+                return 0
+              fi
+              if [[ "$health_status" == "unhealthy" ]]; then
+                docker inspect --format '{{json .State.Health.Log}}' "$container_id"
+                return 1
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
+          docker compose up --detach --no-build
+          wait_for_roles
+          wait_for_container_health
+
+          container_id="$(docker compose ps --quiet studio)"
+          test -n "$container_id"
+          test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = "65532:65532"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
+          test "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id")" = '["ALL"]'
+          test "$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id")" = '["no-new-privileges:true"]'
+          test "$(docker compose port studio 4173)" = "127.0.0.1:4173"
+          test "$(docker compose port studio 4174)" = "127.0.0.1:4174"
+          test "$(docker inspect --format '{{(index (index .HostConfig.PortBindings "4173/tcp") 0).HostIp}}' "$container_id")" = "127.0.0.1"
+          test "$(docker inspect --format '{{(index (index .HostConfig.PortBindings "4174/tcp") 0).HostIp}}' "$container_id")" = "127.0.0.1"
+
+          docker compose exec -T studio test -s /etc/ssl/certs/ca-certificates.crt
+          docker compose exec -T studio test -r /usr/share/licenses/synapsegit-lp-studio/LICENSE
+          docker compose exec -T studio test -r /usr/share/licenses/synapsegit-lp-studio/THIRD-PARTY-NOTICES.md
+          docker compose exec -T studio test -s /usr/share/licenses/synapsegit-lp-studio/cargo-metadata.json
+          docker compose exec -T studio test -s /usr/share/licenses/synapsegit-lp-studio/pnpm-production-licenses.json
+          synapse_license_sha="$(docker compose exec -T studio sha256sum /usr/share/licenses/synapsegit-lp-studio/SynapseGit-v0.4.0-LICENSE | cut -d ' ' -f 1)"
+          test "$synapse_license_sha" = "200d6c727d7b3b62c85e7672c5615d21e5081fd95b8935acc5424bc98305415e"
+
+          valid_bootstrap_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'Host: 127.0.0.1:4173' -H 'Sec-Fetch-Site: same-origin' http://127.0.0.1:4173/api/v1/bootstrap)"
+          invalid_bootstrap_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'Host: localhost:4173' -H 'Sec-Fetch-Site: same-origin' http://127.0.0.1:4173/api/v1/bootstrap)"
+          test "$valid_bootstrap_status" = "200"
+          test "$invalid_bootstrap_status" = "403"
+
+          pnpm measure:package-browser -- --editor-origin http://127.0.0.1:4173
+          pnpm measure:docker-browser -- --create
+
+          docker compose up --detach --no-build --force-recreate
+          wait_for_roles
+          pnpm measure:docker-browser -- --expect-existing
+          container_id="$(docker compose ps --quiet studio)"
+          docker compose stop --timeout 20 studio
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")" = "0"
+          docker compose up --detach --no-build
+          wait_for_roles
+          pnpm measure:docker-browser -- --expect-existing
+
+          docker compose -f compose.yaml -f compose.import.yaml up --detach --no-build --force-recreate
+          wait_for_roles
+          container_id="$(docker compose -f compose.yaml -f compose.import.yaml ps --quiet studio)"
+          test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/imports/site"}}{{.RW}}{{end}}{{end}}' "$container_id")" = "false"
+          docker compose -f compose.yaml -f compose.import.yaml exec -T studio test -r /imports/site/index.html
+          if docker compose -f compose.yaml -f compose.import.yaml exec -T studio sh -c 'printf mutation > /imports/site/mutation'; then
+            echo "read-only import accepted a write" >&2
+            exit 1
+          fi
+          test ! -e "$import_root/mutation"
+          import_after="$(sha256sum "$import_root/index.html" | cut -d ' ' -f 1)"
+          test "$import_after" = "$import_before"
+          pnpm measure:docker-browser -- --expect-existing --expect-import
+
+          docker volume create "$secret_volume"
+          printf '%s' 'ci-placeholder-not-a-live-key' | docker run --rm --interactive \
+            --read-only \
+            --network none \
+            --pids-limit 32 \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --mount "type=volume,src=${secret_volume},dst=/run/secrets" \
+            --entrypoint /bin/sh \
+            synapsegit-lp-studio:local \
+            -c 'set -eu; umask 077; cat > /run/secrets/openai-api-key; test -s /run/secrets/openai-api-key; test "$(wc -c < /run/secrets/openai-api-key)" -le 1024; chmod 600 /run/secrets/openai-api-key'
+
+          docker compose -f compose.yaml -f compose.openai.yaml up --detach --no-build --force-recreate
+          wait_for_roles
+          container_id="$(docker compose -f compose.yaml -f compose.openai.yaml ps --quiet studio)"
+          container_environment="$(docker inspect --format '{{json .Config.Env}}' "$container_id")"
+          [[ "$container_environment" == *'OPENAI_API_KEY_FILE=/run/secrets/openai-api-key'* ]]
+          [[ "$container_environment" != *'ci-placeholder-not-a-live-key'* ]]
+          test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/run/secrets"}}{{.RW}}{{end}}{{end}}' "$container_id")" = "false"
+          docker compose -f compose.yaml -f compose.openai.yaml exec -T studio sh -c 'test -f /run/secrets/openai-api-key && test "$(stat -c %a /run/secrets/openai-api-key)" = 600'
+          pnpm measure:docker-browser -- --expect-existing --expect-openai

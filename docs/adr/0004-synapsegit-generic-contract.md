@@ -10,11 +10,12 @@ SynapseGit v0.3.0 has the Core object graph and narrow AI/Human semantics, but
 its implemented localhost use case and publication discovery are tied to the
 three-file image Creator Pilot. Pending review authority is process-local.
 
-Unreleased source commit
-[`7ddb58b`](https://github.com/howlrs/synapsegit/commit/7ddb58b2ad585db3823431135ae33222d4704f9f)
-and [draft PR #25](https://github.com/howlrs/synapsegit/pull/25) add the C1
-generic artifact primitives. This does not change the v0.3.0 release or grant
-production/distribution permission.
+SynapseGit [PR #25](https://github.com/howlrs/synapsegit/pull/25) was merged
+and released as [`v0.4.0`](https://github.com/howlrs/synapsegit/releases/tag/v0.4.0),
+pinned here at the tagged source commit
+[`5352aa9`](https://github.com/howlrs/synapsegit/commit/5352aa9412dfdd2ad6cfcf3746770d015af11b49).
+It supplies the C1 generic artifact primitives, but remains a source-available
+evaluation release and does not grant LP Studio production/distribution permission.
 
 LP Studio cannot truthfully use raw `update-ref`, CAS/SQLite writes, or
 browser-selected Ref/OID/authority as a generic integration.

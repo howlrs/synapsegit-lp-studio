@@ -4,7 +4,7 @@ Status: requirements baseline; includes planned work
 
 Version: 0.1
 
-Last updated: 2026-07-19
+Last updated: 2026-07-20
 
 Source: [current-specification.md](current-specification.md)
 
@@ -63,9 +63,10 @@ export分離、preview権限分離、SynapseGit trust boundaryを弱めてはな
    SynapseGit publication bundleは互いに異なる成果物として扱う。
 9. GitHub-ready fileの生成と、Git commit/push/PR等のremote writeは別操作とする。
    M1は前者までを対象とし、後者を自動実行しない。
-10. released integration baselineはSynapseGit v0.3.0とする。ただしv0.3.0には
-    generic LP file proposal契約が存在しないため、実連携には後述する
-    `DEP-SG-001` の解消が必要である。
+10. released integration baselineはSynapseGit v0.4.0のtagged source commit
+    `5352aa9412dfdd2ad6cfcf3746770d015af11b49`とする。generic artifact v1は
+    pinned Rust source contractとして利用し、generic HTTP、CLI、browser surfaceが
+    存在するとは仮定しない。
 
 ### 2.2 milestone
 
@@ -557,7 +558,9 @@ interface ElementAnchorV1 {
 - **INT-AI-001 / P0:** provider adapterはcapability、model identity、
   request、stream event、structured result、usage、error、cancelをversion化する。
 - **INT-AI-002 / P0:** credentialをserver-side environment、
-  OS credential store等に保存し、browser、project、log、exportへ渡さない。
+  bounded regular secret file、OS credential store等から読み、browser、project、log、
+  exportへ渡さない。Dockerでは標準入力から専用named volumeへ格納してread-only
+  mountし、hostまたはcontainer environment metadataへ値を保存しない。
 - **INT-AI-003 / P0:** model resultへprovider request ID、provider、
   requested/reported model、adapter version、base revisionを記録する。
 - **INT-AI-004 / P0:** modelへarbitrary filesystem、shell、
@@ -756,13 +759,16 @@ Local Accepted pointerとSynapseGit Decisionは単一transactionにできない�
 
 ### 13.1 Current baselineと禁止する前提
 
-SynapseGit v0.3.0で利用できるCore要素はBlob、ManifestTree、Commit、
-Ref CAS/reflog、Creative AI proposal、narrow Human Decision、
-archive、Creator Pilot向けpublicationである。一方、次は未実装である。
+SynapseGit v0.4.0で利用できるCore要素はBlob、ManifestTree、Commit、
+Ref CAS/reflog、Creative AI proposal、narrow Human Decision、archive、
+Creator Pilot向けpublicationに加え、generic artifact v1のregular-file mapping、
+caller-suppliedかつexecution-unverifiedなProposal/Decision、checked recovery
+registration、separate review journalである。LP Studioはtagged source commitをpinし、
+trusted Rust sidecarから利用する。一方、次はupstreamの汎用surfaceとして未実装である。
 
-- generic static-site file treeのproposal API/CLI
+- generic artifactのHTTP/browser API
 - DOM/viewport/blockを表すLP-specific Target contract
-- restart後にpending Human reviewを再開するdurable handle/receipt
+- restart後のLP workflow全体を再開するend-to-end durable orchestration
 - LP historyを入力にするprovider-neutral publication projection
 - generic CLIのcheckout、diff、publish-proposal、publish-decision、JSON output
 
@@ -780,19 +786,16 @@ Creator Pilot専用であり、別originのLP Studio browserから直接利用�
   untagged sibling repositoryの機能を暗黙利用しない。
 - **INT-SG-005 / P0:** SynapseGit repository writeはproject単位で直列化し、
   adapterがshared interprocess lockを取得できる場合は使用する。
-  v0.3 CLI等の非協調writerも想定し、operation前後のRef snapshot/digestと
+  legacy CLI等の非協調writerも想定し、operation前後のRef snapshot/digestと
   final CASでconcurrent changeを検出し、保証できない場合はfail closedにする。
   UIは同repositoryへの外部CLI同時writeを行わないよう警告する。
 
-### 13.2 Required dependency: generic LP contract
+### 13.2 Pinned dependency: generic artifact contract
 
-- **DEP-SG-001 / M1 blocker:** 次のいずれかを実装・review・version化する。
-
-1. SynapseGit側にgeneric-file Proposal/Human Decision use-case contractを追加する。
-2. LP Studio側のtrusted Rust sidecarがexact pinned SynapseGit cratesをembedし、
-   同等のcontractを提供する。
-
-どちらの場合も次を満たす。
+- **DEP-SG-001 / M1 dependency（resolved）:** SynapseGit v0.4.0のversioned
+  generic artifact source contractをpinし、LP Studioのtrusted Rust sidecarが
+  exact cratesをembedしてapplication-specificなdurable orchestrationを提供する。
+  contractの成立条件は次のとおりである。
 
 - static site file treeを決定的にBlob/ManifestTreeへ変換する。
 - initial canonical Decision Ref、Actor、Policy、Grant、ContextPack、
@@ -805,7 +808,7 @@ Creator Pilot専用であり、別originのLP Studio browserから直接利用�
 - error codeをretryable、terminal、outcome-unknownへ分類する。
 - raw low-level Ref mutationをuntrusted routeとして公開しない。
 
-M0のstub/local ledgerはこの依存を満たさない。
+M0のstub/local ledgerやuntagged sibling checkoutはこの依存を満たさない。
 
 ### 13.3 Site-to-Core mapping
 
@@ -890,10 +893,11 @@ errorの不明瞭さが見つかった場合、LP Studio内だけの恒久workar
   該当sliceの実装開始前に既存Issueへlink/commentするか、
   独立したIssueを起票する。`candidate` のまま実装を開始しない。
 
-現時点でIssue候補として追跡すべき既知gapは次のとおり。
+現時点で参照すべきcontract trackerと既知gapは次のとおり。
 
 1. [SynapseGit #22](https://github.com/howlrs/synapsegit/issues/22):
-   generic static-site file Proposal/Human Decision contract
+   v0.4.0で解決したgeneric static-site file Proposal/Human Decision contract。
+   pinned contractの由来として保持する
 2. [SynapseGit #23](https://github.com/howlrs/synapsegit/issues/23):
    process restartをまたぐdurable pending reviewとoutcome query
 3. [SynapseGit #24](https://github.com/howlrs/synapsegit/issues/24):
@@ -911,13 +915,13 @@ errorの不明瞭さが見つかった場合、LP Studio内だけの恒久workar
 
 ### 13.7 License、brand、platform gate
 
-- **DEP-LIC-001 / M2 external-release blocker:** SynapseGit v0.3.0の
+- **DEP-LIC-001 / M2 external-release blocker:** SynapseGit v0.4.0の
   Source-Available LicenseはProduction Useにexternal deliverableを含み、
-  production/commercial/hosted use、software/binary redistribution、
-  SynapseGit name/logo/trademark利用を一般許諾していない。
-  Production利用、binary同梱、外部納品、製品名利用の前に
+  production/commercial/hosted use、software/binary/container redistribution、
+  GitHub Release/Package、SynapseGit name/logo/trademark利用を一般許諾していない。
+  Production利用、binary/container同梱、外部納品、製品名利用の前に
   Rights Holdersの書面許諾とbrand条件を確認する。
-- **DEP-PLAT-001 / P0:** published v0.3.0 binaryはLinux x86_64 GNUがbaselineである。
+- **DEP-PLAT-001 / P0:** published v0.4.0 binaryはLinux x86_64 GNUがbaselineである。
   他OS/architectureをsupportするときはfixed tag source build、
   packaging、license、reproducibility、E2Eを別途満たす。
 - **DEP-LIC-002 / P0:** LP Studio自身、template、font、image、
@@ -1099,8 +1103,11 @@ errorの不明瞭さが見つかった場合、LP Studio内だけの恒久workar
 
 ### 18.2 Loopback application security
 
-- **SEC-APP-001 / P0:** Local serverをIPv4 `127.0.0.1` のrandom portにだけbindし、
-  `0.0.0.0`、LAN interface、reverse proxy公開を拒否する。
+- **SEC-APP-001 / P0:** Native local serverをIPv4 `127.0.0.1` のrandom portにだけ
+  bindする。明示的なDocker profileだけはcontainer interfaceへbindできるが、
+  provided Composeが同一のfixed high portをhost `127.0.0.1`だけへpublishし、
+  exact public Host/Origin validationを維持する。LAN interface、reverse proxy、
+  arbitrary port mappingをsupportしない。
 - **SEC-APP-002 / P0:** 起動ごとに十分なentropyを持つprocess-local session secretを
   生成し、終了時に失効させる。
 - **SEC-APP-003 / P0:** 起動URLでsecretを渡す場合はURL fragment等を用い、
@@ -1245,7 +1252,8 @@ responsive breakpoint 3件、CSS transforms、nested scroll containerを含む�
   SynapseGit install方式をreleaseごとに明示する。
 - **NFR-COMP-002 / P0:** M0/M1開発baselineはpinned Chromium系browserと
   Linux x86-64 GNU/WSL評価環境とし、他platformを未検証のまま
-  supportedと表示しない。
+  supportedと表示しない。Docker profileもLinux amd64 containerに限定し、
+  Windows Chromium/WSL2のmanual evidence完了前にWindows supportと表示しない。
 - **NFR-COMP-003 / P0:** browser feature detectionを行い、
   directory picker等がない場合はarchive import等の代替を示す。
 - **NFR-COMP-004 / P1:** supported browserごとにiframe sandbox、
@@ -1406,7 +1414,7 @@ M1は次をすべて満たしたときだけ完了とする。
 
 | ID | Risk / Dependency | 影響 | 必須対策 |
 | --- | --- | --- | --- |
-| R-001 | SynapseGit v0.3.0にgeneric LP contractがない | M1 real integration不可 | DEP-SG-001、SynapseGit Issue、contract test |
+| R-001 | SynapseGit v0.4.0のpinned generic contractとlocal adapterがdriftする | real integrationの意味・復旧保証が不一致 | exact commit lock、source parity、contract test |
 | R-002 | Human review handleがprocess-local | restart後Decision不可 | durable receipt/query contract、recovery saga |
 | R-003 | custom source-available license/brand制限 | production、外部納品、配布が不可となり得る | DEP-LIC-001 |
 | R-004 | Preview互換性とisolationのtrade-off | site破損または権限漏洩 | separate origin、sandbox/CSP ADR、malicious fixture |
@@ -1480,8 +1488,8 @@ Section 13.6のfeedback運用に従い、local workaroundだけで閉じない�
   slice開始前に必要なADRがreview可能なbaselineになってから実装を開始する。
 - **DEV-002 / P0:** 各checkpointでSynapseGitをactual capabilityの範囲内で使い、
   intent、base、result manifest、test、known limitationを記録する。
-  generic contract完成前はtrusted-operator observationまたは
-  AI-attributed resultとし、Human Decision/verified executionを偽装しない。
+  v0.4.0 generic contractへ渡す外部provider resultはcaller-suppliedかつ
+  execution-unverifiedとして記録し、Human Decision/verified executionを偽装しない。
 - **DEV-003 / P0:** 意味のあるcheckpointごとに関連fileだけをcommitし、
   validation後にimplementation branchへpushする。
   commit SHA、test、Synapse checkpoint、Issueをlocal statusと現在のPRへ記録する。

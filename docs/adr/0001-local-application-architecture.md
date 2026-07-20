@@ -21,8 +21,9 @@ workspace and documents Rust 1.88 as its source-build baseline.
   the local authority.
 - Implement `apps/web` as a strict TypeScript React/Vite SPA.
 - Implement `apps/local-server` as a Rust Axum application.
-- Bind separate random IPv4-loopback listeners for Editor/API and active
-  Preview sessions.
+- Bind separate random IPv4-loopback listeners for native Editor/API and active
+  Preview sessions. The explicit Docker profile is governed separately by
+  [ADR-0013](0013-docker-local-build-profile.md).
 - Store mutable Studio metadata/command state in SQLite and immutable revision
   bytes in an application-owned filesystem CAS.
 - Keep SynapseGit integration behind a trusted Rust use-case/companion

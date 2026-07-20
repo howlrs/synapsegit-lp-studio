@@ -2586,31 +2586,33 @@ dependencies = [
 
 [[package]]
 name = "synapse-application"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "synapse-core",
 ]
 
 [[package]]
 name = "synapse-artifact"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
  "synapse-application",
+ "synapse-artifact-journal",
  "synapse-canonical",
  "synapse-core",
+ "synapse-schema",
  "synapse-sqlite",
  "unicode-normalization",
 ]
 
 [[package]]
 name = "synapse-artifact-journal"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
@@ -2619,8 +2621,8 @@ dependencies = [
 
 [[package]]
 name = "synapse-canonical"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "sha2",
  "unicode-normalization",
@@ -2628,8 +2630,8 @@ dependencies = [
 
 [[package]]
 name = "synapse-cas"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "sha2",
  "synapse-canonical",
@@ -2637,8 +2639,8 @@ dependencies = [
 
 [[package]]
 name = "synapse-core"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "rustix",
  "serde",
@@ -2652,10 +2654,11 @@ dependencies = [
 
 [[package]]
 name = "synapse-schema"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "jsonschema",
+ "serde",
  "serde_json",
  "synapse-canonical",
  "unicode-normalization",
@@ -2663,8 +2666,8 @@ dependencies = [
 
 [[package]]
 name = "synapse-sqlite"
-version = "0.3.0"
-source = "git+https://github.com/howlrs/synapsegit?rev=7ddb58b2ad585db3823431135ae33222d4704f9f#7ddb58b2ad585db3823431135ae33222d4704f9f"
+version = "0.4.0"
+source = "git+https://github.com/howlrs/synapsegit?rev=5352aa9412dfdd2ad6cfcf3746770d015af11b49#5352aa9412dfdd2ad6cfcf3746770d015af11b49"
 dependencies = [
  "rusqlite",
  "sha2",

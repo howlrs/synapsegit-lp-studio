@@ -1,0 +1,13 @@
+SynapseGit LP Studio evaluation notice
+
+SPDX-License-Identifier: LicenseRef-SynapseGit-LP-Studio-Evaluation
+
+The source metadata uses the identifier above, but this repository does not
+record corresponding license terms or a general license grant for LP Studio.
+The identifier is metadata, not permission.
+
+The recorded project scope is local internal evaluation. Production use,
+external delivery, redistribution, SynapseGit name or brand use, and release
+permission are not recorded. Public source visibility does not change this
+boundary. Third-party components retain their own terms; consult
+THIRD-PARTY-NOTICES.md and the upstream dependency sources.

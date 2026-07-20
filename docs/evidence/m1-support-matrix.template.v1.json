@@ -31,12 +31,12 @@
     "public or multi-user service"
   ],
   "synapseGit": {
-    "releasedBaseline": "v0.3.0",
+    "releasedBaseline": "v0.4.0",
     "contractSourceRevision": null,
     "contractLockSha256": null,
     "installProfile": "exact pinned Rust source dependency",
     "verificationStatus": "pending",
-    "releaseStatus": "generic artifact source contract is not a released v0.3.0 capability"
+    "releaseStatus": "generic artifact source contract is released in SynapseGit v0.4.0; no generic HTTP, CLI, or browser surface is released"
   },
   "licenseAndBrand": {
     "lpStudioLicenseIdentifier": "LicenseRef-SynapseGit-LP-Studio-Evaluation",

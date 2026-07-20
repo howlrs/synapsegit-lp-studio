@@ -1597,6 +1597,12 @@ fn map_journal_error(error: JournalError) -> SidecarError {
         }
         JournalError::ReviewBindingExists
         | JournalError::ReviewBindingConflict
+        | JournalError::ProposalIntentNotFound
+        | JournalError::ProposalIntentExists
+        | JournalError::ProposalIntentConflict
+        | JournalError::LegacyDecisionIntent
+        | JournalError::DecisionIntentMismatch
+        | JournalError::DecisionOutcomeConflict
         | JournalError::CorruptData(_) => SidecarError::Integrity,
         JournalError::Random(_) | JournalError::Storage(_) => SidecarError::Storage,
     }

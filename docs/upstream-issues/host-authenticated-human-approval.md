@@ -4,7 +4,7 @@ Posted as [SynapseGit Issue #24](https://github.com/howlrs/synapsegit/issues/24)
 
 ## Context
 
-The generic artifact convenience workflow in SynapseGit draft PR #25 is a
+The generic artifact convenience workflow released by SynapseGit PR #25 / v0.4.0 is a
 trusted, same-process primitive. Its pending authority is non-serializable and
 the final Decision still goes through `synapse-application` and
 `HumanDecisionRuntime`.

@@ -1,0 +1,14 @@
+services:
+  studio:
+    environment:
+      OPENAI_API_KEY_FILE: /run/secrets/openai-api-key
+    volumes:
+      - type: volume
+        source: openai-secret
+        target: /run/secrets
+        read_only: true
+
+volumes:
+  openai-secret:
+    external: true
+    name: ${LP_STUDIO_OPENAI_SECRET_VOLUME:-synapsegit-lp-studio-openai-secret}

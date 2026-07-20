@@ -35,7 +35,23 @@ SynapseGitはProposalとHuman Decisionの来歴を扱います。ただし、現
 
 ## 5分でローカル起動する
 
-### 必要なもの
+### Docker（Windows + WSL2推奨）
+
+WSLをNode/Rust dependencyで汚したくない場合は、Docker Engine 28以降とDocker Desktopの
+WSL integrationを使います。配布済みimageではなく、このsourceからlocal buildします。
+
+~~~bash
+docker compose up --build
+~~~
+
+起動後にWindows側のChromiumで`http://127.0.0.1:4173`を開きます。Project stateは
+Docker named volumeへ残ります。現在のlicenseはprebuilt container imageの公開を許可して
+いないため、GHCR/Docker Hub imageは提供しません。詳しい起動、import、credential、停止、
+security boundaryは[Docker利用ガイド](docs/docker.md)を参照してください。
+
+### Native toolchain
+
+#### 必要なもの
 
 - Node.js `24.14.1`
 - pnpm `10.33.0`
@@ -47,7 +63,7 @@ SynapseGitはProposalとHuman Decisionの来歴を扱います。ただし、現
 [`package.json`](package.json)、
 [`rust-toolchain.toml`](rust-toolchain.toml)に固定されています。
 
-### 起動
+#### 起動
 
 ~~~bash
 pnpm install --frozen-lockfile
@@ -201,6 +217,7 @@ package install、database、またはruntime serverを必要とするsiteは対
 | `pnpm test:e2e` | production buildをChromiumでE2E検証 |
 | `pnpm format:check` | Prettierとrustfmtを検査 |
 | `pnpm check:docs` | Markdown、link、要件ID、traceabilityを検査 |
+| `pnpm check:docker` | Docker local-build profileとimage非公開境界を検査 |
 | `pnpm check:evidence` | C0–C11 evidence template、P0 traceability、manual gate、result schemaを検査 |
 | `pnpm measure:performance-geometry` | 500 files / 50 MiB / 10,000 DOM nodesのsynthetic fixtureと72-case geometry matrixを測定 |
 | `pnpm measure:production-integration-performance` | packaged production App、実Preview bridge/overlay、表示名autosave、ChangeSetを実測 |
@@ -236,6 +253,7 @@ templates/
 tests/
   e2e/                  real Chromium flows
 docs/
+  docker.md             Docker local-build evaluation guide
   user-guide.md         first-time user instructions
   ai-agent-guide.md     deterministic instructions for AI agents
   implementation-status.md

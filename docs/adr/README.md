@@ -24,6 +24,8 @@
   safe observability and acceptance-evidence profile
 - [ADR-0012](0012-static-export-profile.md):
   deterministic Accepted static export profile
+- [ADR-0013](0013-docker-local-build-profile.md):
+  Docker local-build evaluation profile
 
 Accepted ADRs are implementation decisions for the current M1 development
 baseline, not evidence that the 80% local verification or final product review

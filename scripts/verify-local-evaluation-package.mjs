@@ -32,6 +32,9 @@ const AUTOMATED_EVIDENCE_SCHEMA_VERSION =
   "synapsegit-lp-studio.automated-evidence-record/1";
 const SAFE_LOG_SCHEMA_VERSION = "synapsegit-lp-studio.safe-log-result/1";
 const SUPPORTED_RUST_HOST = "x86_64-unknown-linux-gnu";
+const SYNAPSEGIT_SOURCE_REVISION = "5352aa9412dfdd2ad6cfcf3746770d015af11b49";
+const SYNAPSEGIT_LICENSE_SHA256 =
+  "200d6c727d7b3b62c85e7672c5615d21e5081fd95b8935acc5424bc98305415e";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const packagePrefix = "synapsegit-lp-studio-package-smoke-";
 const temporaryPrefix = join(tmpdir(), packagePrefix);
@@ -1360,6 +1363,8 @@ const renderThirdPartyNotices = (cargoMetadata, pnpmLicenses) => {
     "`NOT_DECLARED_IN_PACKAGE_METADATA` means this build metadata did not provide",
     "a license expression. It must not be read as a permission or a prohibition.",
     "Redistribution permission for this package has not been recorded.",
+    "The exact SynapseGit v0.4.0 license is retained separately at",
+    "`licenses/SynapseGit-v0.4.0-LICENSE`.",
     "",
     "## Rust normal/build dependency inventory",
     "",
@@ -1389,6 +1394,28 @@ const renderThirdPartyNotices = (cargoMetadata, pnpmLicenses) => {
   };
 };
 
+const readPinnedSynapseGitLicense = async (cargoMetadata) => {
+  const expectedSource = `git+https://github.com/howlrs/synapsegit?rev=${SYNAPSEGIT_SOURCE_REVISION}#${SYNAPSEGIT_SOURCE_REVISION}`;
+  const artifactPackage = cargoMetadata.packages.find(
+    (entry) =>
+      entry.name === "synapse-artifact" && entry.source === expectedSource,
+  );
+  if (artifactPackage === undefined) {
+    throw new SmokeFailure("synapsegit_license_source_missing");
+  }
+  const checkoutRoot = resolve(dirname(artifactPackage.manifest_path), "../..");
+  let licenseBytes;
+  try {
+    licenseBytes = await readFile(join(checkoutRoot, "LICENSE"));
+  } catch {
+    throw new SmokeFailure("synapsegit_license_read_failed");
+  }
+  if (sha256(licenseBytes) !== SYNAPSEGIT_LICENSE_SHA256) {
+    throw new SmokeFailure("synapsegit_license_hash_mismatch");
+  }
+  return licenseBytes;
+};
+
 const packageReadme = `# SynapseGit LP Studio local evaluation package
 
 This directory is a Linux x86-64 GNU local-evaluation artifact. It is not a
@@ -1409,6 +1436,8 @@ the retained state root.
 SHA-256 digest. The manifest explicitly records the unresolved license,
 redistribution, brand, and release boundary. See \`LICENSE\` and
 \`THIRD-PARTY-NOTICES.md\` before any use beyond this local evaluation scope.
+The exact SynapseGit v0.4.0 source license is retained at
+\`licenses/SynapseGit-v0.4.0-LICENSE\`.
 
 No OpenAI credential is included. Live-provider use is optional, externally
 billed, and not part of the automated package smoke.
@@ -1417,21 +1446,6 @@ billed, and not part of the automated package smoke.
 fixture executable. It invokes the same production ChangeSet parser as the
 local server for exactly ten text files totaling 2 MiB; it does not accept or
 retain project content.
-`;
-
-const packageLicenseNotice = `SynapseGit LP Studio evaluation notice
-
-SPDX-License-Identifier: LicenseRef-SynapseGit-LP-Studio-Evaluation
-
-The source metadata uses the identifier above, but this repository does not
-record corresponding license terms or a general license grant for LP Studio.
-The identifier is metadata, not permission.
-
-This package is generated only for local internal evaluation. Production use,
-external delivery, redistribution, SynapseGit name or brand use, and release
-permission are not recorded. Public source visibility does not change this
-boundary. Third-party components retain their own terms; consult
-THIRD-PARTY-NOTICES.md and the upstream dependency sources.
 `;
 
 const packageLauncher = `#!/bin/sh
@@ -2056,6 +2070,7 @@ try {
   const packageRoot = join(temporaryRoot, "package");
   const sourceSnapshotRoot = join(temporaryRoot, "source");
   const binaryDirectory = join(packageRoot, "bin");
+  const licenseDirectory = join(packageRoot, "licenses");
   const webDirectory = join(packageRoot, "web");
   const cargoTarget = join(temporaryRoot, "cargo-target");
   const stateRoot = join(temporaryRoot, "state");
@@ -2096,6 +2111,7 @@ try {
   );
   await Promise.all([
     mkdir(binaryDirectory, { recursive: true }),
+    mkdir(licenseDirectory, { recursive: true }),
     mkdir(webDirectory, { recursive: true }),
     mkdir(stateRoot, { recursive: true, mode: 0o700 }),
   ]);
@@ -2177,18 +2193,24 @@ try {
       { env: buildEnvironment, capture: true, captureLimit: 1024 * 1024 },
     ),
   ]);
+  let cargoMetadata;
+  let pnpmLicenses;
   let dependencyNotices;
   try {
-    dependencyNotices = renderThirdPartyNotices(
-      JSON.parse(cargoMetadataResult.stdout),
-      JSON.parse(pnpmLicensesResult.stdout),
-    );
+    cargoMetadata = JSON.parse(cargoMetadataResult.stdout);
+    pnpmLicenses = JSON.parse(pnpmLicensesResult.stdout);
+    dependencyNotices = renderThirdPartyNotices(cargoMetadata, pnpmLicenses);
   } catch {
     throw new SmokeFailure("dependency_inventory_invalid");
   }
+  const synapseGitLicense = await readPinnedSynapseGitLicense(cargoMetadata);
   const preExecutionSnapshotIntegrity = await verifySourceSnapshot(
     sourceFingerprint,
     sourceSnapshotRoot,
+  );
+  const packageLicenseNotice = await readFile(
+    join(sourceSnapshotRoot, "LICENSE"),
+    "utf8",
   );
 
   const launcher = join(binaryDirectory, "start-lp-studio");
@@ -2203,6 +2225,11 @@ try {
       flag: "wx",
       mode: 0o600,
     }),
+    writeFile(
+      join(licenseDirectory, "SynapseGit-v0.4.0-LICENSE"),
+      synapseGitLicense,
+      { flag: "wx", mode: 0o600 },
+    ),
     writeFile(
       join(packageRoot, "THIRD-PARTY-NOTICES.md"),
       dependencyNotices.text,

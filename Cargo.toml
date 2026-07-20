@@ -29,12 +29,12 @@ roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
-synapse-artifact = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
-synapse-application = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
-synapse-artifact-journal = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
-synapse-canonical = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
-synapse-core = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
-synapse-sqlite = { git = "https://github.com/howlrs/synapsegit", rev = "7ddb58b2ad585db3823431135ae33222d4704f9f" }
+synapse-artifact = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
+synapse-application = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
+synapse-artifact-journal = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
+synapse-canonical = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
+synapse-core = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
+synapse-sqlite = { git = "https://github.com/howlrs/synapsegit", rev = "5352aa9412dfdd2ad6cfcf3746770d015af11b49" }
 thiserror = "2.0.18"
 time = { version = "0.3.47", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
