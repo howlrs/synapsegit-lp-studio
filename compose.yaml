@@ -27,7 +27,7 @@ services:
       LP_STUDIO_OPENAI_MODEL:
     volumes:
       - type: volume
-        source: studio-state
+        source: studio-state-recovered
         target: /var/lib/synapsegit-lp-studio
     read_only: true
     tmpfs:
@@ -48,4 +48,6 @@ services:
     stop_grace_period: 20s
 
 volumes:
-  studio-state:
+  # Keep the former studio-state volume intact for forensic recovery. This
+  # fresh volume restores normal write access after a verified export.
+  studio-state-recovered:

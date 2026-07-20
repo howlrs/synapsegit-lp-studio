@@ -58,6 +58,8 @@
 ### Architectureと外部境界
 
 - [ADR一覧](adr/README.md): accepted M1 architecture/security/storage/provider decisions
+- [ADR-0014 provider configuration extension](adr/0014-session-provider-credentials-and-open-model-selection.md):
+  GUI session credential and open-text model selection
 - [SynapseGit contract lock](synapsegit-contract.lock.json): exact upstream Git
   revision、contract hash、claim boundary
 - [SynapseGit upstream feedback](upstream-issues/README.md): このintegrationから

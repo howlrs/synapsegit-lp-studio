@@ -4174,6 +4174,7 @@ fn quota_boundaries_fail_closed_and_expired_authority_is_swept() {
         Session {
             id: "ses_expired".into(),
             expires_at: 99,
+            openai_credential: None,
         },
     );
     store.sessions.insert(
@@ -4181,6 +4182,7 @@ fn quota_boundaries_fail_closed_and_expired_authority_is_swept() {
         Session {
             id: "ses_live".into(),
             expires_at: 100,
+            openai_credential: None,
         },
     );
     store.approvals.insert(

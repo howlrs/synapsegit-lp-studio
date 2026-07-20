@@ -11,7 +11,7 @@ mod static_syntax;
 mod storage;
 mod synapse_sidecar;
 
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, MatchedPath, Path, Request, State};
 use axum::http::header::{
@@ -50,8 +50,9 @@ use ai_attempt::{
     CompleteResult,
 };
 use ai_provider::{
-    OpenAiConfig, ProviderAttribution, ProviderBinding, ProviderDescriptor, ProviderError,
-    ProviderRequest, ProviderSelectionError, bind_provider, execute_provider, provider_descriptors,
+    OpenAiConfig, ProviderAttribution, ProviderBinding, ProviderCredential, ProviderDescriptor,
+    ProviderError, ProviderRequest, ProviderSelectionError, bind_provider, execute_provider,
+    provider_descriptors, valid_api_key,
 };
 use change_set::{
     AppliedChangeKind, AppliedChangeSet, ChangeSetError, ChangeSetV1, StaticCheck,
@@ -87,7 +88,7 @@ pub const SCHEMA_VERSION: &str = "1";
 const SESSION_TTL_SECONDS: i64 = 30 * 60;
 const APPROVAL_TTL_SECONDS: i64 = 5 * 60;
 const IMPORT_PREVIEW_TTL_SECONDS: i64 = 10 * 60;
-const MAX_INSTRUCTION_BYTES: usize = 2_000;
+const MAX_INSTRUCTION_BYTES: usize = 8_000;
 const MAX_RATIONALE_BYTES: usize = 2_000;
 const MAX_PREVIEW_HTML_BYTES: usize = 2 * 1024 * 1024;
 const TARGET_SCHEMA_VERSION: u8 = 1;
@@ -386,6 +387,12 @@ struct ImportPreviewRecord {
 struct Session {
     id: String,
     expires_at: i64,
+    openai_credential: Option<SessionProviderCredential>,
+}
+
+struct SessionProviderCredential {
+    binding_id: String,
+    credential: ProviderCredential,
 }
 
 struct Project {
@@ -1855,7 +1862,41 @@ struct CreateContextRequest {
     resolution_id: String,
     provider_id: String,
     requested_model: String,
+    credential_source_id: Option<String>,
     instruction: String,
+}
+
+/// Deliberately lacks Debug/Clone/Serialize: this is the only deserialized
+/// shape that contains a Creator-provided provider secret.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PutSessionOpenAiCredentialRequest {
+    schema_version: String,
+    expected_credential_binding_id: Option<String>,
+    api_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeleteSessionOpenAiCredentialRequest {
+    schema_version: String,
+    credential_binding_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCredentialStatusDto {
+    provider_id: &'static str,
+    credential_source_id: &'static str,
+    credential_binding_id: String,
+    status: &'static str,
+    expires_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCredentialPayload {
+    credential: Option<ProviderCredentialStatusDto>,
 }
 
 #[derive(Serialize)]
@@ -2861,6 +2902,12 @@ pub fn editor_router(state: StudioState) -> Router {
         ServeDir::new(&web_dist).not_found_service(ServeFile::new(web_dist.join("index.html")));
     let api = Router::new()
         .route("/bootstrap", get(bootstrap))
+        .route(
+            "/session/provider-credentials/openai",
+            get(get_session_openai_credential)
+                .put(put_session_openai_credential)
+                .delete(delete_session_openai_credential),
+        )
         .route("/projects", get(list_projects).post(create_project))
         .route(
             "/projects/{project_id}",
@@ -3007,6 +3054,7 @@ async fn bootstrap(
     let session = Session {
         id: opaque_id("ses"),
         expires_at,
+        openai_credential: None,
     };
     let mut store = state.store()?;
     sweep_expired_sessions(&mut store, now_unix());
@@ -3037,7 +3085,7 @@ async fn bootstrap(
             dispositions: ["adopted_unchanged", "rejected", "deferred"],
             single_proposal_per_project: true,
             import_available: state.0.storage.is_some() && state.0.config.import_root.is_some(),
-            ai_providers: provider_descriptors(state.0.config.openai.as_ref()),
+            ai_providers: provider_descriptors(state.0.config.openai.as_ref(), false),
             limits: StorageLimitsDto {
                 max_files: STORAGE_MAX_FILES,
                 max_total_bytes: STORAGE_MAX_TOTAL_BYTES,
@@ -3046,6 +3094,118 @@ async fn bootstrap(
                 max_depth: STORAGE_MAX_DEPTH,
             },
         },
+    })))
+}
+
+fn credential_status(
+    credential: &SessionProviderCredential,
+    expires_at: i64,
+) -> Result<ProviderCredentialStatusDto, ApiError> {
+    Ok(ProviderCredentialStatusDto {
+        provider_id: "openai",
+        credential_source_id: "editor_session",
+        credential_binding_id: credential.binding_id.clone(),
+        status: "configured_unverified",
+        expires_at: format_timestamp(expires_at)?,
+    })
+}
+
+async fn get_session_openai_credential(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+) -> Result<Json<Versioned<ProviderCredentialPayload>>, ApiError> {
+    let session_id = authorize_read(&state, &headers)?;
+    let store = state.store()?;
+    let session = store
+        .sessions
+        .values()
+        .find(|session| session.id == session_id)
+        .ok_or_else(ApiError::unauthorized)?;
+    let credential = session
+        .openai_credential
+        .as_ref()
+        .map(|credential| credential_status(credential, session.expires_at))
+        .transpose()?;
+    Ok(Json(Versioned::new(ProviderCredentialPayload {
+        credential,
+    })))
+}
+
+async fn put_session_openai_credential(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Versioned<ProviderCredentialPayload>>, ApiError> {
+    // Authenticate and validate the exact mutation origin before allocating or
+    // deserializing the secret-bearing request body.
+    let session_id = authorize_mutation(&state, &headers)?;
+    let bytes = to_bytes(body, 64 * 1024)
+        .await
+        .map_err(|_| ApiError::invalid())?;
+    let request: PutSessionOpenAiCredentialRequest =
+        serde_json::from_slice(&bytes).map_err(|_| ApiError::invalid())?;
+    require_schema(&request.schema_version)?;
+    if !valid_api_key(&request.api_key) {
+        return Err(ApiError::invalid());
+    }
+    let mut store = state.store()?;
+    let session = store
+        .sessions
+        .values_mut()
+        .find(|session| session.id == session_id)
+        .ok_or_else(ApiError::unauthorized)?;
+    match (
+        &session.openai_credential,
+        request.expected_credential_binding_id.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(current), Some(expected)) if current.binding_id == expected => {}
+        _ => return Err(ApiError::conflict("provider_credential_binding_stale")),
+    }
+    session.openai_credential = Some(SessionProviderCredential {
+        binding_id: opaque_id("pcb"),
+        credential: ProviderCredential::new(request.api_key),
+    });
+    let credential = credential_status(
+        session
+            .openai_credential
+            .as_ref()
+            .expect("inserted credential"),
+        session.expires_at,
+    )?;
+    Ok(Json(Versioned::new(ProviderCredentialPayload {
+        credential: Some(credential),
+    })))
+}
+
+async fn delete_session_openai_credential(
+    State(state): State<StudioState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Versioned<ProviderCredentialPayload>>, ApiError> {
+    let session_id = authorize_mutation(&state, &headers)?;
+    let bytes = to_bytes(body, 64 * 1024)
+        .await
+        .map_err(|_| ApiError::invalid())?;
+    let request: DeleteSessionOpenAiCredentialRequest =
+        serde_json::from_slice(&bytes).map_err(|_| ApiError::invalid())?;
+    require_schema(&request.schema_version)?;
+    let mut store = state.store()?;
+    let session = store
+        .sessions
+        .values_mut()
+        .find(|session| session.id == session_id)
+        .ok_or_else(ApiError::unauthorized)?;
+    if session
+        .openai_credential
+        .as_ref()
+        .is_none_or(|current| current.binding_id != request.credential_binding_id)
+    {
+        return Err(ApiError::conflict("provider_credential_binding_stale"));
+    }
+    session.openai_credential = None;
+    Ok(Json(Versioned::new(ProviderCredentialPayload {
+        credential: None,
     })))
 }
 
@@ -3421,13 +3581,31 @@ async fn create_context(
     headers: HeaderMap,
     payload: Result<Json<CreateContextRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Versioned<ContextPayload>>), ApiError> {
-    authorize_mutation(&state, &headers)?;
+    let session_id = authorize_mutation(&state, &headers)?;
     let Json(request) = valid_json(payload)?;
     require_schema(&request.schema_version)?;
     validate_intent(&request.attempt_id)?;
     validate_human_text(&request.instruction, MAX_INSTRUCTION_BYTES)?;
     let provider = bind_provider(
         state.0.config.openai.as_ref(),
+        {
+            let store = state.store()?;
+            let session = store
+                .sessions
+                .values()
+                .find(|session| session.id == session_id);
+            let requested_session =
+                request.credential_source_id.as_deref() == Some("editor_session");
+            if requested_session {
+                session
+                    .and_then(|session| session.openai_credential.as_ref())
+                    .map(|credential| ("editor_session".to_owned(), credential.binding_id.clone()))
+            } else {
+                None
+            }
+        }
+        .as_ref()
+        .map(|(source, binding)| (source.as_str(), binding.as_str())),
         &request.provider_id,
         &request.requested_model,
     )
@@ -3733,7 +3911,31 @@ async fn create_proposal(
             provider_context_sha256: context.sha256.clone(),
             canonical_context_json: context.canonical_json.clone(),
             binding: context.provider.clone(),
+            credential: if context.provider.provider_id == "openai" {
+                match context.provider.credential_source_id.as_str() {
+                    "editor_session" => store
+                        .sessions
+                        .values()
+                        .find(|session| session.id == session_id)
+                        .and_then(|session| session.openai_credential.as_ref())
+                        .filter(|credential| {
+                            credential.binding_id == context.provider.credential_binding_id
+                        })
+                        .map(|credential| {
+                            ProviderCredential::new(credential.credential.clone_secret())
+                        }),
+                    "server_configured" => {
+                        state.0.config.openai.as_ref().map(OpenAiConfig::credential)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            },
         };
+        if context.provider.external && provider_request.credential.is_none() {
+            return Err(ApiError::conflict("provider_credential_binding_stale"));
+        }
         let cancellation = claim_ai_attempt(
             &mut store.ai_attempts,
             &project_id,
@@ -3749,7 +3951,7 @@ async fn create_proposal(
         cancellation.generation(),
     );
 
-    let provider_execution = execute_provider(state.0.config.openai.as_ref(), &provider_request);
+    let provider_execution = execute_provider(&provider_request);
     tokio::pin!(provider_execution);
     let provider_result = tokio::select! {
         biased;

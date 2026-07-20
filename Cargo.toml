@@ -47,3 +47,4 @@ unicode-normalization = "0.1.25"
 unicase = "2.9.0"
 uuid = { version = "1.21.0", features = ["serde", "v4"] }
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+zeroize = "1.8.2"

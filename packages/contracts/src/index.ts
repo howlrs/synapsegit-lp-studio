@@ -59,6 +59,8 @@ export type ViewportPreset = "desktop" | "tablet" | "mobile" | "custom";
 export type ArtifactDisposition = "adopted_unchanged" | "rejected" | "deferred";
 
 export type AiProviderAvailability = "available" | "not_configured";
+export type AiProviderModelSelection = "closed" | "open";
+export type AiCredentialSourceId = "editor_session" | "server_configured";
 
 export interface AiProviderModelDescriptor {
   id: string;
@@ -75,6 +77,21 @@ export interface AiProviderDescriptor {
   trainingPolicy: string;
   policyNotice: string;
   models: AiProviderModelDescriptor[];
+  modelSelection: AiProviderModelSelection;
+  credentialSources: AiCredentialSourceId[];
+}
+
+export interface ProviderCredentialStatus {
+  providerId: "openai";
+  credentialSourceId: "editor_session";
+  credentialBindingId: string;
+  status: "configured_unverified";
+  expiresAt: string;
+}
+
+export interface ProviderCredentialResponse {
+  schemaVersion: SchemaVersion;
+  credential: ProviderCredentialStatus | null;
 }
 
 export interface BootstrapResponse {
@@ -409,6 +426,7 @@ export interface CreateContextRequest {
   providerId: string;
   requestedModel: string;
   instruction: string;
+  credentialSourceId?: AiCredentialSourceId;
 }
 
 export type ContextManifestPurpose = "entrypoint" | "dependency";
@@ -440,6 +458,8 @@ export interface ContextProviderBindingV1 {
   adapterVersion: string;
   requestedModel: string;
   external: boolean;
+  credentialSourceId: string;
+  credentialBindingId: string;
 }
 
 export interface ContextReview {
@@ -1905,8 +1925,16 @@ export const isAiProviderDescriptor = (
       "trainingPolicy",
       "policyNotice",
       "models",
+      "modelSelection",
+      "credentialSources",
     ]) ||
-    !isBoundedExactArray(value.models, 0, 32, isAiProviderModelDescriptor)
+    !isBoundedExactArray(value.models, 0, 32, isAiProviderModelDescriptor) ||
+    !isBoundedExactArray(
+      value.credentialSources,
+      0,
+      2,
+      (source) => source === "editor_session" || source === "server_configured",
+    )
   ) {
     return false;
   }
@@ -1924,10 +1952,34 @@ export const isAiProviderDescriptor = (
     isBoundedString(value.dataRetentionPolicy, 1, 256) &&
     isBoundedString(value.trainingPolicy, 1, 256) &&
     isBoundedString(value.policyNotice, 1, 1024) &&
-    (value.availability !== "available" || value.models.length > 0) &&
+    (value.availability !== "available" ||
+      value.modelSelection === "open" ||
+      value.models.length > 0) &&
+    (value.modelSelection === "closed" || value.modelSelection === "open") &&
     new Set(value.models.map((model) => model.id)).size === value.models.length
   );
 };
+
+export const isProviderCredentialResponse = (
+  value: unknown,
+): value is ProviderCredentialResponse =>
+  isRecord(value) &&
+  hasExactKeys(value, ["schemaVersion", "credential"]) &&
+  hasVersion(value) &&
+  (value.credential === null ||
+    (isRecord(value.credential) &&
+      hasExactKeys(value.credential, [
+        "providerId",
+        "credentialSourceId",
+        "credentialBindingId",
+        "status",
+        "expiresAt",
+      ]) &&
+      value.credential.providerId === "openai" &&
+      value.credential.credentialSourceId === "editor_session" &&
+      value.credential.status === "configured_unverified" &&
+      isBoundedString(value.credential.credentialBindingId, 1, 128) &&
+      isBoundedString(value.credential.expiresAt, 1, 64)));
 
 export const isBootstrapResponse = (
   value: unknown,
@@ -2147,6 +2199,9 @@ export const isCreateContextRequest = (
   isBoundedId(value.attemptId) &&
   isBoundedString(value.providerId, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
   isBoundedString(value.requestedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  (!Object.hasOwn(value, "credentialSourceId") ||
+    value.credentialSourceId === "editor_session" ||
+    value.credentialSourceId === "server_configured") &&
   isBoundedUtf8String(value.instruction, 1, 2_000);
 
 export const isContextManifestEntryV1 = (
@@ -2227,12 +2282,20 @@ const isContextProviderBindingV1 = (
   value: unknown,
 ): value is ContextProviderBindingV1 =>
   isRecord(value) &&
-  hasExactKeys(value, [
+  (hasExactKeys(value, [
     "providerId",
     "adapterVersion",
     "requestedModel",
     "external",
-  ]) &&
+    "credentialSourceId",
+    "credentialBindingId",
+  ]) ||
+    hasExactKeys(value, [
+      "providerId",
+      "adapterVersion",
+      "requestedModel",
+      "external",
+    ])) &&
   isBoundedString(value.providerId, 1, AI_CONTRACT_LIMITS.providerIdLength) &&
   isBoundedString(
     value.adapterVersion,
@@ -2240,6 +2303,10 @@ const isContextProviderBindingV1 = (
     AI_CONTRACT_LIMITS.adapterVersionLength,
   ) &&
   isBoundedString(value.requestedModel, 1, AI_CONTRACT_LIMITS.modelIdLength) &&
+  (!Object.hasOwn(value, "credentialSourceId") ||
+    isBoundedString(value.credentialSourceId, 1, 64)) &&
+  (!Object.hasOwn(value, "credentialBindingId") ||
+    isBoundedString(value.credentialBindingId, 1, 128)) &&
   typeof value.external === "boolean";
 
 export const isContextResponse = (value: unknown): value is ContextResponse => {

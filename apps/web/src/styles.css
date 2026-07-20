@@ -513,6 +513,36 @@ body:focus-visible,
   min-height: 42px;
   padding: 0.55rem 1rem;
 }
+.ai-processing-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(5, 7, 9, 0.82);
+  backdrop-filter: blur(3px);
+}
+.ai-processing-card {
+  display: grid;
+  justify-items: center;
+  width: min(100%, 420px);
+  gap: 0.75rem;
+  padding: 2rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: center;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+.ai-processing-card h2,
+.ai-processing-card p {
+  margin: 0;
+}
+.ai-processing-card p {
+  color: var(--muted);
+}
 .global-error {
   color: #fff;
   background: #65262c;
@@ -944,7 +974,9 @@ kbd {
   font-size: 0.7rem;
   font-weight: 700;
 }
-.provider-fields select {
+.provider-fields select,
+.provider-fields input,
+.provider-policy input {
   width: 100%;
   min-width: 0;
   min-height: 38px;
@@ -955,10 +987,17 @@ kbd {
   background: #0c0f12;
   font: inherit;
 }
-.provider-fields select:disabled {
+.provider-fields select:disabled,
+.provider-fields input:disabled,
+.provider-policy input:disabled {
   color: var(--quiet);
   cursor: not-allowed;
   opacity: 0.7;
+}
+.credential-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
 }
 .provider-disclosure {
   margin: 0 0 0.8rem;
@@ -1525,24 +1564,14 @@ kbd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.ai-attempt-progress {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 0.75rem;
-  align-items: center;
-  padding: 0.75rem;
-  border: 1px solid var(--lime);
+.preview-review-notice {
+  margin: 0.7rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--amber);
   border-radius: 7px;
-  color: var(--text);
-  background: rgba(184, 242, 73, 0.08);
-}
-.ai-attempt-progress > div {
-  display: grid;
-  gap: 0.15rem;
-}
-.ai-attempt-progress span:not(.spinner) {
-  color: var(--muted);
-  font-size: 0.72rem;
+  color: #e4cfa8;
+  background: rgba(255, 196, 95, 0.08);
+  font-size: 0.82rem;
 }
 .dialog-actions {
   display: flex;

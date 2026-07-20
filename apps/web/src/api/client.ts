@@ -12,6 +12,7 @@ import {
   isPublicationResponse,
   isProjectResponse,
   isProjectsResponse,
+  isProviderCredentialResponse,
   isProposalResponse,
   isRecoveryResponse,
   isRetentionCleanupResponse,
@@ -29,6 +30,7 @@ import {
   type ImportPreview,
   type PublicationDraft,
   type Project,
+  type ProviderCredentialStatus,
   type Proposal,
   type RecoveryPoint,
   type RetentionCleanupRequest,
@@ -100,7 +102,14 @@ export interface AuthenticatedApi {
     providerId: string,
     requestedModel: string,
     instruction: string,
+    credentialSourceId?: "editor_session" | "server_configured",
   ): Promise<ContextReview>;
+  getOpenAiCredential(): Promise<ProviderCredentialStatus | null>;
+  configureOpenAiCredential(
+    apiKey: string,
+    expectedCredentialBindingId: string | null,
+  ): Promise<ProviderCredentialStatus>;
+  clearOpenAiCredential(credentialBindingId: string): Promise<void>;
   createProposal(
     projectId: string,
     contextId: string,
@@ -317,6 +326,23 @@ export const bootstrapApi = async (
       label,
     );
 
+  const putJson = <T>(
+    path: string,
+    body: object,
+    guard: Guard<T>,
+    label: string,
+  ): Promise<T> =>
+    requestJson(
+      path,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      guard,
+      label,
+    );
+
   const downloadArtifact = async (
     downloadUrl: string,
     collection: "exports" | "publications" | "recovery",
@@ -451,6 +477,7 @@ export const bootstrapApi = async (
       providerId,
       requestedModel,
       instruction,
+      credentialSourceId,
     ) {
       const result = await postJson(
         `/api/v1/projects/${encodeURIComponent(projectId)}/contexts`,
@@ -462,12 +489,54 @@ export const bootstrapApi = async (
           attemptId,
           providerId,
           requestedModel,
+          ...(credentialSourceId === undefined ? {} : { credentialSourceId }),
           instruction,
         },
         isContextResponse,
         "送信コンテキスト",
       );
       return result.context;
+    },
+
+    async getOpenAiCredential() {
+      const result = await requestJson(
+        "/api/v1/session/provider-credentials/openai",
+        { method: "GET" },
+        isProviderCredentialResponse,
+        "OpenAI資格情報",
+      );
+      return result.credential;
+    },
+
+    async configureOpenAiCredential(apiKey, expectedCredentialBindingId) {
+      const result = await putJson(
+        "/api/v1/session/provider-credentials/openai",
+        { schemaVersion: SCHEMA_VERSION, expectedCredentialBindingId, apiKey },
+        isProviderCredentialResponse,
+        "OpenAI資格情報",
+      );
+      if (result.credential === null)
+        throw new ApiError("資格情報の登録結果が不正です。", {
+          code: "invalid_response_schema",
+          retryable: false,
+        });
+      return result.credential;
+    },
+
+    async clearOpenAiCredential(credentialBindingId) {
+      await requestJson(
+        "/api/v1/session/provider-credentials/openai",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            schemaVersion: SCHEMA_VERSION,
+            credentialBindingId,
+          }),
+        },
+        isProviderCredentialResponse,
+        "OpenAI資格情報の削除",
+      );
     },
 
     async createProposal(projectId, contextId, contextSha256) {

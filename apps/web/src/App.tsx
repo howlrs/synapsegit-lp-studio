@@ -22,6 +22,7 @@ import type {
   PreviewSource,
   PreviewStructureNode,
   Project,
+  ProviderCredentialStatus,
   Proposal,
   RecoveryPoint,
   RetentionCleanupRequest,
@@ -830,6 +831,11 @@ function PreviewPane({
   const [previewGeneration, setPreviewGeneration] = useState(0);
   const activeSource =
     source === "proposed" && proposal === null ? "accepted" : source;
+  // A pending proposal is reviewed as a whole. Do not keep the iframe in
+  // selection mode: a click on a CTA inside the rendered LP must not look like
+  // a Studio Decision or start a new Target request.
+  const selectionAvailable = proposal === null && !disabled;
+  const effectiveMode: PreviewMode = selectionAvailable ? mode : "interact";
   const previewUrl =
     activeSource === "proposed" && proposal !== null
       ? proposal.previewUrl
@@ -888,7 +894,7 @@ function PreviewPane({
         expectedSource: frameWindow,
       });
       if (targetDraft !== null) {
-        onTarget(targetDraft.target);
+        if (selectionAvailable) onTarget(targetDraft.target);
         return;
       }
       const structure = readPreviewStructure(event, {
@@ -907,7 +913,7 @@ function PreviewPane({
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
-  }, [bridgeBinding, onStructure, onTarget]);
+  }, [bridgeBinding, onStructure, onTarget, selectionAvailable]);
 
   useEffect(() => {
     onStructure([]);
@@ -917,11 +923,22 @@ function PreviewPane({
     if (!previewUrlAllowed) return;
     const frameWindow = iframeRef.current?.contentWindow;
     if (frameWindow === null || frameWindow === undefined) return;
-    postPreviewMode(frameWindow, bridgeBinding, mode, targetKind, previewScale);
+    postPreviewMode(
+      frameWindow,
+      bridgeBinding,
+      effectiveMode,
+      targetKind,
+      previewScale,
+    );
     postRequestStructure(frameWindow, bridgeBinding);
   };
 
-  useEffect(synchronizeMode, [bridgeBinding, mode, previewScale, targetKind]);
+  useEffect(synchronizeMode, [
+    bridgeBinding,
+    effectiveMode,
+    previewScale,
+    targetKind,
+  ]);
 
   useEffect(() => {
     if (
@@ -998,8 +1015,8 @@ function PreviewPane({
         >
           <button
             type="button"
-            disabled={disabled}
-            aria-pressed={mode === "select"}
+            disabled={!selectionAvailable}
+            aria-pressed={effectiveMode === "select"}
             onClick={() => onMode("select")}
           >
             選択モード
@@ -1007,7 +1024,7 @@ function PreviewPane({
           <button
             type="button"
             disabled={disabled}
-            aria-pressed={mode === "interact"}
+            aria-pressed={effectiveMode === "interact"}
             onClick={() => onMode("interact")}
           >
             操作モード
@@ -1095,6 +1112,12 @@ function PreviewPane({
         </div>
       ) : null}
 
+      {proposal !== null ? (
+        <p className="preview-review-notice" role="status">
+          LP内のボタンはプレビュー用コンテンツです。変更案をAcceptedへ反映するには、下部の「変更を採用」を使用してください。
+        </p>
+      ) : null}
+
       {previewPaused ? (
         <div className="canvas-shell preview-paused" role="status">
           <div className="error-card">
@@ -1156,28 +1179,19 @@ function PreviewPane({
 interface ContextDialogProps {
   context: ContextReview;
   busy: boolean;
-  generating: boolean;
-  elapsedSeconds: number;
-  cancelPending: boolean;
   returnFocus: React.RefObject<HTMLButtonElement | null>;
   onClose: () => void;
   onConfirm: () => void;
-  onCancel: () => void;
 }
 
 function ContextDialog({
   context,
   busy,
-  generating,
-  elapsedSeconds,
-  cancelPending,
   returnFocus,
   onClose,
   onConfirm,
-  onCancel,
 }: ContextDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const redactedSiteContent = context.manifest.entries.some(
     (entry) => entry.redacted,
@@ -1190,10 +1204,6 @@ function ContextDialog({
     returnFocusRef: returnFocus,
     onClose,
   });
-
-  useEffect(() => {
-    if (generating) cancelRef.current?.focus({ preventScroll: true });
-  }, [generating]);
 
   return (
     <div className="dialog-backdrop" data-modal-root>
@@ -1289,30 +1299,6 @@ function ContextDialog({
         <pre className="context-code" tabIndex={0}>
           <code>{context.canonicalJson}</code>
         </pre>
-        {generating ? (
-          <div
-            className="ai-attempt-progress"
-            role="status"
-            aria-live="polite"
-            aria-label="AI処理状態"
-          >
-            <span className="spinner" aria-hidden="true" />
-            <div>
-              <strong>AI処理フェーズ</strong>
-              <span>Provider応答待機・ChangeSet検証</span>
-              <span>開始から {elapsedSeconds} 秒</span>
-            </div>
-            <button
-              ref={cancelRef}
-              type="button"
-              className="button button-quiet"
-              disabled={cancelPending}
-              onClick={onCancel}
-            >
-              {cancelPending ? "AI処理を取り消しています" : "AI処理を取り消す"}
-            </button>
-          </div>
-        ) : null}
         <div className="dialog-actions">
           <button
             type="button"
@@ -1336,6 +1322,56 @@ function ContextDialog({
   );
 }
 
+function AiProcessingDialog({
+  elapsedSeconds,
+  cancelPending,
+  returnFocus,
+  onCancel,
+}: {
+  elapsedSeconds: number;
+  cancelPending: boolean;
+  returnFocus: React.RefObject<HTMLButtonElement | null>;
+  onCancel: () => void;
+}) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useModalDialog({
+    busy: true,
+    dialogRef,
+    initialFocusRef: cancelRef,
+    returnFocusRef: returnFocus,
+    onClose: () => undefined,
+  });
+
+  return (
+    <div className="ai-processing-overlay" data-modal-root>
+      <section
+        ref={dialogRef}
+        className="ai-processing-card"
+        role="dialog"
+        tabIndex={-1}
+        aria-modal="true"
+        aria-labelledby="ai-processing-title"
+      >
+        <span className="spinner" aria-hidden="true" />
+        <h2 id="ai-processing-title">AI処理フェーズ</h2>
+        <p>Provider応答待機・ChangeSet検証</p>
+        <p>開始から {elapsedSeconds} 秒</p>
+        <button
+          ref={cancelRef}
+          type="button"
+          className="button button-quiet"
+          disabled={cancelPending}
+          onClick={onCancel}
+        >
+          {cancelPending ? "AI処理を取り消しています" : "AI処理を取り消す"}
+        </button>
+      </section>
+    </div>
+  );
+}
+
 interface TargetComposerProps {
   project: Project;
   target: TargetSelection | null;
@@ -1343,11 +1379,14 @@ interface TargetComposerProps {
   providers: AiProviderDescriptor[];
   providerId: string;
   requestedModel: string;
+  openAiCredential: ProviderCredentialStatus | null;
   disabled: boolean;
   reviewButtonRef: React.RefObject<HTMLButtonElement | null>;
   onPrompt: (value: string) => void;
   onProvider: (providerId: string) => void;
   onModel: (model: string) => void;
+  onConfigureOpenAiCredential: (apiKey: string) => void;
+  onClearOpenAiCredential: () => void;
   onReviewContext: () => void;
 }
 
@@ -1358,13 +1397,17 @@ function TargetComposer({
   providers,
   providerId,
   requestedModel,
+  openAiCredential,
   disabled,
   reviewButtonRef,
   onPrompt,
   onProvider,
   onModel,
+  onConfigureOpenAiCredential,
+  onClearOpenAiCredential,
   onReviewContext,
 }: TargetComposerProps) {
+  const [apiKey, setApiKey] = useState("");
   const instructionBytes = utf8Bytes(prompt);
   const capturedTarget = target?.target ?? null;
   const resolution = target?.resolution ?? null;
@@ -1490,19 +1533,71 @@ function TargetComposer({
             ))}
           </select>
           <label htmlFor="ai-model">Model</label>
-          <select
-            id="ai-model"
-            value={requestedModel}
-            disabled={disabled || provider?.availability !== "available"}
-            onChange={(event) => onModel(event.currentTarget.value)}
-          >
-            {(provider?.models ?? []).map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.label}
-              </option>
-            ))}
-          </select>
+          {provider?.modelSelection === "open" ? (
+            <input
+              id="ai-model"
+              value={requestedModel}
+              disabled={disabled || provider?.availability !== "available"}
+              maxLength={256}
+              placeholder="例: gpt-5.4-mini"
+              onChange={(event) => onModel(event.currentTarget.value)}
+            />
+          ) : (
+            <select
+              id="ai-model"
+              value={requestedModel}
+              disabled={disabled || provider?.availability !== "available"}
+              onChange={(event) => onModel(event.currentTarget.value)}
+            >
+              {(provider?.models ?? []).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
+        {provider?.id === "openai" ? (
+          <div className="provider-policy">
+            <label htmlFor="openai-api-key">
+              OpenAI API key（このセッションのみ）
+            </label>
+            <input
+              id="openai-api-key"
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              disabled={disabled}
+              onChange={(event) => setApiKey(event.currentTarget.value)}
+            />
+            <div className="credential-actions">
+              <button
+                type="button"
+                disabled={disabled || apiKey.length === 0}
+                onClick={() => {
+                  onConfigureOpenAiCredential(apiKey);
+                  setApiKey("");
+                }}
+              >
+                このセッションで使用
+              </button>
+              {openAiCredential !== null ? (
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={onClearOpenAiCredential}
+                >
+                  キーを消去
+                </button>
+              ) : null}
+            </div>
+            <p>
+              {openAiCredential === null
+                ? "キーは未設定です。"
+                : "このセッションで入力したキーが設定済みです。"}
+            </p>
+          </div>
+        ) : null}
         {provider?.external === true ? (
           <p className="provider-disclosure">
             選択したcontextは外部providerへ送信されます。送信前にexact
@@ -1522,7 +1617,7 @@ function TargetComposer({
         <textarea
           id="ai-instruction"
           value={prompt}
-          maxLength={2000}
+          maxLength={8000}
           rows={6}
           placeholder="例：見出しを、より自信が伝わる表現にしてください"
           disabled={disabled}
@@ -1533,11 +1628,16 @@ function TargetComposer({
             {provider?.id ?? "provider未選択"} ·{" "}
             {requestedModel || "model未選択"}
           </span>
-          <span>{instructionBytes} / 2000 UTF-8 bytes</span>
+          <span>{instructionBytes} / 8000 UTF-8 bytes</span>
         </div>
         <p className="composer-boundary">
           変更はまずProposalとして作成されます。Accepted
           revisionは自動変更されません。
+        </p>
+        <p className="composer-boundary">
+          通常は実公開LPとして生成します。Studioの紹介LPだけ、要望の先頭に
+          <code>[LP用途: Studio紹介LP]</code> を付けてください。実公開LPには
+          「変更を採用」「却下」などのStudio操作UIを生成しません。
         </p>
         <button
           ref={reviewButtonRef}
@@ -1548,9 +1648,12 @@ function TargetComposer({
             capturedTarget === null ||
             resolution?.status !== "resolved" ||
             prompt.trim().length === 0 ||
-            instructionBytes > 2000 ||
+            instructionBytes > 8000 ||
             provider?.availability !== "available" ||
-            !provider.models.some((model) => model.id === requestedModel) ||
+            (provider.modelSelection === "closed" &&
+              !provider.models.some((model) => model.id === requestedModel)) ||
+            (provider.modelSelection === "open" &&
+              requestedModel.length === 0) ||
             capturedTarget.captureRevisionId !== project.revisionId ||
             resolution.resolvedRevisionId !== project.revisionId
           }
@@ -2856,6 +2959,8 @@ function Studio({ session }: StudioProps) {
   const [requestedModel, setRequestedModel] = useState(
     initialProvider?.models[0]?.id ?? "",
   );
+  const [openAiCredential, setOpenAiCredential] =
+    useState<ProviderCredentialStatus | null>(null);
   const [rationale, setRationale] = useState("");
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [targetKind, setTargetKind] = useState<TargetKind>("element");
@@ -2870,6 +2975,7 @@ function Studio({ session }: StudioProps) {
   const proposalRunSequence = useRef(0);
   const proposalStartedAt = useRef<number | null>(null);
   const proposalCancelPendingRef = useRef(false);
+  const decisionInProgressRef = useRef(false);
   const reviewButtonRef = useRef<HTMLButtonElement>(null);
   const importButtonRef = useRef<HTMLButtonElement>(null);
   const exportButtonRef = useRef<HTMLButtonElement>(null);
@@ -3098,7 +3204,12 @@ function Studio({ session }: StudioProps) {
 
   const selectTarget = useCallback(
     (targetDraft: TargetV1) => {
-      if (state.project === null || state.operation !== null) return;
+      if (
+        state.project === null ||
+        state.operation !== null ||
+        decisionInProgressRef.current
+      )
+        return;
       const project = state.project;
       const proposal = state.proposal;
       const expectedCaptureSource =
@@ -3230,7 +3341,9 @@ function Studio({ session }: StudioProps) {
     if (
       instruction.length === 0 ||
       provider === undefined ||
-      !provider.models.some((model) => model.id === requestedModel) ||
+      (provider.modelSelection === "closed" &&
+        !provider.models.some((model) => model.id === requestedModel)) ||
+      (provider.modelSelection === "open" && requestedModel.length === 0) ||
       selection.resolution.status !== "resolved" ||
       selection.resolution.resolvedRevisionId !== project.revisionId
     ) {
@@ -3248,6 +3361,11 @@ function Studio({ session }: StudioProps) {
         provider.id,
         requestedModel,
         instruction,
+        provider.id === "openai"
+          ? openAiCredential !== null
+            ? "editor_session"
+            : "server_configured"
+          : undefined,
       );
       if (
         context.revisionId !== project.revisionId ||
@@ -3502,71 +3620,83 @@ function Studio({ session }: StudioProps) {
       return;
     const project = state.project;
     const proposal = state.proposal;
+    // A preview iframe can deliver a target draft while its snapshot is being
+    // replaced after a Decision. It must never start a new target operation
+    // during the Decision/Accepted refresh sequence.
+    decisionInProgressRef.current = true;
+    targetRequestId.current += 1;
     void run(async () => {
-      dispatch({ type: "OPERATION_STARTED", operation: "committing_decision" });
-      const intentId = crypto.randomUUID();
-      let approval: Awaited<ReturnType<AuthenticatedApi["approveDecision"]>>;
       try {
-        approval = await session.api.approveDecision({
-          reviewId: proposal.reviewId,
-          proposalId: proposal.id,
-          expectedRevisionId: project.revisionId,
-          disposition,
-          intentId,
+        dispatch({
+          type: "OPERATION_STARTED",
+          operation: "committing_decision",
         });
-      } catch (error) {
-        if (error instanceof ApiError) throw error;
-        throw new ApiError(
-          error instanceof Error && error.message.trim().length > 0
-            ? error.message
-            : "一回限りの承認を取得できませんでした。",
-          {
-            code: "approval_failed_before_decision",
-            retryable: true,
-            detail: { acceptedState: "unchanged", recoveryAction: "retry" },
-          },
-        );
-      }
-      try {
-        const response = await session.api.decide({
-          reviewId: proposal.reviewId,
-          approvalToken: approval.token,
-          proposalId: proposal.id,
-          expectedRevisionId: project.revisionId,
-          disposition,
-          intentId,
-          ...(rationale.trim().length === 0
-            ? {}
-            : { rationale: rationale.trim() }),
-        });
-        if (
-          response.decision.reviewId !== proposal.reviewId ||
-          response.decision.proposalId !== proposal.id ||
-          response.decision.disposition !== disposition
-        ) {
-          throw new ApiError("Human Decisionのbindingが一致しません。", {
-            code: "decision_binding_mismatch",
-            retryable: false,
+        const intentId = crypto.randomUUID();
+        let approval: Awaited<ReturnType<AuthenticatedApi["approveDecision"]>>;
+        try {
+          approval = await session.api.approveDecision({
+            reviewId: proposal.reviewId,
+            proposalId: proposal.id,
+            expectedRevisionId: project.revisionId,
+            disposition,
+            intentId,
           });
+        } catch (error) {
+          if (error instanceof ApiError) throw error;
+          throw new ApiError(
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "一回限りの承認を取得できませんでした。",
+            {
+              code: "approval_failed_before_decision",
+              retryable: true,
+              detail: { acceptedState: "unchanged", recoveryAction: "retry" },
+            },
+          );
         }
-      } catch (error) {
-        throw new DecisionOutcomeError("decision", disposition, error);
+        try {
+          const response = await session.api.decide({
+            reviewId: proposal.reviewId,
+            approvalToken: approval.token,
+            proposalId: proposal.id,
+            expectedRevisionId: project.revisionId,
+            disposition,
+            intentId,
+            ...(rationale.trim().length === 0
+              ? {}
+              : { rationale: rationale.trim() }),
+          });
+          if (
+            response.decision.reviewId !== proposal.reviewId ||
+            response.decision.proposalId !== proposal.id ||
+            response.decision.disposition !== disposition
+          ) {
+            throw new ApiError("Human Decisionのbindingが一致しません。", {
+              code: "decision_binding_mismatch",
+              retryable: false,
+            });
+          }
+        } catch (error) {
+          throw new DecisionOutcomeError("decision", disposition, error);
+        }
+        dispatch({
+          type: "DECISION_COMMITTED",
+          disposition,
+        });
+        let refreshed: Project;
+        try {
+          refreshed = await session.api.getProject(project.id);
+        } catch (error) {
+          throw new DecisionOutcomeError("refresh", disposition, error);
+        }
+        dispatch({
+          type: "PROJECT_REFRESHED",
+          project: refreshed,
+          afterDecision: true,
+        });
+      } finally {
+        decisionInProgressRef.current = false;
       }
-      dispatch({
-        type: "DECISION_COMMITTED",
-        disposition,
-      });
-      let refreshed: Project;
-      try {
-        refreshed = await session.api.getProject(project.id);
-      } catch (error) {
-        throw new DecisionOutcomeError("refresh", disposition, error);
-      }
-      dispatch({
-        type: "PROJECT_REFRESHED",
-        project: refreshed,
-        afterDecision: true,
-      });
     });
   };
 
@@ -3954,6 +4084,15 @@ function Studio({ session }: StudioProps) {
         </div>
       ) : null}
 
+      {state.operation === "generating_proposal" ? (
+        <AiProcessingDialog
+          elapsedSeconds={proposalElapsedSeconds}
+          cancelPending={proposalCancelPending}
+          returnFocus={reviewButtonRef}
+          onCancel={cancelProposalAttempt}
+        />
+      ) : null}
+
       {state.proposal === null ? (
         <ReviewRecoveryPanel
           project={state.project}
@@ -4013,6 +4152,7 @@ function Studio({ session }: StudioProps) {
           providers={providers}
           providerId={providerId}
           requestedModel={requestedModel}
+          openAiCredential={openAiCredential}
           disabled={
             busy || state.proposal !== null || state.contextReview !== null
           }
@@ -4023,9 +4163,40 @@ function Studio({ session }: StudioProps) {
               (provider) => provider.id === nextProviderId,
             );
             setProviderId(nextProviderId);
-            setRequestedModel(next?.models[0]?.id ?? "");
+            setRequestedModel(
+              next?.models[0]?.id ??
+                (next?.id === "openai" ? "gpt-5.4-mini" : ""),
+            );
           }}
           onModel={setRequestedModel}
+          onConfigureOpenAiCredential={(apiKey) => {
+            void session.api
+              .configureOpenAiCredential(
+                apiKey,
+                openAiCredential?.credentialBindingId ?? null,
+              )
+              .then(setOpenAiCredential)
+              .catch((error) =>
+                dispatch({
+                  type: "FAILED",
+                  message: errorMessage(error),
+                  ...errorDiagnostic(error),
+                }),
+              );
+          }}
+          onClearOpenAiCredential={() => {
+            if (openAiCredential !== null)
+              void session.api
+                .clearOpenAiCredential(openAiCredential.credentialBindingId)
+                .then(() => setOpenAiCredential(null))
+                .catch((error) =>
+                  dispatch({
+                    type: "FAILED",
+                    message: errorMessage(error),
+                    ...errorDiagnostic(error),
+                  }),
+                );
+          }}
           onReviewContext={reviewContext}
         />
       </div>
@@ -4077,17 +4248,14 @@ function Studio({ session }: StudioProps) {
         />
       ) : null}
 
-      {state.contextReview !== null ? (
+      {state.contextReview !== null &&
+      state.operation !== "generating_proposal" ? (
         <ContextDialog
           context={state.contextReview}
           busy={busy}
-          generating={state.operation === "generating_proposal"}
-          elapsedSeconds={proposalElapsedSeconds}
-          cancelPending={proposalCancelPending}
           returnFocus={reviewButtonRef}
           onClose={() => dispatch({ type: "CONTEXT_CLOSED" })}
           onConfirm={createProposal}
-          onCancel={cancelProposalAttempt}
         />
       ) : null}
 

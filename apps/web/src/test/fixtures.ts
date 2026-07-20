@@ -53,6 +53,8 @@ export const bootstrapFixture = (
         policyNotice:
           "No external provider is used by this deterministic local adapter.",
         models: [{ id: "deterministic-v1", label: "Deterministic v1" }],
+        modelSelection: "closed",
+        credentialSources: [],
       },
       {
         id: "openai",
@@ -65,6 +67,8 @@ export const bootstrapFixture = (
         policyNotice:
           "Review the provider's current account and data-control terms before enabling this external adapter.",
         models: [],
+        modelSelection: "open",
+        credentialSources: [],
       },
     ],
     limits: {
@@ -207,6 +211,8 @@ export const contextResponseFixture: ContextResponse = {
       adapterVersion: "fake-change-set/1",
       requestedModel: "deterministic-v1",
       external: false,
+      credentialSourceId: "not_applicable",
+      credentialBindingId: "not_applicable",
     },
     manifest: {
       entries: [

@@ -194,7 +194,9 @@
         "dataRetentionPolicy",
         "trainingPolicy",
         "policyNotice",
-        "models"
+        "models",
+        "modelSelection",
+        "credentialSources"
       ],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -225,6 +227,13 @@
           "type": "array",
           "maxItems": 32,
           "items": { "$ref": "#/$defs/aiProviderModelDescriptor" }
+        },
+        "modelSelection": { "enum": ["closed", "open"] },
+        "credentialSources": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["editor_session", "server_configured"] }
         }
       },
       "allOf": [
@@ -1067,11 +1076,14 @@
           "minLength": 1,
           "maxLength": 256
         },
+        "credentialSourceId": {
+          "enum": ["editor_session", "server_configured"]
+        },
         "instruction": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000,
-          "x-maxUtf8Bytes": 2000
+          "maxLength": 8000,
+          "x-maxUtf8Bytes": 8000
         }
       }
     },
@@ -1100,7 +1112,17 @@
           "minLength": 1,
           "maxLength": 256
         },
-        "external": { "type": "boolean" }
+        "external": { "type": "boolean" },
+        "credentialSourceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "credentialBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
       }
     },
     "contextManifestEntryV1": {
@@ -1226,8 +1248,8 @@
         "instruction": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2000,
-          "x-maxUtf8Bytes": 2000
+          "maxLength": 8000,
+          "x-maxUtf8Bytes": 8000
         },
         "canonicalJson": { "type": "string" },
         "sha256": { "$ref": "#/$defs/sha256" }
@@ -1657,7 +1679,7 @@
         "instruction": {
           "type": "string",
           "minLength": 1,
-          "x-maxUtf8Bytes": 2000
+          "x-maxUtf8Bytes": 8000
         },
         "derivedFromProposalId": {
           "anyOf": [{ "$ref": "#/$defs/targetIdV1" }, { "type": "null" }]

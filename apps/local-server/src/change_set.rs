@@ -865,6 +865,11 @@ fn active_behavior_warnings(
     let proposed = behavior_features(proposed);
     proposed
         .difference(&before)
+        // A passive external reference (for example a stylesheet, font, image,
+        // or ordinary hyperlink) is normal published-LP content. It remains
+        // visible in the generated diff, but must not be treated as executable
+        // behavior that prevents an explicit Human Decision.
+        .filter(|feature| feature.code != "new_external_origin")
         .map(|feature| BlockingWarning {
             code: feature.code.clone(),
             path: feature.path.clone(),
@@ -2335,7 +2340,6 @@ mod tests {
                 "new_analytics",
                 "new_cookie_behavior",
                 "new_download",
-                "new_external_origin",
                 "new_form_action",
                 "new_iframe",
                 "new_script"
@@ -2381,7 +2385,6 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
-        assert!(warnings.contains(&("new_external_origin", "index.html", "//tracker.example")));
         assert!(warnings.contains(&("new_inline_event_handler", "index.html", "button[onclick]")));
         assert_eq!(
             applied.checks.last().unwrap().status,
@@ -2412,7 +2415,6 @@ mod tests {
             .collect::<BTreeSet<_>>();
         for expected in [
             "new_download",
-            "new_external_origin",
             "new_form_action",
             "new_inline_event_handler",
         ] {
@@ -2516,18 +2518,13 @@ mod tests {
             .iter()
             .map(|warning| warning.code.as_str())
             .collect::<BTreeSet<_>>();
-        for expected in [
-            "new_download",
-            "new_external_origin",
-            "new_form_action",
-            "new_iframe",
-        ] {
+        for expected in ["new_download", "new_form_action", "new_iframe"] {
             assert!(codes.contains(expected), "missing warning {expected}");
         }
     }
 
     #[test]
-    fn inert_url_text_cannot_mask_a_new_active_external_reference() {
+    fn inert_url_text_and_passive_external_references_do_not_block_adoption() {
         let mut accepted = accepted_fixture();
         accepted.insert(
             "index.html".to_owned(),
@@ -2547,10 +2544,7 @@ mod tests {
 
         let applied =
             parse_and_apply_change_set(&change_set.to_json().unwrap(), BASE, &accepted).unwrap();
-        assert!(applied.blocking_warnings.iter().any(|warning| {
-            warning.code == "new_external_origin"
-                && warning.destination == "https://tracker.example.test"
-        }));
+        assert!(applied.blocking_warnings.is_empty());
     }
 
     #[test]
@@ -2605,12 +2599,7 @@ mod tests {
         );
         let applied =
             parse_and_apply_change_set(&markup.to_json().unwrap(), BASE, &accepted).unwrap();
-        assert!(
-            applied
-                .blocking_warnings
-                .iter()
-                .any(|warning| warning.code == "new_external_origin")
-        );
+        assert!(applied.blocking_warnings.is_empty());
 
         let image_set = ChangeSetV1::new(
             BASE,

@@ -496,11 +496,14 @@ describe("C2 browser vertical slice", () => {
       within(dialog).getByRole("button", { name: "変更案を作成" }),
     );
 
-    expect(
-      await within(dialog).findByRole("status", { name: "AI処理状態" }),
-    ).toHaveTextContent("Provider応答待機・ChangeSet検証");
-    expect(within(dialog).getByText(/開始から \d+ 秒/)).toBeVisible();
-    const cancel = within(dialog).getByRole("button", {
+    const processingDialog = await screen.findByRole("dialog", {
+      name: "AI処理フェーズ",
+    });
+    expect(processingDialog).toHaveTextContent(
+      "Provider応答待機・ChangeSet検証",
+    );
+    expect(within(processingDialog).getByText(/開始から \d+ 秒/)).toBeVisible();
+    const cancel = within(processingDialog).getByRole("button", {
       name: "AI処理を取り消す",
     });
     await waitFor(() => expect(cancel).toHaveFocus());
@@ -826,7 +829,9 @@ describe("C2 browser vertical slice", () => {
       within(dialog).getByRole("button", { name: "変更案を作成" }),
     );
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(dialog).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "AI処理フェーズ" }),
+    ).toBeInTheDocument();
     resolveProposalResponse?.(
       jsonResponse({
         ...proposalResponseForAttempt(reviewedAttemptId),
@@ -865,20 +870,14 @@ describe("C2 browser vertical slice", () => {
       "src",
       `${PROPOSED_PREVIEW_ORIGIN}/preview/project-001/proposal-001/`,
     );
-    const proposedPostMessage = vi.spyOn(
-      proposedFrame.contentWindow as Window,
-      "postMessage",
+    expect(screen.getByRole("button", { name: "選択モード" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "操作モード" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: "操作モード" }));
-    await waitFor(() =>
-      expect(proposedPostMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "synapsegit-lp.action",
-          snapshotId: "proposal-001",
-        }),
-        PROPOSED_PREVIEW_ORIGIN,
-      ),
-    );
+    expect(
+      screen.getByText(/LP内のボタンはプレビュー用コンテンツです/),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Accepted" }));
     const acceptedFrame = screen.getByTitle(
@@ -888,19 +887,10 @@ describe("C2 browser vertical slice", () => {
       "src",
       `${ACCEPTED_PREVIEW_ORIGIN}/preview/project-001/revision-accepted-001/`,
     );
-    const acceptedPostMessage = vi.spyOn(
-      acceptedFrame.contentWindow as Window,
-      "postMessage",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "選択モード" }));
-    await waitFor(() =>
-      expect(acceptedPostMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "synapsegit-lp.action",
-          snapshotId: "revision-accepted-001",
-        }),
-        ACCEPTED_PREVIEW_ORIGIN,
-      ),
+    expect(screen.getByRole("button", { name: "選択モード" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "操作モード" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
     fireEvent.click(screen.getByRole("button", { name: "Proposed" }));
 

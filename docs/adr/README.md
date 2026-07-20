@@ -26,7 +26,11 @@
   deterministic Accepted static export profile
 - [ADR-0013](0013-docker-local-build-profile.md):
   Docker local-build evaluation profile
+- [ADR-0014](0014-session-provider-credentials-and-open-model-selection.md):
+  session provider credentials and open model selection
 
 Accepted ADRs are implementation decisions for the current M1 development
 baseline, not evidence that the 80% local verification or final product review
 has passed.
+
+ADR-0014 is implemented for the initial OpenAI provider slice.

@@ -250,23 +250,22 @@ describe("C10 modal keyboard and background isolation", () => {
       within(dialog).getByRole("button", { name: "変更案を作成" }),
     );
 
-    const cancel = await within(dialog).findByRole("button", {
+    const processingDialog = await screen.findByRole("dialog", {
+      name: "AI処理フェーズ",
+    });
+    const cancel = within(processingDialog).getByRole("button", {
       name: "AI処理を取り消す",
     });
     await waitFor(() => expect(cancel).toHaveFocus());
     expect(
-      within(dialog).getByRole("button", { name: "送信内容を閉じる" }),
-    ).toBeDisabled();
+      screen.queryByRole("dialog", { name: "送信内容を確認" }),
+    ).not.toBeInTheDocument();
     fireEvent.keyDown(document, { key: "Tab" });
-    expect(
-      within(dialog)
-        .getByText(/"instruction"/)
-        .closest("pre"),
-    ).toHaveFocus();
+    expect(cancel).toHaveFocus();
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(cancel).toHaveFocus();
     fireEvent.keyDown(document, { key: "Escape" });
-    expect(dialog).toBeInTheDocument();
+    expect(processingDialog).toBeInTheDocument();
 
     fireEvent.click(cancel);
     expect(
